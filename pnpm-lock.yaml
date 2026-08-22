@@ -14,6 +14,15 @@ importers:
       dsh-better-sidebar:
         specifier: 0.14.0
         version: 0.14.0
+      dsh-enpoi-provider-sync:
+        specifier: workspace:*
+        version: link:packages/enpoi-provider-sync
+
+  packages/enpoi-provider-sync:
+    dependencies:
+      schemastery:
+        specifier: ^3.18.0
+        version: 3.18.0
 
 packages:
 
