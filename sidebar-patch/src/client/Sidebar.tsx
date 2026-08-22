@@ -940,28 +940,32 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   ]
 
   const handleActivityClick = (type: string, title?: string) => {
+    const leaves = allLeaves(state.splits)
+    const rightPane = leaves.find(leaf => treeOf(state, leaf.id) === 'splits') ?? leaves[0]
+    if (rightPane === undefined) return
+
     if (state.panelOpen && activeTabType === type) {
       store.reduce(togglePanel)
       return
     }
-    if (!state.panelOpen) {
-      store.reduce(togglePanel)
+    // Always target the right panel's pane and ensure panel is expanded
+    store.reduce(s => ({
+      ...s,
+      panelOpen: true,
+      activePane: rightPane.id,
+    }))
+
+    // Single-instance per activity: re-activate the right pane's existing tab of
+    // this type instead of minting a new one on every click.
+    const existing = type === 'editor'
+      ? rightPane.tabs.find(tab => tab.type === 'editor' && tab.path === undefined)
+      : rightPane.tabs.find(tab => tab.type === type)
+
+    if (existing !== undefined) {
+      store.reduce(s => activateTabReducer(s, rightPane.id, existing.id))
+      return
     }
-    // Single-instance per activity: re-activate the pane's existing tab of
-    // this type instead of minting a new one on every click (fixes "a new
-    // terminal every time I toggle"). The editor's file-tree tab (path
-    // undefined) is the Files landing target; file tabs stay untouched.
-    const leaves = allLeaves(state.splits)
-    const pane = leaves.find(leaf => leaf.id === state.activePane) ?? leaves[0]
-    if (pane !== undefined) {
-      const existing = type === 'editor'
-        ? pane.tabs.find(tab => tab.type === 'editor' && tab.path === undefined)
-        : pane.tabs.find(tab => tab.type === type)
-      if (existing !== undefined) {
-        store.reduce(s => activateTabReducer(s, pane.id, existing.id))
-        return
-      }
-    }
+
     ctx.betterSidebar?.openTab({ type, title }, { sessionId, cwd })
   }
 
