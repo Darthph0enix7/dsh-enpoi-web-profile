@@ -940,33 +940,131 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   ]
 
   const handleActivityClick = (type: string, title?: string) => {
-    const leaves = allLeaves(state.splits)
-    const rightPane = leaves.find(leaf => treeOf(state, leaf.id) === 'splits') ?? leaves[0]
-    if (rightPane === undefined) return
+    store.reduce((s) => {
+      // 1. Sanitize any cross-panel contamination: if bottomSplits has non-terminal tabs, migrate them to splits
+      const bottomLeaves = allLeaves(s.bottomSplits)
+      const strayTabs: SidebarTab[] = []
+      for (const leaf of bottomLeaves) {
+        for (const tab of leaf.tabs) {
+          if (tab.type !== 'terminal') strayTabs.push(tab)
+        }
+      }
 
-    if (state.panelOpen && activeTabType === type) {
-      store.reduce(togglePanel)
-      return
-    }
-    // Always target the right panel's pane and ensure panel is expanded
-    store.reduce(s => ({
-      ...s,
-      panelOpen: true,
-      activePane: rightPane.id,
-    }))
+      let nextBottomSplits = s.bottomSplits
+      if (strayTabs.length > 0) {
+        for (const leaf of bottomLeaves) {
+          nextBottomSplits = mapLeaf(nextBottomSplits, leaf.id, (l) => {
+            l.tabs = l.tabs.filter(t => t.type === 'terminal')
+            if (!l.tabs.some(t => t.id === l.active)) {
+              l.active = l.tabs[l.tabs.length - 1]?.id ?? null
+            }
+          })
+        }
+      }
 
-    // Single-instance per activity: re-activate the right pane's existing tab of
-    // this type instead of minting a new one on every click.
-    const existing = type === 'editor'
-      ? rightPane.tabs.find(tab => tab.type === 'editor' && tab.path === undefined)
-      : rightPane.tabs.find(tab => tab.type === type)
+      const leaves = allLeaves(s.splits)
+      const rightPane = leaves.find(l => treeOf(s, l.id) === 'splits') ?? leaves[0]
+      if (rightPane === undefined) return s
 
-    if (existing !== undefined) {
-      store.reduce(s => activateTabReducer(s, rightPane.id, existing.id))
-      return
-    }
+      const currentActiveTab = rightPane.tabs.find(t => t.id === rightPane.active)
+      const currentActiveType = currentActiveTab?.type
 
-    ctx.betterSidebar?.openTab({ type, title }, { sessionId, cwd })
+      // 2. Toggle closed if clicking the currently active view in an open panel
+      if (s.panelOpen && currentActiveType === type) {
+        return {
+          ...s,
+          panelOpen: false,
+          bottomSplits: nextBottomSplits,
+        }
+      }
+
+      // 3. Re-activate if this tab type already exists in the right pane
+      const existing = type === 'editor'
+        ? rightPane.tabs.find(t => t.type === 'editor' && t.path === undefined)
+        : rightPane.tabs.find(t => t.type === type)
+
+      if (existing !== undefined) {
+        const activated = activateTabReducer(s, rightPane.id, existing.id)
+        return {
+          ...activated,
+          panelOpen: true,
+          activePane: rightPane.id,
+          bottomSplits: nextBottomSplits,
+        }
+      }
+
+      // 4. Mint new tab in right pane
+      const newTab: SidebarTab = {
+        id: type === 'terminal' ? `terminal:${s.nextTerminal}` : type === 'browser' ? `browser:${s.nextBrowser}` : type,
+        type,
+        title: title || (type === 'editor' ? 'Files' : type === 'git' ? 'Git' : type === 'terminal' ? 'Terminal' : type === 'subagent' ? 'Tasks' : type === 'browser' ? 'Browser' : type),
+      }
+
+      const nextSplits = mapLeaf(s.splits, rightPane.id, (leaf) => {
+        // Also adopt any stray tabs migrated from bottom panel
+        for (const stray of strayTabs) {
+          if (!leaf.tabs.some(t => t.id === stray.id || (t.type === stray.type && t.type !== 'editor'))) {
+            leaf.tabs.push(stray)
+          }
+        }
+        leaf.tabs.push(newTab)
+        leaf.active = newTab.id
+      })
+
+      return {
+        ...s,
+        panelOpen: true,
+        activePane: rightPane.id,
+        splits: nextSplits,
+        bottomSplits: nextBottomSplits,
+        nextTerminal: type === 'terminal' ? s.nextTerminal + 1 : s.nextTerminal,
+        nextBrowser: type === 'browser' ? s.nextBrowser + 1 : s.nextBrowser,
+      }
+    })
+  }
+
+  const handleBottomToggle = () => {
+    store.reduce((s) => {
+      const willBeOpen = !s.bottomOpen
+      if (!willBeOpen) {
+        return { ...s, bottomOpen: false }
+      }
+      const bottomLeaves = allLeaves(s.bottomSplits)
+      const bottomPane = bottomLeaves[0]
+      if (bottomPane) {
+        // Ensure bottom panel ONLY shows terminal tabs
+        const existingTerm = bottomPane.tabs.find(t => t.type === 'terminal')
+        if (existingTerm) {
+          const activated = activateTabReducer(s, bottomPane.id, existingTerm.id)
+          return {
+            ...activated,
+            bottomOpen: true,
+            activePane: bottomPane.id,
+            bottomOpenedOnce: true,
+          }
+        }
+        // Mint a terminal for the bottom drawer
+        const termTab: SidebarTab = {
+          id: `terminal:${s.nextTerminal}`,
+          type: 'terminal',
+          title: 'Terminal',
+        }
+        const nextBottomSplits = mapLeaf(s.bottomSplits, bottomPane.id, (leaf) => {
+          leaf.tabs = leaf.tabs.filter(t => t.type === 'terminal')
+          leaf.tabs.push(termTab)
+          leaf.active = termTab.id
+        })
+        return {
+          ...s,
+          bottomOpen: true,
+          bottomSplits: nextBottomSplits,
+          activePane: bottomPane.id,
+          nextTerminal: s.nextTerminal + 1,
+          bottomOpenedOnce: true,
+        }
+      }
+      return { ...s, bottomOpen: true, bottomOpenedOnce: true }
+    })
   }
 
   return (
@@ -999,7 +1097,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
                 type="button"
                 className={clsx(css.activityButton, state.bottomOpen && css.activityButtonActive)}
                 aria-label={state.bottomOpen ? t('collapseBottomPanel') : t('expandBottomPanel')}
-                onClick={() => { store.reduce(toggleBottomPanel) }}
+                onClick={handleBottomToggle}
               >
                 <IconPanelBottomOutline16 size={18} />
               </button>
