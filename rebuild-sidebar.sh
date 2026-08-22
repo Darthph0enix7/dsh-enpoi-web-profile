@@ -22,13 +22,19 @@ cd "$PKG_DIR"
 # customizations (any pnpm/dsh-plugin reinstall wipes them). The marker grep
 # prevents clobbering NEWER local edits with the older backup.
 PATCH_DIR="$HOME/.dsh/profiles/web/sidebar-patch"
-if [ -d "$PATCH_DIR" ] && ! grep -q "MIN_CENTER_COLUMN" "$PKG_DIR/src/client/Sidebar.tsx" 2>/dev/null; then
+if [ -d "$PATCH_DIR" ] && ! grep -q "handleBottomToggle" "$PKG_DIR/src/client/Sidebar.tsx" 2>/dev/null; then
   cp "$PATCH_DIR/src/client/Sidebar.tsx" "$PKG_DIR/src/client/Sidebar.tsx"
   cp "$PATCH_DIR/src/client/split-pane.tsx" "$PKG_DIR/src/client/split-pane.tsx"
   cp "$PATCH_DIR/src/client/layout.css" "$PKG_DIR/src/client/layout.css"
   cp "$PATCH_DIR/build-client.mjs" "$PKG_DIR/build-client.mjs"
   cp "$PATCH_DIR/build-client.cjs" "$PKG_DIR/build-client.cjs"
   echo "restored patched sidebar sources from $PATCH_DIR"
+fi
+# Host-side patches (PTY quota/eviction): restore when the eviction marker is missing.
+if [ -d "$PATCH_DIR/src" ] && ! grep -q "keysOf(sessionId).length >= this.maxPerSession" "$PKG_DIR/src/pty-manager.ts" 2>/dev/null; then
+  cp "$PATCH_DIR/src/pty-manager.ts" "$PKG_DIR/src/pty-manager.ts"
+  cp "$PATCH_DIR/src/config.ts" "$PKG_DIR/src/config.ts"
+  echo "restored patched host sources from $PATCH_DIR/src"
 fi
 
 # Point the builder at a local esbuild that exists on this machine.
@@ -39,6 +45,10 @@ if [ ! -d "$ESBUILD" ]; then
 fi
 if [ ! -d "$LIGHTNING" ]; then
   LIGHTNING="$(find "$HOME/deepseek-harness/node_modules/.pnpm" -maxdepth 2 -type d -name 'lightningcss@*' | sort | tail -1)/node_modules/lightningcss"
+fi
+ESBUILD_BIN="$ESBUILD/bin/esbuild"
+if [ ! -x "$ESBUILD_BIN" ]; then
+  ESBUILD_BIN="$HOME/deepseek-harness/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/bin/esbuild"
 fi
 
 # Rewrite the builder's absolute import paths (they may point at a version
@@ -63,5 +73,13 @@ PY
 cd "$PKG_DIR"
 node build-client.mjs
 node --check lib/client.js
+
+# Rebuild the HOST bundle too (PTY quota/eviction + host routes live in
+# lib/index.js; the npm-published copy predates our patches).
+"$ESBUILD_BIN" src/index.ts --bundle --platform=node --format=esm \
+  --outfile=lib/index.js --external:ws --external:zod --external:schemastery \
+  "--external:@deepseek-ai/*" >/dev/null
+node --check lib/index.js
+
 systemctl --user restart dsh-web.service
-echo "dsh-better-sidebar rebuilt and dsh-web restarted."
+echo "dsh-better-sidebar rebuilt (client+host) and dsh-web restarted."

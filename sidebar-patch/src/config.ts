@@ -101,7 +101,7 @@ export function resolveSidebarConfig(config: SidebarConfig | undefined): Resolve
     readLimit: config?.readLimit ?? 512 * 1024,
     mediaLimit: config?.mediaLimit ?? 20 * 1024 * 1024,
     listLimit: config?.listLimit ?? 1000,
-    terminalsPerSession: config?.terminalsPerSession ?? 3,
+    terminalsPerSession: config?.terminalsPerSession ?? 10,
     reconnectGraceMs: config?.reconnectGraceMs ?? 30_000,
     shell: config?.shell?.trim() ?? '',
     shellArgs: config?.shellArgs ?? [],
