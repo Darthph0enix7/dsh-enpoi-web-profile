@@ -1,0 +1,8 @@
+# Enpoi Harness profile patch layer (applied after every bundle layer).
+# The dsh-better-sidebar bundle ships a `!!js` double-mount guard that
+# evaluates against the loader scope at boot and has been silently failing
+# here, leaving the row disabled (no /sidebar/* host routes, no sidebar UI).
+# We no longer mount any aggregate that double-mounts this package, so the
+# standalone row is pinned enabled — no JS expression involved.
+- id: better-sidebar
+  disabled: false

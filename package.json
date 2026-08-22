@@ -1,0 +1,18 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "@linxin666/dsh-client-ui-skin-center": "^0.2.7",
+    "dsh-better-sidebar": "0.14.0"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-better-sidebar",
+        "@linxin666/dsh-client-ui-skin-center"
+      ]
+    }
+  }
+}
