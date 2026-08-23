@@ -76,6 +76,10 @@ interface ProviderProfile {
   baseURL?: string
   apiKeyEnv?: string
   models?: Array<Record<string, unknown>>
+  pool?: {
+    strategy?: string
+    identities?: Array<{ id: string, credentialRef: string, priority?: number, enabled?: boolean }>
+  }
 }
 
 function sectionOf(settings: SettingsSeam): { providers?: Record<string, ProviderProfile> } | undefined {
@@ -503,6 +507,16 @@ export function apply(ctx: Context, config: Config): void {
       if (profile.apiKeyEnv !== undefined) {
         const hit = credentials === undefined ? undefined : await credentials.resolve(profile.apiKeyEnv)
         key = hit?.value
+      } else if (profile.pool?.identities !== undefined && profile.pool.identities.length > 0) {
+        // Pooled routes carry no single apiKeyEnv: discover with the
+        // highest-priority enabled identity's credential.
+        const primary = [...profile.pool.identities]
+          .filter(identity => identity.enabled !== false)
+          .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))[0]
+        if (primary !== undefined) {
+          const hit = credentials === undefined ? undefined : await credentials.resolve(primary.credentialRef)
+          key = hit?.value
+        }
       }
       try {
         const live = await fetchModels(baseURL, key)
