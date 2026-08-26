@@ -1318,7 +1318,7 @@ var Config = import_schemastery.default.object({
   model: import_schemastery.default.string().default("mimo-v2.5-free"),
   fallbackProvider: import_schemastery.default.string().default("antigravity"),
   fallbackModel: import_schemastery.default.string().default("gemini-3.7-flash-tiered"),
-  debounceMs: import_schemastery.default.number().default(3e4),
+  debounceMs: import_schemastery.default.number().default(15e3),
   leaseMs: import_schemastery.default.number().default(45e3),
   maxInputEvents: import_schemastery.default.number().default(80),
   maxOutputTokens: import_schemastery.default.number().default(2048)

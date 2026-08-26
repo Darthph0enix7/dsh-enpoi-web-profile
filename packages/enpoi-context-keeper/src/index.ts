@@ -60,7 +60,7 @@ export const Config = Schema.object({
   model: Schema.string().default('mimo-v2.5-free'),
   fallbackProvider: Schema.string().default('antigravity'),
   fallbackModel: Schema.string().default('gemini-3.7-flash-tiered'),
-  debounceMs: Schema.number().default(30_000),
+  debounceMs: Schema.number().default(15_000),
   leaseMs: Schema.number().default(45_000),
   maxInputEvents: Schema.number().default(80),
   maxOutputTokens: Schema.number().default(2048),
