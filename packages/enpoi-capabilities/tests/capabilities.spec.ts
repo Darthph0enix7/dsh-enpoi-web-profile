@@ -134,9 +134,9 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
       skills: { 'ue-mcp-skill': false },
     })
     const snapshot = formatCapabilitiesSnapshot(partiallyDisabled)
-    expect(snapshot).toContain('Disabled Capabilities:')
+    expect(snapshot).toContain('Disabled Capabilities (for this query):')
     expect(snapshot).toContain('roundtable')
     expect(snapshot).toContain('ue-mcp-skill')
-    expect(snapshot).toContain('Instruction: Disabled tools and skills must not be invoked.')
+    expect(snapshot).toContain('disabled by operator preference for the current query only')
   })
 })

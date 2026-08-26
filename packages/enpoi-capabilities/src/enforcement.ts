@@ -32,7 +32,7 @@ export function evaluateToolCall(
   if (state.tools[toolName] === false) {
     return {
       allowed: false,
-      syntheticResult: `[CAPABILITY_DISABLED] Tool '${toolName}' is currently disabled by operator preference. Do not attempt to invoke it.`,
+      syntheticResult: `[CAPABILITY_DISABLED] Tool '${toolName}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`,
     }
   }
 
@@ -42,7 +42,7 @@ export function evaluateToolCall(
     if (state.tools[worker] === false) {
       return {
         allowed: false,
-        syntheticResult: `[CAPABILITY_DISABLED] Subagent worker '${worker}' is currently disabled by operator preference. Do not attempt to invoke it.`,
+        syntheticResult: `[CAPABILITY_DISABLED] Subagent worker '${worker}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`,
       }
     }
   }
@@ -53,7 +53,7 @@ export function evaluateToolCall(
     if (state.skills[skillName] === false) {
       return {
         allowed: false,
-        syntheticResult: `[SKILL_DISABLED] Skill '${skillName}' is currently disabled by operator preference. Do not attempt to load it.`,
+        syntheticResult: `[SKILL_DISABLED] Skill '${skillName}' is currently disabled by operator preference for this query. Do not attempt to load it in this turn.`,
       }
     }
   }
@@ -68,7 +68,7 @@ export function evaluateToolCall(
       if (state.mcp[mcpKey] === false || state.mcp[serverPrefix] === false) {
         return {
           allowed: false,
-          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${mcpKey}' is currently disabled by operator preference. Do not attempt to invoke it.`,
+          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${mcpKey}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`,
         }
       }
     }
@@ -99,5 +99,5 @@ export function formatCapabilitiesSnapshot(state: CapabilitiesState): string {
     return 'All capabilities, subagents, and skills active.'
   }
 
-  return `Disabled Capabilities: [${allDisabled.join(', ')}]. Instruction: Disabled tools and skills must not be invoked.`
+  return `Disabled Capabilities (for this query): [${allDisabled.join(', ')}]. Note: These capabilities are disabled by operator preference for the current query only (do not attempt to invoke them). When re-enabled by the operator in future queries, they become available again.`
 }
