@@ -111,13 +111,50 @@ function initialCaps(): CapabilitiesState {
 let globalCapsState: CapabilitiesState = initialCaps()
 const listeners = new Set<() => void>()
 
+/** Live skill rows discovered host-side via skill.list (OpenCode-parity dynamics). */
+export interface DynamicSkillEntry {
+  name: string
+  description: string
+  modelInvocable: boolean
+}
+
+let globalSkills: DynamicSkillEntry[] = []
+let snapshotCache: { caps: CapabilitiesState; skills: DynamicSkillEntry[] } = { caps: globalCapsState, skills: globalSkills }
+
 function subscribe(fn: () => void) {
   listeners.add(fn)
   return () => { listeners.delete(fn) }
 }
 
 function notify() {
+  snapshotCache = { caps: globalCapsState, skills: globalSkills }
   for (const fn of listeners) fn()
+}
+
+/** Fetch the real skill catalog for the session's project root. */
+export async function refreshSkills(sessionId: string): Promise<void> {
+  if (!sessionId) return
+  try {
+    const res = await fetch('/api/skill.list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'skill.list',
+        rpcId: 'skill-list-caps',
+        payload: { sessionId },
+      }),
+    })
+    if (!res.ok) return
+    const json = await res.json() as { result?: { value?: { skills?: DynamicSkillEntry[] } } }
+    const skills = json?.result?.value?.skills
+    if (Array.isArray(skills)) {
+      globalSkills = skills
+      notify()
+    }
+  } catch {
+    // keep last known catalog on transient failures
+  }
 }
 
 // Initial prime from describe
@@ -201,11 +238,26 @@ export interface CapabilitiesViewProps {
   visible: boolean
 }
 
-export function CapabilitiesView(_props: CapabilitiesViewProps): React.ReactNode {
-  const caps = useSyncExternalStore(subscribe, () => globalCapsState)
+export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode {
+  const view = useSyncExternalStore(subscribe, () => snapshotCache)
+  const caps = view.caps
+
+  // Refresh the live skill catalog every time the drawer opens (and on mount),
+  // so newly created/removed skill folders are reflected immediately.
+  const sessionId = props.scope?.sessionId ?? ''
+  React.useEffect(() => {
+    if (props.visible && sessionId) void refreshSkills(sessionId)
+  }, [props.visible, sessionId])
 
   const mcpList = KNOWN_CAPABILITIES.filter(c => c.kind === 'mcp')
-  const skillList = KNOWN_CAPABILITIES.filter(c => c.kind === 'skill')
+  const skillList: CapabilityDescriptor[] = view.skills.map(s => ({
+    id: s.name,
+    name: s.name.split('-').map(w => (w.length <= 3 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(' '),
+    kind: 'skill',
+    category: 'skills',
+    description: s.description,
+    defaultEnabled: true,
+  }))
   const subagentList = KNOWN_CAPABILITIES.filter(c => c.kind === 'tool' && (c.category === 'supervision' || c.category === 'council' || c.category === 'workers'))
   const coreToolList = KNOWN_CAPABILITIES.filter(c => c.kind === 'tool' && c.category === 'core-tools')
 
@@ -376,7 +428,20 @@ export function CapabilitiesView(_props: CapabilitiesViewProps): React.ReactNode
       </div>
 
       {renderGroup('MCP Tool Suites', iconPlug(), mcpList, 'mcp')}
-      {renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill')}
+      {skillList.length > 0
+        ? renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill')
+        : (
+          <div style={{
+            background: 'rgba(13, 20, 35, 0.65)',
+            border: '1px solid rgba(255, 255, 255, 0.06)',
+            borderRadius: '8px',
+            padding: '10px',
+            fontSize: '10.5px',
+            color: '#94a3b8',
+          }}>
+            No skills discovered yet — open a session to load the live catalog. Drop a folder with a SKILL.md into ~/.dsh/skills/ to add one.
+          </div>
+        )}
       {renderGroup('Subagents & Debaters', iconCouncil(), subagentList, 'tool')}
       {renderGroup('Core System Tools', iconTerminal(), coreToolList, 'tool')}
     </div>

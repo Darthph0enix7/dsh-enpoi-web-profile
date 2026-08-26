@@ -56,8 +56,8 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  provider: Schema.string().default('opencode'),
-  model: Schema.string().default('mimo-v2.5-free'),
+  provider: Schema.string().default('freellmapi'),
+  model: Schema.string().default('auto'),
   fallbackProvider: Schema.string().default('antigravity'),
   fallbackModel: Schema.string().default('gemini-3.7-flash-tiered'),
   debounceMs: Schema.number().default(15_000),

@@ -8,9 +8,10 @@
     - id: enpoi-context-keeper
       name: 'dsh-enpoi-context-keeper'
       config:
-        # Flash-tier primary route + one fallback (soft-degrading, never blocks).
-        provider: deepseek
-        model: deepseek-v4-flash
+        # Free-quota primary (Adam: freellmapi for background/repetitive work)
+        # + one fallback (soft-degrading, never blocks).
+        provider: freellmapi
+        model: auto
         fallbackProvider: antigravity
         fallbackModel: gemini-3.7-flash-tiered
         debounceMs: 30000

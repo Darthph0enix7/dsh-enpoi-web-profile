@@ -87,8 +87,10 @@ export function apply(ctx: Context): void {
     if (!Array.isArray(messages)) return decision
 
     const state = initialCapabilitiesState(getGlobalDefaults())
+    // Key-driven: ANY skill disabled in settings is stripped — including skills
+    // created on disk after this plugin was written (OpenCode-parity dynamics).
     const disabledSkillIds = new Set(
-      KNOWN_CAPABILITIES.filter(cap => cap.kind === 'skill' && state.skills[cap.id] === false).map(cap => cap.id),
+      Object.entries(state.skills).filter(([, enabled]) => enabled === false).map(([id]) => id),
     )
     if (disabledSkillIds.size === 0) return decision
 
