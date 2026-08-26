@@ -2274,7 +2274,13 @@ var PersonaModelSchema = import_schemastery.default.object({
   reasoningEffort: import_schemastery.default.string()
 });
 var OrchestrationSettingsSchema = import_schemastery.default.object({
-  personas: import_schemastery.default.dict(PersonaModelSchema).default({})
+  personas: import_schemastery.default.dict(PersonaModelSchema).default({}),
+  uiPreferences: import_schemastery.default.object({
+    hiddenModels: import_schemastery.default.any(),
+    favorites: import_schemastery.default.any(),
+    providerOrder: import_schemastery.default.any(),
+    defaultModel: import_schemastery.default.any()
+  }).default({})
 });
 function apply(ctx) {
   ctx.inject(["settings"], (scope) => {

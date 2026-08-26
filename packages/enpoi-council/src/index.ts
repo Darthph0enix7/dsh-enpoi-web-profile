@@ -26,6 +26,12 @@ const PersonaModelSchema = Schema.object({
 
 const OrchestrationSettingsSchema = Schema.object({
   personas: Schema.dict(PersonaModelSchema).default({}),
+  uiPreferences: Schema.object({
+    hiddenModels: Schema.any(),
+    favorites: Schema.any(),
+    providerOrder: Schema.any(),
+    defaultModel: Schema.any(),
+  }).default({}),
 })
 
 export function apply(ctx: Context): void {
