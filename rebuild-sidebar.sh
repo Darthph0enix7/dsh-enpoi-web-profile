@@ -22,19 +22,11 @@ cd "$PKG_DIR"
 # customizations (any pnpm/dsh-plugin reinstall wipes them). The marker grep
 # prevents clobbering NEWER local edits with the older backup.
 PATCH_DIR="$HOME/.dsh/profiles/web/sidebar-patch"
-if [ -d "$PATCH_DIR" ] && ! grep -q "handleBottomToggle" "$PKG_DIR/src/client/Sidebar.tsx" 2>/dev/null; then
-  cp "$PATCH_DIR/src/client/Sidebar.tsx" "$PKG_DIR/src/client/Sidebar.tsx"
-  cp "$PATCH_DIR/src/client/split-pane.tsx" "$PKG_DIR/src/client/split-pane.tsx"
-  cp "$PATCH_DIR/src/client/layout.css" "$PKG_DIR/src/client/layout.css"
-  cp "$PATCH_DIR/build-client.mjs" "$PKG_DIR/build-client.mjs"
-  cp "$PATCH_DIR/build-client.cjs" "$PKG_DIR/build-client.cjs"
-  echo "restored patched sidebar sources from $PATCH_DIR"
-fi
-# Host-side patches (PTY quota/eviction): restore when the eviction marker is missing.
-if [ -d "$PATCH_DIR/src" ] && ! grep -q "keysOf(sessionId).length >= this.maxPerSession" "$PKG_DIR/src/pty-manager.ts" 2>/dev/null; then
-  cp "$PATCH_DIR/src/pty-manager.ts" "$PKG_DIR/src/pty-manager.ts"
-  cp "$PATCH_DIR/src/config.ts" "$PKG_DIR/src/config.ts"
-  echo "restored patched host sources from $PATCH_DIR/src"
+if [ -d "$PATCH_DIR" ]; then
+  cp -r "$PATCH_DIR/src/"* "$PKG_DIR/src/" 2>/dev/null || true
+  cp "$PATCH_DIR/build-client.mjs" "$PKG_DIR/build-client.mjs" 2>/dev/null || true
+  cp "$PATCH_DIR/build-client.cjs" "$PKG_DIR/build-client.cjs" 2>/dev/null || true
+  echo "synced patched sidebar sources from $PATCH_DIR"
 fi
 
 # Point the builder at a local esbuild that exists on this machine.
