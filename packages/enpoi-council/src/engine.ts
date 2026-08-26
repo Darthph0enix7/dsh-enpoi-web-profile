@@ -115,6 +115,41 @@ const COUNCIL_DENIED_TOOLS = [
 ]
 
 /**
+ * Resolve and apply configured persona model from Settings > enpoi-orchestration.personas.
+ * If no specific model is configured for this persona, no request/header is appended,
+ * so the child session naturally inherits the model of the parent agent that dispatched it.
+ */
+export function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const doc = settings?.get?.('enpoi-orchestration')
+    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
+    const entry = doc?.personas?.[key]
+    if (entry && entry.provider && entry.model) {
+      const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
+      const childSession = sessions?.get?.(childId)
+      if (childSession && typeof childSession.append === 'function') {
+        childSession.append('request/header', {
+          header: {
+            config: {
+              provider: entry.provider,
+              model: entry.model,
+              ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+            },
+          },
+          reason: 'custom',
+        })
+        councilDiag(`Applied persona model for ${persona}: ${entry.provider}/${entry.model}`)
+      }
+    } else {
+      councilDiag(`Persona ${persona} has no override — inheriting parent model`)
+    }
+  } catch (err: unknown) {
+    councilDiag(`applyPersonaModel warning for ${persona}: ${String(err)}`)
+  }
+}
+
+/**
  * Start one continuable debater fiber (Round 1).
  * Pure reasoning invariant (I14): toolFilter denies mutation/orchestration tools.
  */
@@ -142,6 +177,9 @@ export async function startDebaterFiber(
   if (!started.childId || started.childId === 'null' || !started.childId.includes('-')) {
     throw new Error(`council debater spawn returned an invalid child id for ${persona}: ${String(started.childId)}`)
   }
+
+  // Apply individual persona model if configured in Settings > Fleet
+  applyPersonaModel(ctx, started.childId, persona)
 
   return {
     persona,

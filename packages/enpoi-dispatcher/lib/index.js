@@ -311,6 +311,31 @@ function buildTaskCard(worker, args, brief) {
   lines.push("Finish by filling the structured return: changed (files you modified), verified (true if you verified your work), NOT_verified (changed files you could not verify), remember_later (facts worth remembering).");
   return lines.join("\n");
 }
+function applyPersonaModel(ctx, childId, persona) {
+  try {
+    const settings = ctx.get("settings");
+    const doc = settings?.get?.("enpoi-orchestration");
+    const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
+    const entry = doc?.personas?.[key];
+    if (entry && entry.provider && entry.model) {
+      const sessions = ctx.get("sessions");
+      const childSession = sessions?.get?.(childId);
+      if (childSession && typeof childSession.append === "function") {
+        childSession.append("request/header", {
+          header: {
+            config: {
+              provider: entry.provider,
+              model: entry.model,
+              ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+            }
+          },
+          reason: "custom"
+        });
+      }
+    }
+  } catch {
+  }
+}
 function apply(ctx) {
   ctx.inject(["tools", "subagents"], (injected) => {
     registerDispatcher(injected);
@@ -395,6 +420,9 @@ function registerDispatcher(ctx) {
           outputSchema: SUBAGENT_RETURN_SCHEMA,
           signal: bg?.signal ?? exec.signal
         });
+        if (run.localAgent?.session?.id) {
+          applyPersonaModel(ctx, run.localAgent.session.id, args.worker);
+        }
         if (bg !== null) {
           handedOff = true;
           void (async () => {

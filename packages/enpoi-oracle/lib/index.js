@@ -98,6 +98,31 @@ function buildDelta(brief, args) {
   }
   return lines.join("\n");
 }
+function applyPersonaModel(ctx, childId, persona) {
+  try {
+    const settings = ctx.get("settings");
+    const doc = settings?.get?.("enpoi-orchestration");
+    const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
+    const entry = doc?.personas?.[key];
+    if (entry && entry.provider && entry.model) {
+      const sessions = ctx.get("sessions");
+      const childSession = sessions?.get?.(childId);
+      if (childSession && typeof childSession.append === "function") {
+        childSession.append("request/header", {
+          header: {
+            config: {
+              provider: entry.provider,
+              model: entry.model,
+              ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+            }
+          },
+          reason: "custom"
+        });
+      }
+    }
+  } catch {
+  }
+}
 function parseVerdict(text) {
   const matches = [...text.matchAll(/\{(?:[^{}]|\{[^{}]*\})*\}/g)];
   for (let i = matches.length - 1; i >= 0; i--) {
@@ -273,6 +298,7 @@ function registerOracleTools(ctx, root) {
               throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`);
             }
             fiber.childId = started.childId;
+            applyPersonaModel(ctx, started.childId, "oracle");
             fibers.set(key, fiber);
           } catch (err) {
             fibers.delete(key);

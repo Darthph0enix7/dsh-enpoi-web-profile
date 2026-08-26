@@ -147,6 +147,31 @@ function buildDelta(brief: string | null, args: { request: string; files?: strin
 }
 
 /** Extract the VERDICT BLOCK JSON from the oracle's final message. */
+function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const doc = settings?.get?.('enpoi-orchestration')
+    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
+    const entry = doc?.personas?.[key]
+    if (entry && entry.provider && entry.model) {
+      const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
+      const childSession = sessions?.get?.(childId)
+      if (childSession && typeof childSession.append === 'function') {
+        childSession.append('request/header', {
+          header: {
+            config: {
+              provider: entry.provider,
+              model: entry.model,
+              ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+            },
+          },
+          reason: 'custom',
+        })
+      }
+    }
+  } catch {}
+}
+
 function parseVerdict(text: string): Verdict {
   // 1) Strict JSON block first.
   const matches = [...text.matchAll(/\{(?:[^{}]|\{[^{}]*\})*\}/g)]
@@ -350,6 +375,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
               throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`)
             }
             fiber.childId = started.childId
+            applyPersonaModel(ctx, started.childId, 'oracle')
             fibers.set(key, fiber)
           } catch (err) {
             fibers.delete(key)

@@ -56,8 +56,8 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  provider: Schema.string().default('deepseek'),
-  model: Schema.string().default('deepseek-v4-flash'),
+  provider: Schema.string().default('opencode'),
+  model: Schema.string().default('mimo-v2.5-free'),
   fallbackProvider: Schema.string().default('antigravity'),
   fallbackModel: Schema.string().default('gemini-3.7-flash-tiered'),
   debounceMs: Schema.number().default(30_000),

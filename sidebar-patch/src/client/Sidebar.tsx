@@ -560,7 +560,9 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     // (the activity rail owns that strip), so the shell must give up
     // panelWidth + rail — otherwise #root keeps a rail-width sliver of chat
     // under the panel's left edge and paints the "dark line" mismatch.
-    const push = width > 0 ? width + ACTIVITY_RAIL : 0
+    // When collapsed (width === 0), the shell still reserves ACTIVITY_RAIL
+    // so the slim vertical bar never covers content underneath.
+    const push = width > 0 ? width + ACTIVITY_RAIL : ACTIVITY_RAIL
     document.documentElement.style.setProperty('--dsh-sidebar-width', `${push}px`)
     document.documentElement.style.setProperty('--dsh-sidebar-height', `${height}px`)
     // The corner handle positions itself relative to the panel (CSS

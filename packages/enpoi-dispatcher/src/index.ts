@@ -159,6 +159,31 @@ function buildTaskCard(
   return lines.join('\n')
 }
 
+function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const doc = settings?.get?.('enpoi-orchestration')
+    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
+    const entry = doc?.personas?.[key]
+    if (entry && entry.provider && entry.model) {
+      const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
+      const childSession = sessions?.get?.(childId)
+      if (childSession && typeof childSession.append === 'function') {
+        childSession.append('request/header', {
+          header: {
+            config: {
+              provider: entry.provider,
+              model: entry.model,
+              ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+            },
+          },
+          reason: 'custom',
+        })
+      }
+    }
+  } catch {}
+}
+
 export function apply(ctx: Context): void {
   ctx.inject(['tools', 'subagents'], (injected) => {
     registerDispatcher(injected)
@@ -247,6 +272,9 @@ function registerDispatcher(ctx: Context): void {
           outputSchema: SUBAGENT_RETURN_SCHEMA,
           signal: bg?.signal ?? exec.signal,
         })
+        if (run.localAgent?.session?.id) {
+          applyPersonaModel(ctx, run.localAgent.session.id, args.worker)
+        }
         if (bg !== null) {
           handedOff = true
           void (async () => {

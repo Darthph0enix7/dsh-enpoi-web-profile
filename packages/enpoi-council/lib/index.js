@@ -366,6 +366,35 @@ var COUNCIL_DENIED_TOOLS = [
   "memory_rescind",
   "memory_confirm"
 ];
+function applyPersonaModel(ctx, childId, persona) {
+  try {
+    const settings = ctx.get("settings");
+    const doc = settings?.get?.("enpoi-orchestration");
+    const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
+    const entry = doc?.personas?.[key];
+    if (entry && entry.provider && entry.model) {
+      const sessions = ctx.get("sessions");
+      const childSession = sessions?.get?.(childId);
+      if (childSession && typeof childSession.append === "function") {
+        childSession.append("request/header", {
+          header: {
+            config: {
+              provider: entry.provider,
+              model: entry.model,
+              ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+            }
+          },
+          reason: "custom"
+        });
+        councilDiag(`Applied persona model for ${persona}: ${entry.provider}/${entry.model}`);
+      }
+    } else {
+      councilDiag(`Persona ${persona} has no override \u2014 inheriting parent model`);
+    }
+  } catch (err) {
+    councilDiag(`applyPersonaModel warning for ${persona}: ${String(err)}`);
+  }
+}
 async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialPromptText, signal) {
   const denied = COUNCIL_DENIED_TOOLS.filter((name2) => ctx.tools.get(name2) !== void 0);
   const started = await ctx.subagents.startContinuable({
@@ -382,6 +411,7 @@ async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialProm
   if (!started.childId || started.childId === "null" || !started.childId.includes("-")) {
     throw new Error(`council debater spawn returned an invalid child id for ${persona}: ${String(started.childId)}`);
   }
+  applyPersonaModel(ctx, started.childId, persona);
   return {
     persona,
     childId: started.childId,

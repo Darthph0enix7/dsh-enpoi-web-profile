@@ -1314,8 +1314,8 @@ function diag(line) {
   }
 }
 var Config = import_schemastery.default.object({
-  provider: import_schemastery.default.string().default("deepseek"),
-  model: import_schemastery.default.string().default("deepseek-v4-flash"),
+  provider: import_schemastery.default.string().default("opencode"),
+  model: import_schemastery.default.string().default("mimo-v2.5-free"),
   fallbackProvider: import_schemastery.default.string().default("antigravity"),
   fallbackModel: import_schemastery.default.string().default("gemini-3.7-flash-tiered"),
   debounceMs: import_schemastery.default.number().default(3e4),
