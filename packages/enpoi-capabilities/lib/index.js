@@ -1,6 +1,8 @@
 // src/index.ts
 import Schema from "schemastery";
 import { settingsNamespace } from "@deepseek-ai/dsh-settings";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 
 // src/types.ts
 var PROTECTED_CAPABILITIES = /* @__PURE__ */ new Set([
@@ -114,7 +116,7 @@ function formatCapabilitiesSnapshot(state) {
 
 // src/index.ts
 var name = "enpoi-capabilities";
-var inject = ["tools", "systemPrompt", "settings"];
+var inject = ["tools", "systemPrompt", "settings", "timer"];
 var ORCH_NS = settingsNamespace("enpoi-orchestration");
 var CapabilitiesSchema = Schema.object({
   tools: Schema.dict(Schema.boolean()).default({}),
@@ -147,6 +149,81 @@ function apply(ctx) {
     });
     ctx.effect(() => disposeContext, "enpoi-capabilities: runtime context snapshot");
   }
+  import("@deepseek-ai/dsh-mcp-client").then(async (mcpClient) => {
+    const mounted = /* @__PURE__ */ new Map();
+    const mountedPending = /* @__PURE__ */ new Set();
+    function getServerCatalog() {
+      try {
+        const settings = ctx.get("settings");
+        return settings?.get?.(ORCH_NS)?.mcpServers ?? {};
+      } catch {
+        return {};
+      }
+    }
+    function resolveCredential(name2) {
+      if (!name2) return void 0;
+      if (process.env[name2]) return process.env[name2];
+      try {
+        const raw = readFileSync(`${homedir()}/.dsh/.credentials.yaml`, "utf8");
+        const m = raw.match(new RegExp(`^\\s{2}${name2}:\\s*(.+)$`, "m"));
+        return m?.[1]?.trim();
+      } catch {
+        return void 0;
+      }
+    }
+    async function syncMcpMounts() {
+      const state = initialCapabilitiesState(getGlobalDefaults());
+      const catalog = getServerCatalog();
+      const want = new Set(
+        Object.entries(catalog).filter(([id]) => state.mcp[id] === true).map(([id]) => id)
+      );
+      if (want.size > 0 || mounted.size > 0) {
+        process.stderr.write(`[enpoi-capabilities] mcp sync: want=[${[...want].join(",")}] mounted=[${[...mounted.keys()].join(",")}]
+`);
+      }
+      for (const [id, fiber] of [...mounted]) {
+        if (!want.has(id)) {
+          mounted.delete(id);
+          void fiber.dispose().catch(() => {
+          });
+        }
+      }
+      for (const id of want) {
+        if (mounted.has(id) || mountedPending.has(id)) continue;
+        const def = catalog[id];
+        const serverName = def.serverName ?? id.replace(/-mcp$/, "");
+        if (!def.url) continue;
+        mountedPending.add(id);
+        try {
+          const apiKey = resolveCredential(def.apiKeyEnv);
+          const headers = { ...def.headers ?? {} };
+          if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+          const fiber = ctx.plugin(mcpClient.apply, {
+            transport: "streamable-http",
+            serverName,
+            url: def.url,
+            headers,
+            toolCallTimeoutMs: def.toolCallTimeoutMs ?? 6e4,
+            failOnStartupError: false
+          });
+          await fiber;
+          mounted.set(id, fiber);
+        } catch (error) {
+          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${String(error)}
+`);
+        } finally {
+          mountedPending.delete(id);
+        }
+      }
+    }
+    void syncMcpMounts();
+    ctx.setTimeout(() => void syncMcpMounts(), 3e3);
+    ctx.on("settings/updated", ((ns) => {
+      if (String(ns) !== "enpoi-orchestration") return;
+      void syncMcpMounts();
+    }));
+  }).catch(() => {
+  });
   ctx.on("agent/pre-step", (async (_params, next) => {
     const decision = await next();
     if (decision.kind !== "enter") return decision;

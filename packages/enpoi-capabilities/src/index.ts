@@ -19,13 +19,15 @@
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from 'schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import type { CapabilitiesState } from './types'
 import { KNOWN_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
 import { evaluateToolCall, formatCapabilitiesSnapshot } from './enforcement'
 
 export const name = 'enpoi-capabilities'
-export const inject = ['tools', 'systemPrompt', 'settings']
+export const inject = ['tools', 'systemPrompt', 'settings', 'timer']
 
 const ORCH_NS = settingsNamespace('enpoi-orchestration')
 
@@ -68,6 +70,94 @@ export function apply(ctx: Context): void {
     })
     ctx.effect(() => disposeContext, 'enpoi-capabilities: runtime context snapshot')
   }
+
+  // 2b. MCP mounting (B5): capabilities.mcp[id]===true spawns a live mcp-client
+  //     fiber for the server catalog entry (enpoi-orchestration.mcpServers) —
+  //     its mcp__<server>__* tools register and are injected like native tools.
+  //     false = the fiber is disposed and the tools vanish from the schema
+  //     entirely (Adam's model: "disabling = not injected at all"). The B1
+  //     guard stays as the execution backstop for in-flight turns.
+  import('@deepseek-ai/dsh-mcp-client').then(async (mcpClient) => {
+    type Fiber = { dispose: () => Promise<void> } & PromiseLike<unknown>
+    const mounted = new Map<string, Fiber>()
+    const mountedPending = new Set<string>()
+
+    function getServerCatalog(): Record<string, { serverName?: string; transport?: string; url?: string; headers?: Record<string, string>; toolCallTimeoutMs?: number; apiKeyEnv?: string }> {
+      try {
+        const settings = ctx.get('settings') as { get?: (ns: unknown) => { mcpServers?: Record<string, { serverName?: string; transport?: string; url?: string; headers?: Record<string, string>; toolCallTimeoutMs?: number; apiKeyEnv?: string }> } } | undefined
+        return settings?.get?.(ORCH_NS)?.mcpServers ?? {}
+      } catch {
+        return {}
+      }
+    }
+
+    /** Resolve apiKeyEnv: process.env first, then ~/.dsh/.credentials.yaml refs (never logged). */
+    function resolveCredential(name: string | undefined): string | undefined {
+      if (!name) return undefined
+      if (process.env[name]) return process.env[name]
+      try {
+        const raw = readFileSync(`${homedir()}/.dsh/.credentials.yaml`, 'utf8')
+        const m = raw.match(new RegExp(`^\\s{2}${name}:\\s*(.+)$`, 'm'))
+        return m?.[1]?.trim()
+      } catch {
+        return undefined
+      }
+    }
+
+    async function syncMcpMounts(): Promise<void> {
+      const state = initialCapabilitiesState(getGlobalDefaults())
+      const catalog = getServerCatalog()
+      const want = new Set(
+        Object.entries(catalog)
+          .filter(([id]) => state.mcp[id] === true)
+          .map(([id]) => id),
+      )
+      if (want.size > 0 || mounted.size > 0) {
+        process.stderr.write(`[enpoi-capabilities] mcp sync: want=[${[...want].join(',')}] mounted=[${[...mounted.keys()].join(',')}]\n`)
+      }
+      // Unmount disabled / removed servers
+      for (const [id, fiber] of [...mounted]) {
+        if (!want.has(id)) {
+          mounted.delete(id)
+          void fiber.dispose().catch(() => {})
+        }
+      }
+      // Mount newly enabled servers
+      for (const id of want) {
+        if (mounted.has(id) || mountedPending.has(id)) continue
+        const def = catalog[id]
+        const serverName = def.serverName ?? id.replace(/-mcp$/, '')
+        if (!def.url) continue
+        mountedPending.add(id)
+        try {
+          const apiKey = resolveCredential(def.apiKeyEnv)
+          const headers: Record<string, string> = { ...(def.headers ?? {}) }
+          if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+          const fiber = ctx.plugin(mcpClient.apply, {
+            transport: 'streamable-http',
+            serverName,
+            url: def.url,
+            headers,
+            toolCallTimeoutMs: def.toolCallTimeoutMs ?? 60_000,
+            failOnStartupError: false,
+          }) as unknown as Fiber
+          await fiber
+          mounted.set(id, fiber)
+        } catch (error) {
+          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${String(error)}\n`)
+        } finally {
+          mountedPending.delete(id)
+        }
+      }
+    }
+
+    void syncMcpMounts()
+    ctx.setTimeout(() => void syncMcpMounts(), 3000)
+    ctx.on('settings/updated', ((ns: unknown) => {
+      if (String(ns) !== 'enpoi-orchestration') return
+      void syncMcpMounts()
+    }) as (...args: unknown[]) => unknown)
+  }).catch(() => {})
 
   // 3. Invariant B4: Disabled skills are stripped from the skill-catalog message
   //    before it reaches the model. The catalog listener (tool-skill) appends a
