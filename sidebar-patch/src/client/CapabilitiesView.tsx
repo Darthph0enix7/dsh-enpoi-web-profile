@@ -3,6 +3,43 @@ import type { Context } from '../context-types.ts'
 import type { SidebarStore, SidebarTab } from '../state.ts'
 import type { SessionScope } from '../api.ts'
 
+/** Minimal 12px monochrome glyphs (currentColor) matching the Liquid Glass theme. */
+function iconPlug(size = 12): React.ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+      <path d="M5.5 1.5v3M10.5 1.5v3M3.5 7h9v1.5a4.5 4.5 0 0 1-9 0V7ZM8 13v1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function iconSparkle(size = 12): React.ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+      <path d="M8 1.5 9.3 6.7 14.5 8 9.3 9.3 8 14.5 6.7 9.3 1.5 8 6.7 6.7 8 1.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function iconCouncil(size = 12): React.ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+      <circle cx="8" cy="3.75" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="3.5" cy="11.75" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="12.5" cy="11.75" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M6.6 5.4 4.9 9.9M9.4 5.4l1.7 4.5M5.5 11.75h5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function iconTerminal(size = 12): React.ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="m4.75 6.5 2 1.75-2 1.75M8.75 10.25h2.75" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export interface CapabilitiesState {
   tools: Record<string, boolean>
   skills: Record<string, boolean>
@@ -172,7 +209,7 @@ export function CapabilitiesView(_props: CapabilitiesViewProps): React.ReactNode
   const subagentList = KNOWN_CAPABILITIES.filter(c => c.kind === 'tool' && (c.category === 'supervision' || c.category === 'council' || c.category === 'workers'))
   const coreToolList = KNOWN_CAPABILITIES.filter(c => c.kind === 'tool' && c.category === 'core-tools')
 
-  const renderGroup = (title: string, icon: string, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp') => {
+  const renderGroup = (title: string, icon: React.ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp') => {
     const activeCount = items.filter(item => {
       if (kind === 'tool') return caps.tools[item.id] !== false
       if (kind === 'skill') return caps.skills[item.id] !== false
@@ -203,8 +240,8 @@ export function CapabilitiesView(_props: CapabilitiesViewProps): React.ReactNode
           paddingBottom: '4px',
           borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span>{icon}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#8b9bb4' }}>
+            {icon}
             <span>{title}</span>
           </div>
           <span style={{
@@ -338,10 +375,10 @@ export function CapabilitiesView(_props: CapabilitiesViewProps): React.ReactNode
         <p style={{ fontSize: '10.5px', color: '#94a3b8', margin: 0 }}>Toggle MCPs, Skills & Subagents in real time</p>
       </div>
 
-      {renderGroup('MCP Tool Suites', '🔌', mcpList, 'mcp')}
-      {renderGroup('Specialist Skills', '🧩', skillList, 'skill')}
-      {renderGroup('Subagents & Debaters', '🛡️', subagentList, 'tool')}
-      {renderGroup('Core System Tools', '⚙️', coreToolList, 'tool')}
+      {renderGroup('MCP Tool Suites', iconPlug(), mcpList, 'mcp')}
+      {renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill')}
+      {renderGroup('Subagents & Debaters', iconCouncil(), subagentList, 'tool')}
+      {renderGroup('Core System Tools', iconTerminal(), coreToolList, 'tool')}
     </div>
   )
 }

@@ -285,7 +285,9 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
       title: () => 'Capabilities & Tools',
       icon: (size: number) => (
         <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M6 2.5C6 1.94772 6.44772 1.5 7 1.5H9C9.55228 1.5 10 1.94772 10 2.5V3.5H12.5C13.0523 3.5 13.5 3.94772 13.5 4.5V7C14.0523 7 14.5 7.44772 14.5 8V10C14.5 10.5523 14.0523 11 13.5 11V13.5C13.5 14.0523 13.0523 14.5 12.5 14.5H10V13.5C10 12.9477 9.55228 12.5 9 12.5H7C6.44772 12.5 6 12.9477 6 13.5V14.5H3.5C2.94772 14.5 2.5 14.0523 2.5 13.5V11C1.94772 11 1.5 10.5523 1.5 10V8C1.5 7.44772 1.94772 7 2.5 7V4.5C2.5 3.94772 2.94772 3.5 3.5 3.5H6V2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+          <path d="M2 4.75h12M2 11.25h12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          <circle cx="10.25" cy="4.75" r="2" stroke="currentColor" strokeWidth="1.3" />
+          <circle cx="5.75" cy="11.25" r="2" stroke="currentColor" strokeWidth="1.3" />
         </svg>
       ),
       order: 60,
