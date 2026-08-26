@@ -1,2 +1,4 @@
-- id: dsh-enpoi-capabilities
-  disabled: false
+# dsh-enpoi-capabilities — capabilities control center (guard + runtime-context line + skill shadows).
+- insert:
+    - id: enpoi-capabilities
+      name: 'dsh-enpoi-capabilities'

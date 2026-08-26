@@ -99,5 +99,5 @@ export function formatCapabilitiesSnapshot(state: CapabilitiesState): string {
     return 'All capabilities, subagents, and skills active.'
   }
 
-  return `Disabled Capabilities (for this query): [${allDisabled.join(', ')}]. Note: These capabilities are disabled by operator preference for the current query only (do not attempt to invoke them). When re-enabled by the operator in future queries, they become available again.`
+  return `Disabled Capabilities (for this query): [${[...new Set(allDisabled)].join(', ')}]. Note: These capabilities are disabled by operator preference for the current query only (do not attempt to invoke them). When re-enabled by the operator in future queries, they become available again.`
 }
