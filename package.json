@@ -13,7 +13,11 @@
     "dsh-enpoi-dispatcher": "workspace:*",
     "dsh-enpoi-cascade": "workspace:*",
     "dsh-enpoi-memory": "workspace:*",
-    "dsh-enpoi-council": "workspace:*"
+    "dsh-enpoi-council": "workspace:*",
+    "dsh-enpoi-capabilities": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
   },
   "dsh": {
     "profile": {
@@ -28,7 +32,8 @@
         "dsh-enpoi-runtime-probe",
         "dsh-enpoi-cascade",
         "dsh-enpoi-memory",
-        "dsh-enpoi-council"
+        "dsh-enpoi-council",
+        "dsh-enpoi-capabilities"
       ]
     }
   }
