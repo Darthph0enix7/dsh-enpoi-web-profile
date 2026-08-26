@@ -9,7 +9,10 @@
 # Both are fixed in the plugin's src/ + build-client.mjs (React shim banner).
 # Run this after any `dsh plugin`/pnpm reinstall of the profile, which wipes
 # node_modules back to the published (broken) build.
-set -euo pipefail
+set -e
+# Ensure the MCP client package is resolvable from the profile (dynamic MCP mounting)
+mkdir -p node_modules/@deepseek-ai
+ln -sfn /home/adam/deepseek-harness/packages/mcp/mcp-client node_modules/@deepseek-ai/dsh-mcp-clientuo pipefail
 
 PKG_DIR="$HOME/.dsh/profiles/web/node_modules/dsh-better-sidebar"
 if [ ! -d "$PKG_DIR" ]; then
