@@ -4,7 +4,16 @@
   "dependencies": {
     "@linxin666/dsh-client-ui-skin-center": "^0.2.7",
     "dsh-better-sidebar": "0.14.0",
-    "dsh-enpoi-provider-sync": "workspace:*"
+    "dsh-enpoi-provider-sync": "workspace:*",
+    "dsh-enpoi-contracts": "workspace:*",
+    "dsh-enpoi-living-brief": "workspace:*",
+    "dsh-enpoi-context-keeper": "workspace:*",
+    "dsh-enpoi-runtime-probe": "workspace:*",
+    "dsh-enpoi-oracle": "workspace:*",
+    "dsh-enpoi-dispatcher": "workspace:*",
+    "dsh-enpoi-cascade": "workspace:*",
+    "dsh-enpoi-memory": "workspace:*",
+    "dsh-enpoi-council": "workspace:*"
   },
   "dsh": {
     "profile": {
@@ -13,7 +22,13 @@
         "@deepseek-ai/dsh-web-app",
         "dsh-better-sidebar",
         "@linxin666/dsh-client-ui-skin-center",
-        "dsh-enpoi-provider-sync"
+        "dsh-enpoi-provider-sync",
+        "dsh-enpoi-living-brief",
+        "dsh-enpoi-context-keeper",
+        "dsh-enpoi-runtime-probe",
+        "dsh-enpoi-cascade",
+        "dsh-enpoi-memory",
+        "dsh-enpoi-council"
       ]
     }
   }

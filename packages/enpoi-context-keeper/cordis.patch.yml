@@ -1,0 +1,17 @@
+# dsh-enpoi-context-keeper bundle patch — mounts the silent background prose
+# worker into the Enpoi Harness web profile.
+#
+# The keeper watches turn/end milestones, debounces, and summarizes the recent
+# turn with a flash-tier model, appending the result as a `brief/prose-updated`
+# event that the livingBrief projection folds (doc 31 §2, doc 34 K1-K4).
+- insert:
+    - id: enpoi-context-keeper
+      name: 'dsh-enpoi-context-keeper'
+      config:
+        # Flash-tier primary route + one fallback (soft-degrading, never blocks).
+        provider: deepseek
+        model: deepseek-v4-flash
+        fallbackProvider: antigravity
+        fallbackModel: gemini-3.7-flash-tiered
+        debounceMs: 30000
+        leaseMs: 45000

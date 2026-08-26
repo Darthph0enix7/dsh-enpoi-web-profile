@@ -14,15 +14,82 @@ importers:
       dsh-better-sidebar:
         specifier: 0.14.0
         version: 0.14.0
+      dsh-enpoi-cascade:
+        specifier: workspace:*
+        version: link:packages/enpoi-cascade
+      dsh-enpoi-context-keeper:
+        specifier: workspace:*
+        version: link:packages/enpoi-context-keeper
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:packages/enpoi-contracts
+      dsh-enpoi-council:
+        specifier: workspace:*
+        version: link:packages/enpoi-council
+      dsh-enpoi-dispatcher:
+        specifier: workspace:*
+        version: link:packages/enpoi-dispatcher
+      dsh-enpoi-living-brief:
+        specifier: workspace:*
+        version: link:packages/enpoi-living-brief
+      dsh-enpoi-memory:
+        specifier: workspace:*
+        version: link:packages/enpoi-memory
+      dsh-enpoi-oracle:
+        specifier: workspace:*
+        version: link:packages/enpoi-oracle
       dsh-enpoi-provider-sync:
         specifier: workspace:*
         version: link:packages/enpoi-provider-sync
+      dsh-enpoi-runtime-probe:
+        specifier: workspace:*
+        version: link:packages/enpoi-runtime-probe
+
+  packages/enpoi-cascade: {}
+
+  packages/enpoi-context-keeper:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+
+  packages/enpoi-contracts:
+    dependencies:
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+
+  packages/enpoi-council:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
+
+  packages/enpoi-dispatcher: {}
+
+  packages/enpoi-living-brief:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+
+  packages/enpoi-memory: {}
+
+  packages/enpoi-oracle: {}
 
   packages/enpoi-provider-sync:
     dependencies:
       schemastery:
         specifier: ^3.18.0
         version: 3.18.0
+
+  packages/enpoi-runtime-probe: {}
 
 packages:
 
@@ -687,6 +754,9 @@ packages:
         optional: true
       utf-8-validate:
         optional: true
+
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
 
@@ -1508,3 +1578,5 @@ snapshots:
   w3c-keyname@2.2.8: {}
 
   ws@8.21.3: {}
+
+  zod@3.25.76: {}
