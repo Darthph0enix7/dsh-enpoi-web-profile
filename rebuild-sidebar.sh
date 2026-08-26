@@ -12,7 +12,7 @@
 set -e
 # Ensure the MCP client package is resolvable from the profile (dynamic MCP mounting)
 mkdir -p node_modules/@deepseek-ai
-ln -sfn /home/adam/deepseek-harness/packages/mcp/mcp-client node_modules/@deepseek-ai/dsh-mcp-clientuo pipefail
+ln -sfn /home/adam/deepseek-harness/packages/mcp/mcp-client node_modules/@deepseek-ai/dsh-mcp-client
 
 PKG_DIR="$HOME/.dsh/profiles/web/node_modules/dsh-better-sidebar"
 if [ ! -d "$PKG_DIR" ]; then
