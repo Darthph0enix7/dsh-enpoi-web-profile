@@ -2,10 +2,13 @@
  * Enpoi Harness Context Keeper — the silent background prose worker (doc 31 §7).
  *
  * Subscribes to `session/event`, reacts ONLY to `turn/end` milestones
- * (roundtable: milestone heuristics are YAGNI), debounces 30s, single-flight
- * per session, 45s hard lease (doc 35 §4.3). Summarizes the recent turn with
- * a flash-tier model (primary + one fallback, soft-degrading — never blocks
- * the session), then appends `brief/prose-updated` via `session.append`.
+ * (roundtable: milestone heuristics are YAGNI), debounces (config default
+ * 15s, deployed profile 30s), single-flight per session, 45s hard lease
+ * (doc 35 §4.3). Summarizes the recent turn with a flash-tier model
+ * (primary + one fallback, soft-degrading — never blocks the session), then
+ * appends `brief/prose-updated` via `session.append`. The primary route is
+ * resolved per wake from `enpoi-orchestration.personas.keeper` when assigned,
+ * else the plugin Config route.
  *
  * Deadlock discipline (Oracle): the turn/end listener NEVER appends
  * synchronously — it only arms the debounce timer. The append happens on a
@@ -69,27 +72,34 @@ export const Config = Schema.object({
 /** Secrets-exclusion instruction (doc 35 §1.1) — summarization never credentials. */
 const SYSTEM_PROMPT = [
   'You are the Enpoi Harness context keeper — the master background summarizer and architectural keeper for this coding session.',
-  'You maintain a running, rich, and highly comprehensive Living Brief of the session for later dispatch to subagent workers, the Oracle, Council debaters, and permanent memory.',
+  'You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to subagent workers, the Oracle, Council debaters, and permanent memory.',
   'If a [PREVIOUS SESSION BRIEF] is provided, incrementally merge it with the [RECENT SESSION EVENTS & TOOL RESULTS] (including Council/Roundtable consensus, Oracle verdicts, subagent returns, tool results, documentation paths, and user directives).',
   'NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.',
+  '',
+  'CRITICAL SECTION DISCIPLINE (ZERO-FILLER RULE):',
+  '- ONLY include a section if there is genuine, substantive information established in the session.',
+  '- If no documentation files were created or referenced, DO NOT emit the 📚 section and NEVER write "No documentation...".',
+  '- If no approaches were debated/rejected, DO NOT emit the 🚫 section and NEVER write "No alternative approaches...".',
+  '- If there are no open blockers, DO NOT emit the ⚡ section and NEVER write "No blockers remain...".',
+  '- For simple queries, greetings, or health-checks (e.g. ping), emit ONLY a single-line 🎯 ACTIVE GOAL or keep the brief empty. NEVER invent placeholder bullets.',
   '',
   'You have ONE background tool: memory_save. Use it via the CLAIMS block below.',
   '',
   'Output EXACTLY two blocks, IN THIS ORDER (no other text at all):',
   '',
   'BLOCK 1 — PROSE:',
-  'Generate an exhaustive, highly structured, multi-section Living Brief using these exact section headers:',
+  'Use ONLY the relevant section headers from below (omit any section with no substantive content):',
   '🎯 ACTIVE GOAL & CORE TRAJECTORY:',
   '- Current active objective, user directives, and high-level technical paradigms.',
   '',
   '📚 DOCUMENTATION & SPECIFICATIONS INVENTORY:',
-  '- List all documentation, plans, architectures, and spec files written, modified, or referenced in the session (e.g. file paths like ~/dsh-migration/*.md, docs/*.md, ARCHITECTURE.md, etc.) with a 1-line summary of what each covers ("free context" for agents).',
+  '- List documentation, plans, architectures, and spec files written, modified, or referenced in the session with a 1-line summary.',
   '',
   '🏛️ ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:',
-  '- Concrete technical decisions established in the session (especially from Council, Oracle, and tool results): exact component boundaries, protocols (IPC/HTTP/WS/Redis), data keys/schemas, state machines, and concurrency rules.',
+  '- Concrete technical decisions established in the session: exact component boundaries, protocols (IPC/HTTP/WS/Redis), data keys/schemas, state machines, and concurrency rules.',
   '',
   '🚫 REJECTED APPROACHES & EDGE CASES:',
-  '- Approaches debated and explicitly ruled out (and the reasons why), edge cases handled, and failure modes defended.',
+  '- Approaches debated and explicitly ruled out (and reasons why), edge cases handled, and failure modes defended.',
   '',
   '⚡ ACTIVE BLOCKERS & OPEN QUESTIONS:',
   '- Unresolved technical questions, pending implementation tasks, or immediate next steps.',
@@ -98,14 +108,59 @@ const SYSTEM_PROMPT = [
   'A line starting with "CLAIMS:" followed by a JSON array of permanent facts you are SAVING to memory.db: [{"fact":"...","category":"ARCHITECTURE","tags":"..."}]',
   '  - File 2–4 durable facts about Adam\'s environment/infrastructure/architecture whenever the session surfaces them.',
   '  - Categories limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.',
+  '  - If no new permanent facts emerged, emit "CLAIMS: []".',
   '  - NO credentials/passwords/tokens/secrets; skip transient chatter.',
 ].join('\n')
 
 /** Per-session keeper state: debounce timer + single-flight + lease. */
-interface KeeperState {
+export interface KeeperState {
   timer: NodeJS.Timeout | null
   running: boolean
+  /** A turn ended while a pass was in flight — schedule a trailing re-run. */
+  rerunRequested: boolean
   turn: number
+}
+
+/** Resolved model route for one keeper wake (Oracle: resolve once per run, never inside executeRoute). */
+interface ResolvedRoute {
+  provider: string
+  model: string
+  fallbackProvider: string
+  fallbackModel: string
+  reasoningEffort?: string
+}
+
+/**
+ * Resolve the keeper's model route for this wake.
+ *
+ * Precedence (Oracle amendment): `enpoi-orchestration.personas.keeper` (operator
+ * assignment) > plugin Config primary/fallback. The fallback route is constant
+ * in both branches. Partial entries (missing provider or model) are ignored.
+ */
+export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute {
+  const fallbackProvider = config.fallbackProvider ?? 'antigravity'
+  const fallbackModel = config.fallbackModel ?? 'gemini-3.7-flash-tiered'
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const entry = settings?.get?.('enpoi-orchestration')?.personas?.['keeper']
+    if (entry && entry.provider && entry.model) {
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        fallbackProvider,
+        fallbackModel,
+        ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+      }
+    }
+  } catch {
+    // settings unavailable — fall through to config defaults
+  }
+  return {
+    provider: config.provider ?? 'freellmapi',
+    model: config.model ?? 'auto',
+    fallbackProvider,
+    fallbackModel,
+  }
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -129,7 +184,7 @@ export function apply(ctx: Context, config: Config): void {
 }
 
 /** Arm (or re-arm) the debounce for one session. Never appends synchronously. */
-function arm(
+export function arm(
   ctx: Context,
   config: Config,
   states: Map<string, KeeperState>,
@@ -137,16 +192,24 @@ function arm(
   turn: number,
 ): void {
   const key = session.id
-  const existing = states.get(key)
-  if (existing !== undefined && existing.timer !== null) clearTimeout(existing.timer)
-  const timer = setTimeout(() => {
+  let state = states.get(key)
+  if (state === undefined) {
+    // Create the per-session state object ONCE and mutate it afterwards —
+    // replacing it while a run() holds the old reference wedges the keeper
+    // (the in-flight run resets `running` on the stale object, never this one).
+    state = { timer: null, running: false, rerunRequested: false, turn }
+    states.set(key, state)
+  }
+  if (state.timer !== null) clearTimeout(state.timer)
+  state.turn = turn
+  state.timer = setTimeout(() => {
+    state!.timer = null
     void run(ctx, config, states, session, turn)
   }, config.debounceMs)
-  states.set(key, { timer, running: existing?.running ?? false, turn })
 }
 
 /** One keeper pass: single-flight, lease-bound LLM call, then append. */
-async function run(
+export async function run(
   ctx: Context,
   config: Config,
   states: Map<string, KeeperState>,
@@ -157,7 +220,13 @@ async function run(
   const state = states.get(key)
   if (state === undefined) return
   state.timer = null
-  if (state.running) return // single-flight per session
+  if (state.running) {
+    // A turn ended while a pass is in flight — latch a trailing re-run so the
+    // newest events are never dropped (Oracle wedge fix: the in-flight run's
+    // finally block schedules the trailing pass).
+    state.rerunRequested = true
+    return
+  }
   state.running = true
 
   const lease = new AbortController()
@@ -168,21 +237,25 @@ async function run(
       diag(`run: session=${session.id} turn=${turn} — empty input, skipping`)
       return
     }
-    diag(`run: session=${session.id} turn=${turn} — calling LLM (input ${input.length} chars)`)
+    // Resolve the model route ONCE per wake, at entry (Oracle: never inside
+    // executeRoute — one coherent primary/fallback pair per wake).
+    const route = resolveKeeperRoute(ctx, config)
+    diag(`run: session=${session.id} turn=${turn} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`)
     // Capture the input's snapshot seq BEFORE the async LLM call — events
     // landing during the call must not shift basedOnSeq forward (I3 causal
     // ordering: a stale summary must never look fresher than a steered goal).
     const snapshotSeq = session.events.at(-1)?.seq ?? session.seq
-    const result = await summarize(ctx, config, session, input, lease.signal)
+    const result = await summarize(ctx, config, session, input, lease.signal, route)
     if (result.text.length === 0) {
       diag(`run: session=${session.id} turn=${turn} — empty summary, skipping`)
       return
     }
     // A3.5 isolation: split PROSE + CLAIMS (malformed claims never block prose).
     diag(`run: session=${session.id} turn=${turn} — raw output: ${result.text.slice(0, 1200).replace(/\n/g, ' | ')}`)
-    const { prose, claims } = splitProseClaims(result.text)
+    const { prose: rawProse, claims } = splitProseClaims(result.text)
+    const prose = cleanKeeperProse(rawProse)
     if (prose.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} — empty prose, skipping`)
+      diag(`run: session=${session.id} turn=${turn} — empty or cleaned-empty prose, skipping`)
       return
     }
     // Clean stack: the LLM resolved, no append is being published.
@@ -220,7 +293,54 @@ async function run(
   } finally {
     clearTimeout(leaseTimer)
     state.running = false
+    // Trailing re-run: a turn ended while we were running — schedule a fresh
+    // debounced pass so the newest events get summarized (Oracle wedge fix).
+    if (state.rerunRequested) {
+      state.rerunRequested = false
+      state.timer = setTimeout(() => {
+        state!.timer = null
+        void run(ctx, config, states, session, state!.turn)
+      }, config.debounceMs)
+    }
   }
+}
+
+/**
+ * Sanitize keeper prose by stripping sections that contain ONLY negative filler / boilerplate.
+ * (e.g. "No documentation...", "No alternative approaches were debated...", "No blockers remain...").
+ * Keeps the brief clean, meaningful, and token-efficient.
+ */
+export function cleanKeeperProse(text: string): string {
+  if (!text || text.trim().length === 0) return ''
+  const sectionChunks = text.split(/(?=^[🎯📚🏛️🚫⚡]\s*)/m)
+  const cleaned: string[] = []
+
+  for (const chunk of sectionChunks) {
+    const trimmed = chunk.trim()
+    if (!trimmed) continue
+
+    const lines = trimmed.split('\n')
+    const contentLines = lines.slice(1).map(l => l.trim()).filter(Boolean)
+
+    // If section has header but 0 content lines, omit
+    if (contentLines.length === 0) continue
+
+    // Check if every bullet in the section is just negative filler / placeholder
+    const isAllNegativeFiller = contentLines.every(l =>
+      /^-\s*(no\b|none\b|n\/a\b|nothing\b|not applicable\b)/i.test(l) ||
+      /no documentation.*(?:created|referenced|modified|identified)/i.test(l) ||
+      /no alternative approaches/i.test(l) ||
+      /no blockers/i.test(l) ||
+      /no open questions/i.test(l) ||
+      /no edge cases/i.test(l)
+    )
+
+    if (!isAllNegativeFiller) {
+      cleaned.push(trimmed)
+    }
+  }
+
+  return cleaned.join('\n\n')
 }
 
 /** Split the keeper output into PROSE + CLAIMS (A3.5: claims parse is isolated). */
@@ -408,27 +528,29 @@ function validateKeeperOutput(text: string, finishKind?: string): KeeperValidati
   return { valid: true }
 }
 
-/** One LLM completion with primary route + single fallback (soft-degrading + cutoff shield). */
+/** One LLM completion with resolved primary route + fixed fallback (soft-degrading + cutoff shield). */
 async function summarize(
   ctx: Context,
   config: Config,
   session: Session,
   input: string,
   signal: AbortSignal,
+  route: ResolvedRoute,
 ): Promise<{ text: string; route: string }> {
   const messages = [createUserMessage({
     content: [{ type: 'text', text: input }],
     source: { kind: 'plugin', plugin: 'enpoi-context-keeper' },
   })]
   const base: GenerateOptions = {
-    provider: config.provider,
-    model: config.model,
+    provider: route.provider,
+    model: route.model,
     messages,
     system: SYSTEM_PROMPT,
     maxTokens: config.maxOutputTokens,
     sessionId: session.id,
     purpose: 'context-keeper',
     signal,
+    ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort as GenerateOptions['reasoningEffort'] } : {}),
   }
 
   async function executeRoute(provider: string, model: string): Promise<string> {
@@ -441,18 +563,18 @@ async function summarize(
   }
 
   try {
-    const text = await executeRoute(config.provider, config.model)
-    return { text, route: `${config.provider}/${config.model}` }
+    const text = await executeRoute(route.provider, route.model)
+    return { text, route: `${route.provider}/${route.model}` }
   } catch (error) {
     if (signal.aborted) throw error
     ctx.logger.warn(`enpoi-context-keeper: primary route failed/cut off (${String(error)}), trying fallback`)
-    diag(`primary route failed/cut off (${String(error)}), switching to fallback ${config.fallbackProvider}/${config.fallbackModel}`)
+    diag(`primary route failed/cut off (${String(error)}), switching to fallback ${route.fallbackProvider}/${route.fallbackModel}`)
 
     try {
-      const fallbackText = await executeRoute(config.fallbackProvider, config.fallbackModel)
+      const fallbackText = await executeRoute(route.fallbackProvider, route.fallbackModel)
       return {
         text: fallbackText,
-        route: `${config.fallbackProvider}/${config.fallbackModel}`,
+        route: `${route.fallbackProvider}/${route.fallbackModel}`,
       }
     } catch (fallbackError) {
       if (signal.aborted) throw fallbackError

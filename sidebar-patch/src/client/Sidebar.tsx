@@ -948,6 +948,18 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
         </svg>
       ),
     },
+    {
+      id: 'routing',
+      title: 'Agent Models',
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          <circle cx="5.5" cy="4.5" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
+          <circle cx="10.5" cy="8" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
+          <circle cx="7.5" cy="11.5" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
+        </svg>
+      ),
+    },
   ]
 
   const handleActivityClick = (type: string, title?: string) => {
@@ -1008,7 +1020,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
       const newTab: SidebarTab = {
         id: type === 'terminal' ? `terminal:${s.nextTerminal}` : type === 'browser' ? `browser:${s.nextBrowser}` : type,
         type,
-        title: title || (type === 'editor' ? 'Files' : type === 'git' ? 'Git' : type === 'terminal' ? 'Terminal' : type === 'subagent' ? 'Tasks' : type === 'browser' ? 'Browser' : type === 'capabilities' ? 'Capabilities' : type),
+        title: title || (type === 'editor' ? 'Files' : type === 'git' ? 'Git' : type === 'terminal' ? 'Terminal' : type === 'subagent' ? 'Tasks' : type === 'browser' ? 'Browser' : type === 'capabilities' ? 'Capabilities' : type === 'routing' ? 'Agent Models' : type),
       }
 
       const nextSplits = mapLeaf(s.splits, rightPane.id, (leaf) => {

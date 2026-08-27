@@ -1,4 +1,4 @@
-var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : /* @__PURE__ */ Symbol.for("Symbol." + name2);
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
@@ -44,12 +44,12 @@ var __callDispose = (stack, error, hasError) => {
   return next();
 };
 
-// src/index.ts
+// packages/enpoi-context-keeper/src/index.ts
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
 
-// ../enpoi-memory/src/db.ts
+// packages/enpoi-memory/src/db.ts
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -99,7 +99,7 @@ function openMemoryDb() {
   return db;
 }
 
-// ../enpoi-memory/src/pipeline.ts
+// packages/enpoi-memory/src/pipeline.ts
 import { createHash } from "node:crypto";
 var FACT_CAP = 400;
 function claimHash(fact, category) {
@@ -245,7 +245,7 @@ function makePipeline(db) {
   return { intake, graduate, confirm, rescind, reconcileBoot, list, get, stateOf };
 }
 
-// src/index.ts
+// packages/enpoi-context-keeper/src/index.ts
 import { join as join2 } from "node:path";
 import Schema from "schemastery";
 var name = "enpoi-context-keeper";
@@ -272,27 +272,34 @@ var Config = Schema.object({
 });
 var SYSTEM_PROMPT = [
   "You are the Enpoi Harness context keeper \u2014 the master background summarizer and architectural keeper for this coding session.",
-  "You maintain a running, rich, and highly comprehensive Living Brief of the session for later dispatch to subagent workers, the Oracle, Council debaters, and permanent memory.",
+  "You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to subagent workers, the Oracle, Council debaters, and permanent memory.",
   "If a [PREVIOUS SESSION BRIEF] is provided, incrementally merge it with the [RECENT SESSION EVENTS & TOOL RESULTS] (including Council/Roundtable consensus, Oracle verdicts, subagent returns, tool results, documentation paths, and user directives).",
   "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
+  "",
+  "CRITICAL SECTION DISCIPLINE (ZERO-FILLER RULE):",
+  "- ONLY include a section if there is genuine, substantive information established in the session.",
+  '- If no documentation files were created or referenced, DO NOT emit the \u{1F4DA} section and NEVER write "No documentation...".',
+  '- If no approaches were debated/rejected, DO NOT emit the \u{1F6AB} section and NEVER write "No alternative approaches...".',
+  '- If there are no open blockers, DO NOT emit the \u26A1 section and NEVER write "No blockers remain...".',
+  "- For simple queries, greetings, or health-checks (e.g. ping), emit ONLY a single-line \u{1F3AF} ACTIVE GOAL or keep the brief empty. NEVER invent placeholder bullets.",
   "",
   "You have ONE background tool: memory_save. Use it via the CLAIMS block below.",
   "",
   "Output EXACTLY two blocks, IN THIS ORDER (no other text at all):",
   "",
   "BLOCK 1 \u2014 PROSE:",
-  "Generate an exhaustive, highly structured, multi-section Living Brief using these exact section headers:",
+  "Use ONLY the relevant section headers from below (omit any section with no substantive content):",
   "\u{1F3AF} ACTIVE GOAL & CORE TRAJECTORY:",
   "- Current active objective, user directives, and high-level technical paradigms.",
   "",
   "\u{1F4DA} DOCUMENTATION & SPECIFICATIONS INVENTORY:",
-  '- List all documentation, plans, architectures, and spec files written, modified, or referenced in the session (e.g. file paths like ~/dsh-migration/*.md, docs/*.md, ARCHITECTURE.md, etc.) with a 1-line summary of what each covers ("free context" for agents).',
+  "- List documentation, plans, architectures, and spec files written, modified, or referenced in the session with a 1-line summary.",
   "",
   "\u{1F3DB}\uFE0F ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:",
-  "- Concrete technical decisions established in the session (especially from Council, Oracle, and tool results): exact component boundaries, protocols (IPC/HTTP/WS/Redis), data keys/schemas, state machines, and concurrency rules.",
+  "- Concrete technical decisions established in the session: exact component boundaries, protocols (IPC/HTTP/WS/Redis), data keys/schemas, state machines, and concurrency rules.",
   "",
   "\u{1F6AB} REJECTED APPROACHES & EDGE CASES:",
-  "- Approaches debated and explicitly ruled out (and the reasons why), edge cases handled, and failure modes defended.",
+  "- Approaches debated and explicitly ruled out (and reasons why), edge cases handled, and failure modes defended.",
   "",
   "\u26A1 ACTIVE BLOCKERS & OPEN QUESTIONS:",
   "- Unresolved technical questions, pending implementation tasks, or immediate next steps.",
@@ -301,8 +308,33 @@ var SYSTEM_PROMPT = [
   'A line starting with "CLAIMS:" followed by a JSON array of permanent facts you are SAVING to memory.db: [{"fact":"...","category":"ARCHITECTURE","tags":"..."}]',
   "  - File 2\u20134 durable facts about Adam's environment/infrastructure/architecture whenever the session surfaces them.",
   "  - Categories limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.",
+  '  - If no new permanent facts emerged, emit "CLAIMS: []".',
   "  - NO credentials/passwords/tokens/secrets; skip transient chatter."
 ].join("\n");
+function resolveKeeperRoute(ctx, config) {
+  const fallbackProvider = config.fallbackProvider ?? "antigravity";
+  const fallbackModel = config.fallbackModel ?? "gemini-3.7-flash-tiered";
+  try {
+    const settings = ctx.get("settings");
+    const entry = settings?.get?.("enpoi-orchestration")?.personas?.["keeper"];
+    if (entry && entry.provider && entry.model) {
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        fallbackProvider,
+        fallbackModel,
+        ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+      };
+    }
+  } catch {
+  }
+  return {
+    provider: config.provider ?? "freellmapi",
+    model: config.model ?? "auto",
+    fallbackProvider,
+    fallbackModel
+  };
+}
 function apply(ctx, config) {
   const states = /* @__PURE__ */ new Map();
   diag(`apply: mounted (provider=${config.provider}/${config.model}, debounce=${config.debounceMs}ms, lease=${config.leaseMs}ms)`);
@@ -322,19 +354,27 @@ function apply(ctx, config) {
 }
 function arm(ctx, config, states, session, turn) {
   const key = session.id;
-  const existing = states.get(key);
-  if (existing !== void 0 && existing.timer !== null) clearTimeout(existing.timer);
-  const timer = setTimeout(() => {
+  let state = states.get(key);
+  if (state === void 0) {
+    state = { timer: null, running: false, rerunRequested: false, turn };
+    states.set(key, state);
+  }
+  if (state.timer !== null) clearTimeout(state.timer);
+  state.turn = turn;
+  state.timer = setTimeout(() => {
+    state.timer = null;
     void run(ctx, config, states, session, turn);
   }, config.debounceMs);
-  states.set(key, { timer, running: existing?.running ?? false, turn });
 }
 async function run(ctx, config, states, session, turn) {
   const key = session.id;
   const state = states.get(key);
   if (state === void 0) return;
   state.timer = null;
-  if (state.running) return;
+  if (state.running) {
+    state.rerunRequested = true;
+    return;
+  }
   state.running = true;
   const lease = new AbortController();
   const leaseTimer = setTimeout(() => lease.abort(), config.leaseMs);
@@ -344,17 +384,19 @@ async function run(ctx, config, states, session, turn) {
       diag(`run: session=${session.id} turn=${turn} \u2014 empty input, skipping`);
       return;
     }
-    diag(`run: session=${session.id} turn=${turn} \u2014 calling LLM (input ${input.length} chars)`);
+    const route = resolveKeeperRoute(ctx, config);
+    diag(`run: session=${session.id} turn=${turn} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`);
     const snapshotSeq = session.events.at(-1)?.seq ?? session.seq;
-    const result = await summarize(ctx, config, session, input, lease.signal);
+    const result = await summarize(ctx, config, session, input, lease.signal, route);
     if (result.text.length === 0) {
       diag(`run: session=${session.id} turn=${turn} \u2014 empty summary, skipping`);
       return;
     }
     diag(`run: session=${session.id} turn=${turn} \u2014 raw output: ${result.text.slice(0, 1200).replace(/\n/g, " | ")}`);
-    const { prose, claims } = splitProseClaims(result.text);
+    const { prose: rawProse, claims } = splitProseClaims(result.text);
+    const prose = cleanKeeperProse(rawProse);
     if (prose.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} \u2014 empty prose, skipping`);
+      diag(`run: session=${session.id} turn=${turn} \u2014 empty or cleaned-empty prose, skipping`);
       return;
     }
     session.append("brief/prose-updated", {
@@ -389,7 +431,33 @@ async function run(ctx, config, states, session, turn) {
   } finally {
     clearTimeout(leaseTimer);
     state.running = false;
+    if (state.rerunRequested) {
+      state.rerunRequested = false;
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        void run(ctx, config, states, session, state.turn);
+      }, config.debounceMs);
+    }
   }
+}
+function cleanKeeperProse(text) {
+  if (!text || text.trim().length === 0) return "";
+  const sectionChunks = text.split(/(?=^[🎯📚🏛️🚫⚡]\s*)/m);
+  const cleaned = [];
+  for (const chunk of sectionChunks) {
+    const trimmed = chunk.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split("\n");
+    const contentLines = lines.slice(1).map((l) => l.trim()).filter(Boolean);
+    if (contentLines.length === 0) continue;
+    const isAllNegativeFiller = contentLines.every(
+      (l) => /^-\s*(no\b|none\b|n\/a\b|nothing\b|not applicable\b)/i.test(l) || /no documentation.*(?:created|referenced|modified|identified)/i.test(l) || /no alternative approaches/i.test(l) || /no blockers/i.test(l) || /no open questions/i.test(l) || /no edge cases/i.test(l)
+    );
+    if (!isAllNegativeFiller) {
+      cleaned.push(trimmed);
+    }
+  }
+  return cleaned.join("\n\n");
 }
 function splitProseClaims(text) {
   const idx = text.indexOf("CLAIMS:");
@@ -535,20 +603,21 @@ function validateKeeperOutput(text, finishKind) {
   }
   return { valid: true };
 }
-async function summarize(ctx, config, session, input, signal) {
+async function summarize(ctx, config, session, input, signal, route) {
   const messages = [createUserMessage({
     content: [{ type: "text", text: input }],
     source: { kind: "plugin", plugin: "enpoi-context-keeper" }
   })];
   const base = {
-    provider: config.provider,
-    model: config.model,
+    provider: route.provider,
+    model: route.model,
     messages,
     system: SYSTEM_PROMPT,
     maxTokens: config.maxOutputTokens,
     sessionId: session.id,
     purpose: "context-keeper",
-    signal
+    signal,
+    ...route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}
   };
   async function executeRoute(provider, model) {
     const result = await streamTextWithMeta(ctx, { ...base, provider, model });
@@ -559,17 +628,17 @@ async function summarize(ctx, config, session, input, signal) {
     return result.text;
   }
   try {
-    const text = await executeRoute(config.provider, config.model);
-    return { text, route: `${config.provider}/${config.model}` };
+    const text = await executeRoute(route.provider, route.model);
+    return { text, route: `${route.provider}/${route.model}` };
   } catch (error) {
     if (signal.aborted) throw error;
     ctx.logger.warn(`enpoi-context-keeper: primary route failed/cut off (${String(error)}), trying fallback`);
-    diag(`primary route failed/cut off (${String(error)}), switching to fallback ${config.fallbackProvider}/${config.fallbackModel}`);
+    diag(`primary route failed/cut off (${String(error)}), switching to fallback ${route.fallbackProvider}/${route.fallbackModel}`);
     try {
-      const fallbackText = await executeRoute(config.fallbackProvider, config.fallbackModel);
+      const fallbackText = await executeRoute(route.fallbackProvider, route.fallbackModel);
       return {
         text: fallbackText,
-        route: `${config.fallbackProvider}/${config.fallbackModel}`
+        route: `${route.fallbackProvider}/${route.fallbackModel}`
       };
     } catch (fallbackError) {
       if (signal.aborted) throw fallbackError;
@@ -620,6 +689,10 @@ function finishError(finish) {
 export {
   Config,
   apply,
+  arm,
+  cleanKeeperProse,
   inject,
-  name
+  name,
+  resolveKeeperRoute,
+  run
 };
