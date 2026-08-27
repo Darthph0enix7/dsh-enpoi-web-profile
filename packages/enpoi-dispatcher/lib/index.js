@@ -265,13 +265,13 @@ var SUBAGENT_RETURN_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    changed: { type: "array", items: { type: "string" } },
-    verified: { type: "boolean" },
-    NOT_verified: { type: "array", items: { type: "string" } },
-    remember_later: { type: "array", items: { type: "string" } },
-    summary: { type: "string" }
+    changed: { type: "array", items: { type: "string" }, description: "Files modified by the worker (if any)" },
+    verified: { type: "boolean", description: "Whether file changes were verified" },
+    NOT_verified: { type: "array", items: { type: "string" }, description: "Changed files that could not be verified" },
+    remember_later: { type: "array", items: { type: "string" }, description: "Important facts or architecture decisions to remember" },
+    summary: { type: "string", description: "Comprehensive findings, research report, or implementation summary" }
   },
-  required: ["changed", "verified", "NOT_verified", "remember_later", "summary"]
+  required: ["summary"]
 };
 function readLivingBrief(ctx, session) {
   try {
@@ -308,7 +308,7 @@ function buildTaskCard(worker, args, brief) {
     lines.push(brief + flagged);
   }
   lines.push("--- RETURN CONTRACT ---");
-  lines.push("Finish by filling the structured return: changed (files you modified), verified (true if you verified your work), NOT_verified (changed files you could not verify), remember_later (facts worth remembering).");
+  lines.push("Finish with a comprehensive summary in `summary` (findings, research report, or implementation status). If you modified files, list them in `changed` and set `verified`.");
   return lines.join("\n");
 }
 function applyPersonaModel(ctx, childId, persona) {
@@ -367,10 +367,16 @@ function registerDispatcher(ctx) {
     },
     output: {
       schema: SUBAGENT_RETURN_SCHEMA,
-      render: (_args, value) => [{
-        type: "text",
-        text: value.verified ? `Worker done \u2014 changed: ${(value.changed ?? []).join(", ") || "none"}` : `Worker done (unverified) \u2014 changed: ${(value.changed ?? []).join(", ") || "none"}; NOT verified: ${(value.NOT_verified ?? []).join(", ") || "none"}`
-      }]
+      render: (_args, value) => {
+        const parts = [];
+        if (Array.isArray(value.changed) && value.changed.length > 0) {
+          parts.push(`**Files Changed:** ${value.changed.join(", ")} (${value.verified ? "verified" : "unverified"})`);
+        }
+        if (typeof value.summary === "string" && value.summary.trim() !== "") {
+          parts.push(value.summary.trim());
+        }
+        return [{ type: "text", text: parts.join("\n\n") || "Worker completed." }];
+      }
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -429,13 +435,16 @@ function registerDispatcher(ctx) {
             try {
               const result2 = await run.result;
               const structured2 = result2.structured;
+              const summaryText2 = typeof structured2?.summary === "string" && structured2.summary.trim() !== "" ? structured2.summary.trim() : typeof result2.text === "string" && result2.text.trim() !== "" ? result2.text.trim() : "Worker completed.";
+              const changedText = Array.isArray(structured2?.changed) && structured2.changed.length > 0 ? ` \u2014 changed: ${structured2.changed.join(", ")} (${structured2.verified ? "verified" : "unverified"})` : "";
               const agent = ctx.get("agents")?.get(parent.session.id);
               if (agent !== void 0) {
                 agent.inject(createUserMessage({
                   content: [{
                     type: "text",
-                    text: `\u{1F4EC} Worker '${args.worker}' (background) finished \u2014 ${structured2?.verified ? "verified" : "unverified"} \u2014 changed: ${(structured2?.changed ?? []).join(", ") || "none"}.
-${(structured2?.summary ?? result2.text ?? "").slice(0, 500)}`
+                    text: `\u{1F4EC} Worker '${args.worker}' (background) finished${changedText}.
+
+${summaryText2}`
                   }],
                   source: { kind: "plugin", plugin: "enpoi-dispatcher" }
                 }));
@@ -463,6 +472,7 @@ ${(structured2?.summary ?? result2.text ?? "").slice(0, 500)}`
         }
         const result = await run.result;
         const structured = result.structured;
+        const summaryText = typeof structured?.summary === "string" && structured.summary.trim() !== "" ? structured.summary.trim() : typeof result.text === "string" && result.text.trim() !== "" ? result.text.trim() : "Worker completed.";
         await intakeWorkerClaims(
           args.worker,
           parent.session,
@@ -475,7 +485,7 @@ ${(structured2?.summary ?? result2.text ?? "").slice(0, 500)}`
           verified: structured?.verified ?? false,
           NOT_verified: structured?.NOT_verified ?? [],
           remember_later: structured?.remember_later ?? [],
-          summary: structured?.summary ?? result.text ?? "worker finished"
+          summary: summaryText
         };
       } finally {
         if (!handedOff) {

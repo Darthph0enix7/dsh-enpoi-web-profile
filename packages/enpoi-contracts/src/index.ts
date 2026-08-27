@@ -159,6 +159,27 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /** Context keeper prose update — folded by the livingBrief unit (I2/I3). */
     'brief/prose-updated': BriefProseUpdated
+    /** File-revert batch intent (enpoi-file-revert): durable plan before disk mutation. */
+    'revert/file-intent': {
+      revertSeq: number
+      plan: Record<string, { action: string; targetBlobSha: string | null; expectedDiskSha: string | null }>
+    }
+    /** File-revert batch terminal marker (enpoi-file-revert): seals the intent. */
+    'revert/file-result': {
+      revertSeq: number
+      outcomes: Record<string, { status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }>
+    }
+    /** File-revert conflict requiring operator resolution (enpoi-file-revert). */
+    'revert/file-conflict': {
+      conflictId: string
+      targetKey: string
+      displayPath: string
+      state: 'conflict' | 'missing' | 'unavailable'
+      reason: string
+      preSha: string | null
+      postSha: string | null
+      currentSha: string | null
+    }
   }
 }
 

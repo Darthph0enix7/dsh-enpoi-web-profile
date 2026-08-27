@@ -1,4 +1,4 @@
-// src/index.ts
+// packages/enpoi-oracle/src/index.ts
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 var name = "enpoi-oracle";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
@@ -98,12 +98,26 @@ function buildDelta(brief, args) {
   }
   return lines.join("\n");
 }
-function applyPersonaModel(ctx, childId, persona) {
+function resolvePersonaModel(ctx, persona) {
   try {
     const settings = ctx.get("settings");
     const doc = settings?.get?.("enpoi-orchestration");
     const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
     const entry = doc?.personas?.[key];
+    if (entry && entry.provider && entry.model) {
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+      };
+    }
+  } catch {
+  }
+  return void 0;
+}
+function applyPersonaModel(ctx, childId, persona) {
+  try {
+    const entry = resolvePersonaModel(ctx, persona);
     if (entry && entry.provider && entry.model) {
       const sessions = ctx.get("sessions");
       const childSession = sessions?.get?.(childId);
@@ -172,6 +186,21 @@ async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4) {
               return extracted;
             }
           }
+          const turnEnd = events.find((e) => e.type === "turn/end" && e.seq > since);
+          if (turnEnd !== void 0) {
+            const reason = turnEnd.data?.reason;
+            if (reason?.kind === "error") {
+              const errMsg = reason.error?.message ?? reason.failure?.message ?? "Model execution failed";
+              throw new Error(`Turn failed: ${errMsg}`);
+            }
+            if (reason?.kind === "aborted") {
+              const abortCause = reason.reason?.kind ?? "cancelled";
+              throw new Error(`Turn was aborted (${abortCause})`);
+            }
+            if (reason?.kind === "completed" && messages.length === 0) {
+              return "[NO_OUTPUT: oracle returned empty content]";
+            }
+          }
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -225,14 +254,21 @@ function registerOracleTools(ctx, root) {
           concerns: { type: "array", items: { type: "string" } },
           unverified: { type: "array", items: { type: "string" } },
           blockers: { type: "array", items: { type: "string" } },
-          summary: { type: "string" }
+          summary: { type: "string" },
+          background: { type: "boolean" },
+          rejected: { type: "boolean" }
         },
         required: ["approved", "concerns", "unverified", "blockers", "summary"]
       },
-      render: (_args, value) => [{
-        type: "text",
-        text: value.approved ? `Oracle verdict: APPROVED${value.concerns.length > 0 ? ` (concerns: ${value.concerns.join("; ")})` : ""}` : `Oracle verdict: CONCERNS${value.concerns.length > 0 ? ` \u2014 ${value.concerns.join("; ")}` : ""}${value.blockers.length > 0 ? ` | blockers: ${value.blockers.join("; ")}` : ""}`
-      }]
+      render: (_args, value) => {
+        if (value.background === true || value.rejected === true) {
+          return [{ type: "text", text: value.summary }];
+        }
+        return [{
+          type: "text",
+          text: value.approved ? `Oracle verdict: APPROVED${value.concerns.length > 0 ? ` (concerns: ${value.concerns.join("; ")})` : ""}` : `Oracle verdict: CONCERNS${value.concerns.length > 0 ? ` \u2014 ${value.concerns.join("; ")}` : ""}${value.blockers.length > 0 ? ` | blockers: ${value.blockers.join("; ")}` : ""}`
+        }];
+      }
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -245,7 +281,8 @@ function registerOracleTools(ctx, root) {
           concerns: [],
           unverified: [],
           blockers: ["CONCURRENT_CALL_REJECTED: another oracle consultation is already running for this session"],
-          summary: "Rejected by the single-flight mutex (I7)."
+          summary: "Rejected by the single-flight mutex (I7): another oracle consultation is already running for this session.",
+          rejected: true
         };
       }
       busy.add(key);
@@ -283,6 +320,7 @@ function registerOracleTools(ctx, root) {
         if (fresh) {
           try {
             const denied = ORACLE_TOOL_FILTER.deny.filter((name2) => ctx.tools.get(name2) !== void 0);
+            const personaModel = resolvePersonaModel(ctx, "oracle");
             const started = await ctx.subagents.startContinuable({
               provider: "spawn",
               label: `oracle review: ${args.request.slice(0, 60)}`,
@@ -291,7 +329,13 @@ function registerOracleTools(ctx, root) {
                 prompt,
                 parent,
                 persona: ORACLE_PERSONA,
-                toolFilter: denied.length > 0 ? { deny: denied } : void 0
+                toolFilter: denied.length > 0 ? { deny: denied } : void 0,
+                ...personaModel !== void 0 ? {
+                  agentOptions: {
+                    provider: personaModel.provider,
+                    model: personaModel.model
+                  }
+                } : {}
               },
               signal: bg?.signal ?? exec.signal
             });
@@ -322,17 +366,14 @@ function registerOracleTools(ctx, root) {
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
               if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
               if (fiber.consultations >= 10) fibers.delete(key);
-              try {
-                parent.session.append("oracle/verdict-committed", { childId, approved: v.approved, concernCount: v.concerns.length });
-              } catch {
-              }
               const agent = ctx.get("agents")?.get(parent.session.id);
               if (agent !== void 0) {
                 agent.inject(createUserMessage({
                   content: [{
                     type: "text",
                     text: `\u{1F4EC} Oracle (background) finished \u2014 ${v.approved ? "APPROVED" : "CONCERNS"} (${v.concerns.length} concern(s)).
-${t.slice(0, 500)}`
+
+${t}`
                   }],
                   source: { kind: "plugin", plugin: "enpoi-oracle" }
                 }));
@@ -344,26 +385,35 @@ ${t.slice(0, 500)}`
             }
           })();
           return {
-            taskId: childId,
-            status: "running",
-            note: "Background consultation started \u2014 the verdict will be delivered as a message when the oracle finishes."
+            approved: false,
+            concerns: [],
+            unverified: [],
+            blockers: [],
+            summary: `Background consultation started (${childId}) \u2014 the verdict will be delivered as a message when the oracle finishes.`,
+            background: true
           };
         }
-        const verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal);
+        let verdictText = "";
+        try {
+          verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          fibers.delete(key);
+          return {
+            approved: false,
+            concerns: [`Oracle consultation failed: ${errMsg}`],
+            unverified: [],
+            blockers: [`ORACLE_MODEL_ERROR: ${errMsg}`],
+            summary: `Oracle consultation failed: ${errMsg}`,
+            rejected: true
+          };
+        }
         const verdict = parseVerdict(verdictText);
         fiber.consultations += 1;
         fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns });
         if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
         if (fiber.consultations >= 10) {
           fibers.delete(key);
-        }
-        try {
-          parent.session.append("oracle/verdict-committed", {
-            childId: fiber.childId,
-            approved: verdict.approved,
-            concernCount: verdict.concerns.length
-          });
-        } catch {
         }
         return {
           approved: verdict.approved,
@@ -384,5 +434,6 @@ ${t.slice(0, 500)}`
 export {
   apply,
   inject,
-  name
+  name,
+  resolvePersonaModel
 };

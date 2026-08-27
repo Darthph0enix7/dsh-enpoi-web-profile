@@ -146,13 +146,33 @@ function buildDelta(brief: string | null, args: { request: string; files?: strin
   return lines.join('\n')
 }
 
-/** Extract the VERDICT BLOCK JSON from the oracle's final message. */
-function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
+export interface PersonaModelConfig {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
+export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
   try {
     const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
     const doc = settings?.get?.('enpoi-orchestration')
     const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
     const entry = doc?.personas?.[key]
+    if (entry && entry.provider && entry.model) {
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+      }
+    }
+  } catch {}
+  return undefined
+}
+
+/** Extract the VERDICT BLOCK JSON from the oracle's final message. */
+function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
+  try {
+    const entry = resolvePersonaModel(ctx, persona)
     if (entry && entry.provider && entry.model) {
       const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
       const childSession = sessions?.get?.(childId)
@@ -233,6 +253,23 @@ async function waitForChildTurn(ctx: Context, childId: SessionId, signal: AbortS
               return extracted
             }
           }
+
+          // If no assistant message was produced, inspect turn/end for provider/model errors
+          const turnEnd = events.find(e => e.type === 'turn/end' && e.seq > since)
+          if (turnEnd !== undefined) {
+            const reason = (turnEnd.data as { reason?: { kind?: string; error?: { message?: string }; failure?: { message?: string }; reason?: { kind?: string } } })?.reason
+            if (reason?.kind === 'error') {
+              const errMsg = reason.error?.message ?? reason.failure?.message ?? 'Model execution failed'
+              throw new Error(`Turn failed: ${errMsg}`)
+            }
+            if (reason?.kind === 'aborted') {
+              const abortCause = reason.reason?.kind ?? 'cancelled'
+              throw new Error(`Turn was aborted (${abortCause})`)
+            }
+            if (reason?.kind === 'completed' && messages.length === 0) {
+              return '[NO_OUTPUT: oracle returned empty content]'
+            }
+          }
         }
       }
       await new Promise(resolve => setTimeout(resolve, 100))
@@ -290,15 +327,22 @@ function registerOracleTools(ctx: Context, root: Context): void {
           unverified: { type: 'array', items: { type: 'string' } },
           blockers: { type: 'array', items: { type: 'string' } },
           summary: { type: 'string' },
+          background: { type: 'boolean' },
+          rejected: { type: 'boolean' },
         },
         required: ['approved', 'concerns', 'unverified', 'blockers', 'summary'],
       },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.approved
-          ? `Oracle verdict: APPROVED${value.concerns.length > 0 ? ` (concerns: ${value.concerns.join('; ')})` : ''}`
-          : `Oracle verdict: CONCERNS${value.concerns.length > 0 ? ` — ${value.concerns.join('; ')}` : ''}${value.blockers.length > 0 ? ` | blockers: ${value.blockers.join('; ')}` : ''}`,
-      }],
+      render: (_args, value) => {
+        if (value.background === true || value.rejected === true) {
+          return [{ type: 'text', text: value.summary }]
+        }
+        return [{
+          type: 'text',
+          text: value.approved
+            ? `Oracle verdict: APPROVED${value.concerns.length > 0 ? ` (concerns: ${value.concerns.join('; ')})` : ''}`
+            : `Oracle verdict: CONCERNS${value.concerns.length > 0 ? ` — ${value.concerns.join('; ')}` : ''}${value.blockers.length > 0 ? ` | blockers: ${value.blockers.join('; ')}` : ''}`,
+        }]
+      },
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -312,7 +356,8 @@ function registerOracleTools(ctx: Context, root: Context): void {
           concerns: [],
           unverified: [],
           blockers: ['CONCURRENT_CALL_REJECTED: another oracle consultation is already running for this session'],
-          summary: 'Rejected by the single-flight mutex (I7).',
+          summary: 'Rejected by the single-flight mutex (I7): another oracle consultation is already running for this session.',
+          rejected: true,
         }
       }
       busy.add(key)
@@ -360,6 +405,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
         if (fresh) {
           try {
             const denied = ORACLE_TOOL_FILTER.deny.filter(name => ctx.tools.get(name) !== undefined)
+            const personaModel = resolvePersonaModel(ctx, 'oracle')
             const started = await ctx.subagents.startContinuable({
               provider: 'spawn',
               label: `oracle review: ${args.request.slice(0, 60)}`,
@@ -369,6 +415,12 @@ function registerOracleTools(ctx: Context, root: Context): void {
                 parent,
                 persona: ORACLE_PERSONA,
                 toolFilter: denied.length > 0 ? { deny: denied } : undefined,
+                ...personaModel !== undefined ? {
+                  agentOptions: {
+                    provider: personaModel.provider,
+                    model: personaModel.model,
+                  },
+                } : {},
               },
               signal: bg?.signal ?? exec.signal,
             })
@@ -400,15 +452,12 @@ function registerOracleTools(ctx: Context, root: Context): void {
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns })
               if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files)
               if (fiber.consultations >= 10) fibers.delete(key)
-              try {
-                parent.session.append('oracle/verdict-committed', { childId, approved: v.approved, concernCount: v.concerns.length })
-              } catch { /* best-effort event */ }
               const agent = ctx.get('agents')?.get(parent.session.id)
               if (agent !== undefined) {
                 agent.inject(createUserMessage({
                   content: [{
                     type: 'text',
-                    text: `📬 Oracle (background) finished — ${v.approved ? 'APPROVED' : 'CONCERNS'} (${v.concerns.length} concern(s)).\n${t.slice(0, 500)}`,
+                    text: `📬 Oracle (background) finished — ${v.approved ? 'APPROVED' : 'CONCERNS'} (${v.concerns.length} concern(s)).\n\n${t}`,
                   }],
                   source: { kind: 'plugin', plugin: 'enpoi-oracle' },
                 }))
@@ -419,13 +468,30 @@ function registerOracleTools(ctx: Context, root: Context): void {
             }
           })()
           return {
-            taskId: childId,
-            status: 'running',
-            note: 'Background consultation started — the verdict will be delivered as a message when the oracle finishes.',
+            approved: false,
+            concerns: [],
+            unverified: [],
+            blockers: [],
+            summary: `Background consultation started (${childId}) — the verdict will be delivered as a message when the oracle finishes.`,
+            background: true,
           }
         }
 
-        const verdictText = await waitForChildTurn(ctx, fiber.childId!, bg?.signal ?? exec.signal)
+        let verdictText = ''
+        try {
+          verdictText = await waitForChildTurn(ctx, fiber.childId!, bg?.signal ?? exec.signal)
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err)
+          fibers.delete(key)
+          return {
+            approved: false,
+            concerns: [`Oracle consultation failed: ${errMsg}`],
+            unverified: [],
+            blockers: [`ORACLE_MODEL_ERROR: ${errMsg}`],
+            summary: `Oracle consultation failed: ${errMsg}`,
+            rejected: true,
+          }
+        }
         const verdict = parseVerdict(verdictText)
 
         fiber.consultations += 1
@@ -436,15 +502,6 @@ function registerOracleTools(ctx: Context, root: Context): void {
         if (fiber.consultations >= 10) {
           fibers.delete(key)
         }
-
-        // Emit the contract event (doc 33 §4.2).
-        try {
-          parent.session.append('oracle/verdict-committed', {
-            childId: fiber.childId!,
-            approved: verdict.approved,
-            concernCount: verdict.concerns.length,
-          })
-        } catch { /* best-effort event */ }
 
         return {
           approved: verdict.approved,

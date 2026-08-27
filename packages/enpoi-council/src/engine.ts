@@ -111,8 +111,38 @@ const COUNCIL_DENIED_TOOLS = [
   'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
   'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
   'todo_write', 'plan_mode', 'goal', 'roundtable', 'chorus',
-  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm', 'report',
+  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
 ]
+
+export interface PersonaModelConfig {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
+/**
+ * Resolve configured persona model from Settings > enpoi-orchestration.personas.
+ * Returns undefined if no specific model is configured, allowing the child
+ * session to naturally inherit the parent agent's model.
+ */
+export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const doc = settings?.get?.('enpoi-orchestration')
+    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
+    const entry = doc?.personas?.[key]
+    if (entry && entry.provider && entry.model) {
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+      }
+    }
+  } catch (err: unknown) {
+    councilDiag(`resolvePersonaModel error for ${persona}: ${String(err)}`)
+  }
+  return undefined
+}
 
 /**
  * Resolve and apply configured persona model from Settings > enpoi-orchestration.personas.
@@ -121,10 +151,7 @@ const COUNCIL_DENIED_TOOLS = [
  */
 export function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
-    const doc = settings?.get?.('enpoi-orchestration')
-    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
-    const entry = doc?.personas?.[key]
+    const entry = resolvePersonaModel(ctx, persona)
     if (entry && entry.provider && entry.model) {
       const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
       const childSession = sessions?.get?.(childId)
@@ -139,7 +166,7 @@ export function applyPersonaModel(ctx: Context, childId: string, persona: string
           },
           reason: 'custom',
         })
-        councilDiag(`Applied persona model for ${persona}: ${entry.provider}/${entry.model}`)
+        councilDiag(`Applied persona model header for ${persona}: ${entry.provider}/${entry.model}`)
       }
     } else {
       councilDiag(`Persona ${persona} has no override — inheriting parent model`)
@@ -152,6 +179,7 @@ export function applyPersonaModel(ctx: Context, childId: string, persona: string
 /**
  * Start one continuable debater fiber (Round 1).
  * Pure reasoning invariant (I14): toolFilter denies mutation/orchestration tools.
+ * Materializes the child agent directly with the persona's configured model in agentOptions.
  */
 export async function startDebaterFiber(
   ctx: Context,
@@ -162,6 +190,10 @@ export async function startDebaterFiber(
   signal: AbortSignal,
 ): Promise<DebaterFiberState> {
   const denied = COUNCIL_DENIED_TOOLS.filter(name => ctx.tools.get(name) !== undefined)
+  const personaModel = resolvePersonaModel(ctx, persona)
+
+  councilDiag(`Spawning debater ${persona} with model: ${personaModel ? `${personaModel.provider}/${personaModel.model}` : `inherited from parent (${parent.options.provider}/${parent.options.model})`}`)
+
   const started = await ctx.subagents.startContinuable({
     provider: 'spawn',
     label: `council debater: ${persona}`,
@@ -171,6 +203,12 @@ export async function startDebaterFiber(
       parent,
       persona: systemPrompt,
       toolFilter: denied.length > 0 ? { deny: denied } : undefined,
+      ...personaModel !== undefined ? {
+        agentOptions: {
+          provider: personaModel.provider,
+          model: personaModel.model,
+        },
+      } : {},
     },
     signal,
   })
@@ -179,7 +217,7 @@ export async function startDebaterFiber(
     throw new Error(`council debater spawn returned an invalid child id for ${persona}: ${String(started.childId)}`)
   }
 
-  // Apply individual persona model if configured in Settings > Fleet
+  // Record custom request/header in child session log for audit/transcripts
   applyPersonaModel(ctx, started.childId, persona)
 
   return {
@@ -214,6 +252,8 @@ export async function followupDebaterFiber(
 
 /**
  * Poll a child session until its turn settles and return the text.
+ * Detects model errors (429, timeouts, network failures) immediately from turn/end
+ * events without waiting out the full timeout.
  */
 export async function waitForFiberTurn(
   ctx: Context,
@@ -251,6 +291,23 @@ export async function waitForFiberTurn(
               .trim()
             if (extracted.length > 0) {
               return extracted
+            }
+          }
+
+          // If no assistant message was produced, inspect turn/end for provider/model errors
+          const turnEnd = events.find(e => e.type === 'turn/end' && e.seq > since)
+          if (turnEnd !== undefined) {
+            const reason = (turnEnd.data as { reason?: { kind?: string; error?: { message?: string }; failure?: { message?: string }; reason?: { kind?: string } } })?.reason
+            if (reason?.kind === 'error') {
+              const errMsg = reason.error?.message ?? reason.failure?.message ?? 'Model execution failed'
+              throw new Error(`Turn failed: ${errMsg}`)
+            }
+            if (reason?.kind === 'aborted') {
+              const abortCause = reason.reason?.kind ?? 'cancelled'
+              throw new Error(`Turn was aborted (${abortCause})`)
+            }
+            if (reason?.kind === 'completed' && messages.length === 0) {
+              return '[NO_OUTPUT: debater returned empty content]'
             }
           }
         }
@@ -325,7 +382,7 @@ export async function executeParallelRound(
     return {
       persona: fiber.persona,
       childId: fiber.childId,
-      text: `[OFFLINE: ${lastError?.message ?? 'deliberation failed'}]`,
+      text: `[DEBATER ERROR: ${fiber.persona} failed: ${lastError?.message ?? 'deliberation failed'}]`,
       tokens: 0,
       isConcur: false,
       error: lastError?.message ?? 'deliberation failed',
@@ -344,7 +401,7 @@ export async function executeParallelRound(
       responses.push({
         persona: 'Unknown',
         childId: '',
-        text: '[OFFLINE: unhandled promise rejection]',
+        text: `[DEBATER ERROR: unhandled promise rejection: ${String(r.reason)}]`,
         tokens: 0,
         isConcur: false,
         error: String(r.reason),
@@ -354,7 +411,8 @@ export async function executeParallelRound(
 
   // 2/3 Quorum check: require at least 2 active debaters
   if (onlineCount < 2 && fibers.length >= 3) {
-    throw new Error(`Council failed 2/3 quorum: only ${onlineCount}/${fibers.length} debaters responded online.`)
+    const errorDetails = responses.filter(r => r.error).map(r => `${r.persona}: ${r.error}`).join('; ')
+    throw new Error(`Council failed 2/3 quorum: only ${onlineCount}/${fibers.length} debaters responded online. Errors: ${errorDetails}`)
   }
 
   return responses

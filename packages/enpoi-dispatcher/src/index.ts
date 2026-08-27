@@ -104,13 +104,13 @@ const SUBAGENT_RETURN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    changed: { type: 'array', items: { type: 'string' } },
-    verified: { type: 'boolean' },
-    NOT_verified: { type: 'array', items: { type: 'string' } },
-    remember_later: { type: 'array', items: { type: 'string' } },
-    summary: { type: 'string' },
+    changed: { type: 'array', items: { type: 'string' }, description: 'Files modified by the worker (if any)' },
+    verified: { type: 'boolean', description: 'Whether file changes were verified' },
+    NOT_verified: { type: 'array', items: { type: 'string' }, description: 'Changed files that could not be verified' },
+    remember_later: { type: 'array', items: { type: 'string' }, description: 'Important facts or architecture decisions to remember' },
+    summary: { type: 'string', description: 'Comprehensive findings, research report, or implementation summary' },
   },
-  required: ['changed', 'verified', 'NOT_verified', 'remember_later', 'summary'],
+  required: ['summary'],
 }
 
 function readLivingBrief(ctx: Context, session: Session): string | null {
@@ -155,7 +155,7 @@ function buildTaskCard(
     lines.push(brief + flagged)
   }
   lines.push('--- RETURN CONTRACT ---')
-  lines.push('Finish by filling the structured return: changed (files you modified), verified (true if you verified your work), NOT_verified (changed files you could not verify), remember_later (facts worth remembering).')
+  lines.push('Finish with a comprehensive summary in `summary` (findings, research report, or implementation status). If you modified files, list them in `changed` and set `verified`.')
   return lines.join('\n')
 }
 
@@ -216,12 +216,16 @@ function registerDispatcher(ctx: Context): void {
     },
     output: {
       schema: SUBAGENT_RETURN_SCHEMA,
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.verified
-          ? `Worker done — changed: ${(value.changed ?? []).join(', ') || 'none'}`
-          : `Worker done (unverified) — changed: ${(value.changed ?? []).join(', ') || 'none'}; NOT verified: ${(value.NOT_verified ?? []).join(', ') || 'none'}`,
-      }],
+      render: (_args, value) => {
+        const parts: string[] = []
+        if (Array.isArray(value.changed) && value.changed.length > 0) {
+          parts.push(`**Files Changed:** ${value.changed.join(', ')} (${value.verified ? 'verified' : 'unverified'})`)
+        }
+        if (typeof value.summary === 'string' && value.summary.trim() !== '') {
+          parts.push(value.summary.trim())
+        }
+        return [{ type: 'text', text: parts.join('\n\n') || 'Worker completed.' }]
+      },
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -283,12 +287,18 @@ function registerDispatcher(ctx: Context): void {
               const structured = result.structured as
                 | { changed?: string[]; verified?: boolean; NOT_verified?: string[]; remember_later?: string[]; summary?: string }
                 | undefined
+              const summaryText = (typeof structured?.summary === 'string' && structured.summary.trim() !== '')
+                ? structured.summary.trim()
+                : ((typeof result.text === 'string' && result.text.trim() !== '') ? result.text.trim() : 'Worker completed.')
+              const changedText = (Array.isArray(structured?.changed) && structured.changed.length > 0)
+                ? ` — changed: ${structured.changed.join(', ')} (${structured.verified ? 'verified' : 'unverified'})`
+                : ''
               const agent = ctx.get('agents')?.get(parent.session.id)
               if (agent !== undefined) {
                 agent.inject(createUserMessage({
                   content: [{
                     type: 'text',
-                    text: `📬 Worker '${args.worker}' (background) finished — ${structured?.verified ? 'verified' : 'unverified'} — changed: ${(structured?.changed ?? []).join(', ') || 'none'}.\n${(structured?.summary ?? result.text ?? '').slice(0, 500)}`,
+                    text: `📬 Worker '${args.worker}' (background) finished${changedText}.\n\n${summaryText}`,
                   }],
                   source: { kind: 'plugin', plugin: 'enpoi-dispatcher' },
                 }))
@@ -309,6 +319,9 @@ function registerDispatcher(ctx: Context): void {
         const structured = result.structured as
           | { changed?: string[]; verified?: boolean; NOT_verified?: string[]; remember_later?: string[]; summary?: string }
           | undefined
+        const summaryText = (typeof structured?.summary === 'string' && structured.summary.trim() !== '')
+          ? structured.summary.trim()
+          : ((typeof result.text === 'string' && result.text.trim() !== '') ? result.text.trim() : 'Worker completed.')
         await intakeWorkerClaims(args.worker, parent.session, structured, structured?.verified === true,
           JSON.stringify({ parentSessionId: parent.session.id }))
         return {
@@ -316,7 +329,7 @@ function registerDispatcher(ctx: Context): void {
           verified: structured?.verified ?? false,
           NOT_verified: structured?.NOT_verified ?? [],
           remember_later: structured?.remember_later ?? [],
-          summary: structured?.summary ?? result.text ?? 'worker finished',
+          summary: summaryText,
         }
       } finally {
         if (!handedOff) {

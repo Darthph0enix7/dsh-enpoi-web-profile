@@ -1,8 +1,8 @@
-// src/index.ts
+// packages/enpoi-council/src/index.ts
 import Schema from "schemastery";
 import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 
-// src/prompts.ts
+// packages/enpoi-council/src/prompts.ts
 var SKEPTIC_SYSTEM = `You are the **Skeptic** in a multi-agent dialectic debate (Roundtable).
 
 ## Your Epistemic Stance
@@ -308,7 +308,7 @@ Do not compress or lose valuable ideas. Structure your response in rich, product
 `;
 }
 
-// src/engine.ts
+// packages/enpoi-council/src/engine.ts
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -368,15 +368,29 @@ var COUNCIL_DENIED_TOOLS = [
   "memory_save",
   "memory_search",
   "memory_rescind",
-  "memory_confirm",
-  "report"
+  "memory_confirm"
 ];
-function applyPersonaModel(ctx, childId, persona) {
+function resolvePersonaModel(ctx, persona) {
   try {
     const settings = ctx.get("settings");
     const doc = settings?.get?.("enpoi-orchestration");
     const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
     const entry = doc?.personas?.[key];
+    if (entry && entry.provider && entry.model) {
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+      };
+    }
+  } catch (err) {
+    councilDiag(`resolvePersonaModel error for ${persona}: ${String(err)}`);
+  }
+  return void 0;
+}
+function applyPersonaModel(ctx, childId, persona) {
+  try {
+    const entry = resolvePersonaModel(ctx, persona);
     if (entry && entry.provider && entry.model) {
       const sessions = ctx.get("sessions");
       const childSession = sessions?.get?.(childId);
@@ -391,7 +405,7 @@ function applyPersonaModel(ctx, childId, persona) {
           },
           reason: "custom"
         });
-        councilDiag(`Applied persona model for ${persona}: ${entry.provider}/${entry.model}`);
+        councilDiag(`Applied persona model header for ${persona}: ${entry.provider}/${entry.model}`);
       }
     } else {
       councilDiag(`Persona ${persona} has no override \u2014 inheriting parent model`);
@@ -402,6 +416,8 @@ function applyPersonaModel(ctx, childId, persona) {
 }
 async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialPromptText, signal) {
   const denied = COUNCIL_DENIED_TOOLS.filter((name2) => ctx.tools.get(name2) !== void 0);
+  const personaModel = resolvePersonaModel(ctx, persona);
+  councilDiag(`Spawning debater ${persona} with model: ${personaModel ? `${personaModel.provider}/${personaModel.model}` : `inherited from parent (${parent.options.provider}/${parent.options.model})`}`);
   const started = await ctx.subagents.startContinuable({
     provider: "spawn",
     label: `council debater: ${persona}`,
@@ -410,7 +426,13 @@ async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialProm
       prompt: [{ type: "text", text: initialPromptText }],
       parent,
       persona: systemPrompt,
-      toolFilter: denied.length > 0 ? { deny: denied } : void 0
+      toolFilter: denied.length > 0 ? { deny: denied } : void 0,
+      ...personaModel !== void 0 ? {
+        agentOptions: {
+          provider: personaModel.provider,
+          model: personaModel.model
+        }
+      } : {}
     },
     signal
   });
@@ -461,6 +483,21 @@ async function waitForFiberTurn(ctx, childId, signal, timeoutMs = 9e4) {
             }).filter((t) => t.length > 0).join("\n").trim();
             if (extracted.length > 0) {
               return extracted;
+            }
+          }
+          const turnEnd = events.find((e) => e.type === "turn/end" && e.seq > since);
+          if (turnEnd !== void 0) {
+            const reason = turnEnd.data?.reason;
+            if (reason?.kind === "error") {
+              const errMsg = reason.error?.message ?? reason.failure?.message ?? "Model execution failed";
+              throw new Error(`Turn failed: ${errMsg}`);
+            }
+            if (reason?.kind === "aborted") {
+              const abortCause = reason.reason?.kind ?? "cancelled";
+              throw new Error(`Turn was aborted (${abortCause})`);
+            }
+            if (reason?.kind === "completed" && messages.length === 0) {
+              return "[NO_OUTPUT: debater returned empty content]";
             }
           }
         }
@@ -515,7 +552,7 @@ async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1
     return {
       persona: fiber.persona,
       childId: fiber.childId,
-      text: `[OFFLINE: ${lastError?.message ?? "deliberation failed"}]`,
+      text: `[DEBATER ERROR: ${fiber.persona} failed: ${lastError?.message ?? "deliberation failed"}]`,
       tokens: 0,
       isConcur: false,
       error: lastError?.message ?? "deliberation failed"
@@ -532,7 +569,7 @@ async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1
       responses.push({
         persona: "Unknown",
         childId: "",
-        text: "[OFFLINE: unhandled promise rejection]",
+        text: `[DEBATER ERROR: unhandled promise rejection: ${String(r.reason)}]`,
         tokens: 0,
         isConcur: false,
         error: String(r.reason)
@@ -540,7 +577,8 @@ async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1
     }
   }
   if (onlineCount < 2 && fibers.length >= 3) {
-    throw new Error(`Council failed 2/3 quorum: only ${onlineCount}/${fibers.length} debaters responded online.`);
+    const errorDetails = responses.filter((r) => r.error).map((r) => `${r.persona}: ${r.error}`).join("; ");
+    throw new Error(`Council failed 2/3 quorum: only ${onlineCount}/${fibers.length} debaters responded online. Errors: ${errorDetails}`);
   }
   return responses;
 }
@@ -558,7 +596,7 @@ async function disposeCouncilFibers(ctx, fibers) {
   }
 }
 
-// src/stopping.ts
+// packages/enpoi-council/src/stopping.ts
 var STOP_WORDS = /* @__PURE__ */ new Set([
   "the",
   "is",
@@ -708,7 +746,7 @@ function evaluateStopping(state, criticOutput, currentClaims) {
   };
 }
 
-// src/roundtable.ts
+// packages/enpoi-council/src/roundtable.ts
 var DEBATER_SYSTEMS = {
   Skeptic: SKEPTIC_SYSTEM,
   Architect: ARCHITECT_SYSTEM,
@@ -905,7 +943,7 @@ ${allRoundsText}`;
   }
 }
 
-// src/chorus.ts
+// packages/enpoi-council/src/chorus.ts
 var CHORUS_SYSTEMS = {
   Visionary: VISIONARY_SYSTEM,
   Experiencer: EXPERIENCER_SYSTEM,
@@ -1065,7 +1103,7 @@ ${allRoundsText}`;
   }
 }
 
-// src/tools.ts
+// packages/enpoi-council/src/tools.ts
 function registerCouncilTools(ctx, root) {
   ctx = root;
   const busyCouncils = /* @__PURE__ */ new Set();
@@ -1212,7 +1250,7 @@ function registerCouncilTools(ctx, root) {
   });
 }
 
-// src/index.ts
+// packages/enpoi-council/src/index.ts
 var name = "enpoi-council";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var ORCH_NS = settingsNamespace("enpoi-orchestration");
