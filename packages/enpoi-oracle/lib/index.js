@@ -286,6 +286,7 @@ function registerOracleTools(ctx, root) {
             const started = await ctx.subagents.startContinuable({
               provider: "spawn",
               label: `oracle review: ${args.request.slice(0, 60)}`,
+              quiet: true,
               request: {
                 prompt,
                 parent,

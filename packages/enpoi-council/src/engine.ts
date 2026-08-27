@@ -111,7 +111,7 @@ const COUNCIL_DENIED_TOOLS = [
   'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
   'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
   'todo_write', 'plan_mode', 'goal', 'roundtable', 'chorus',
-  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
+  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm', 'report',
 ]
 
 /**
@@ -165,6 +165,7 @@ export async function startDebaterFiber(
   const started = await ctx.subagents.startContinuable({
     provider: 'spawn',
     label: `council debater: ${persona}`,
+    quiet: true,
     request: {
       prompt: [{ type: 'text', text: initialPromptText }],
       parent,
