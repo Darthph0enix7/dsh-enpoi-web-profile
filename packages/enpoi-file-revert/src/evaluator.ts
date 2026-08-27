@@ -26,95 +26,31 @@ export interface EvalResult {
   reason?: string
 }
 
-export function evaluateFile(entry: SpanEntry, currentDisk: Buffer | null): EvalResult {
-  const { initialPre, finalPost } = entry
-  const currentSha = currentDisk === null ? null : sha256Of(currentDisk)
-  const postSha = finalPost.postBlobSha
-  const preSha = initialPre.preBlobSha
-
-  // Case 6: pre-state unavailable (too-large / unreadable) -> never auto-revert.
-  if (initialPre.preExisted && initialPre.preStatus !== 'ok') {
-    return {
-      state: STATE.UNAVAILABLE,
-      action: 'skip',
-      targetBlobSha: null,
-      expectedDiskSha: currentSha,
-      reason: `pre-agent snapshot unavailable (${initialPre.preStatus})`,
-    }
-  }
-
-  // Post-state capture failed: we cannot verify the agent's final state, so
-  // auto-revert is impossible — degrade to a prompt (never guess).
-  if (finalPost.postStatus !== 'ok' || postSha === null) {
-    return {
-      state: STATE.UNAVAILABLE,
-      action: 'skip',
-      targetBlobSha: preSha,
-      expectedDiskSha: currentSha,
-      reason: `post-agent snapshot unavailable (${finalPost.postStatus})`,
-    }
-  }
-
-  if (currentSha === null) {
-    if (!initialPre.preExisted) {
-      return { state: STATE.ALREADY_ABSENT, action: 'noop', targetBlobSha: null, expectedDiskSha: null }
-    }
-    return {
-      state: STATE.MISSING,
-      action: 'prompt',
-      targetBlobSha: preSha,
-      expectedDiskSha: null,
-      reason: 'file was present before the agent edits but is missing on disk',
-    }
-  }
-
-  if (currentSha === postSha) {
-    if (!initialPre.preExisted) {
-      return { state: STATE.CLEAN_TRASH, action: 'trash', targetBlobSha: null, expectedDiskSha: postSha }
-    }
-    if (initialPre.preStatus === 'ok') {
-      return { state: STATE.CLEAN_RESTORE, action: 'restore', targetBlobSha: preSha, expectedDiskSha: postSha }
-    }
-    return {
-      state: STATE.UNAVAILABLE,
-      action: 'skip',
-      targetBlobSha: null,
-      expectedDiskSha: postSha,
-      reason: `pre-agent snapshot unavailable (${initialPre.preStatus})`,
-    }
-  }
-
-  if (preSha !== null && currentSha === preSha) {
-    return { state: STATE.ALREADY_CLEAN, action: 'noop', targetBlobSha: null, expectedDiskSha: currentSha }
-  }
-
-  return {
-    state: STATE.CONFLICT,
-    action: 'prompt',
-    targetBlobSha: preSha,
-    expectedDiskSha: currentSha,
-    reason: 'current disk content differs from both the agent post-state and the pre-agent state',
-  }
-}
-
 export interface PlanEntry extends EvalResult {
   entry: SpanEntry
+}
+
+export interface TargetState {
+  preExisted: boolean
+  preStatus: string
+  preBlobSha: string | null
+  postBlobSha: string | null
 }
 
 /**
  * Boundary-based evaluation: the target state is the state AT the revert
  * boundary (initialPre for a new revert, finalPost for restore-all, or the
  * latest mutation ≤ seq for partial restore). Compares current disk against
- * both the target and the final post-state.
+ * all known mutation states in the span to safely handle intermediate states
+ * left by composing reverts or multi-turn edits.
  */
 export function evaluateBoundary(
   entry: SpanEntry,
-  target: { preExisted: boolean; preStatus: string; preBlobSha: string | null; postBlobSha: string | null },
+  target: TargetState,
   currentSha: string | null,
 ): EvalResult {
   const { initialPre, finalPost } = entry
   const postSha = finalPost.postBlobSha
-  const preSha = initialPre.preBlobSha
   const targetSha = target.postBlobSha ?? target.preBlobSha
   const targetAbsent = target.postBlobSha === null && target.preBlobSha === null
 
@@ -145,6 +81,18 @@ export function evaluateBoundary(
     if (targetAbsent) {
       return { state: STATE.ALREADY_ABSENT, action: 'noop', targetBlobSha: null, expectedDiskSha: null }
     }
+    // If the file was created in this span, absence is its initial pre-state.
+    // Restoring to a state where the file exists (targetSha) from an absent disk
+    // is a clean recreation / restore (cannot clobber user content).
+    if (!initialPre.preExisted) {
+      return {
+        state: STATE.CLEAN_RESTORE,
+        action: 'restore',
+        targetBlobSha: targetSha,
+        expectedDiskSha: null,
+      }
+    }
+    // Pre-existing file that unexpectedly vanished from disk -> prompt MISSING.
     return {
       state: STATE.MISSING,
       action: 'prompt',
@@ -159,23 +107,68 @@ export function evaluateBoundary(
     return { state: STATE.ALREADY_CLEAN, action: 'noop', targetBlobSha: null, expectedDiskSha: currentSha }
   }
 
-  if (currentSha === postSha || (preSha !== null && currentSha === preSha)) {
-    // Disk matches the agent's final state OR the pre-agent state — both are
-    // clean ends of the span, so the transition to the boundary is safe.
+  // Span-wide known-state scan (Oracle R4 + R2):
+  // Disk content is safe to transition if it matches ANY agent-authored post-state
+  // in the span, or ANY non-interleaved pre-state in the span.
+  // Interleaved pre-states are excluded (R2) because they could be user-authored.
+  const isKnownSpanState =
+    entry.records.some(r => r.postBlobSha !== null && r.postBlobSha === currentSha) ||
+    entry.records.some(r => !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha)
+
+  if (isKnownSpanState) {
     if (targetAbsent) {
-      return { state: STATE.CLEAN_TRASH, action: 'trash', targetBlobSha: null, expectedDiskSha: postSha }
+      // Invariant FR2 / Oracle R3: A file is deleted ONLY if it was created in this span.
+      // If target.preExisted is true (e.g. pre-existing file with unavailable target), do NOT trash.
+      if (target.preExisted) {
+        return {
+          state: STATE.UNAVAILABLE,
+          action: 'skip',
+          targetBlobSha: null,
+          expectedDiskSha: currentSha,
+          reason: 'target is absent but file pre-existed before span',
+        }
+      }
+      // Clean trash: report expectedDiskSha as currentSha (Oracle R1) so the
+      // executor's TOCTOU guard succeeds from intermediate disk states.
+      return {
+        state: STATE.CLEAN_TRASH,
+        action: 'trash',
+        targetBlobSha: null,
+        expectedDiskSha: currentSha,
+      }
     }
-    return { state: STATE.CLEAN_RESTORE, action: 'restore', targetBlobSha: targetSha, expectedDiskSha: currentSha }
+    // Clean restore to the boundary target.
+    return {
+      state: STATE.CLEAN_RESTORE,
+      action: 'restore',
+      targetBlobSha: targetSha,
+      expectedDiskSha: currentSha,
+    }
   }
 
-  // User edited on top -> conflict.
+  // User edited on top with unknown content -> conflict (zero silent clobber).
   return {
     state: STATE.CONFLICT,
     action: 'prompt',
     targetBlobSha: targetSha,
     expectedDiskSha: currentSha,
-    reason: 'current disk content differs from both the boundary state and the agent post-state',
+    reason: 'current disk content differs from all known agent mutation states in the span',
   }
+}
+
+/**
+ * Standard span evaluation for full-span reverts.
+ * Delegates to evaluateBoundary with initialPre as the target.
+ */
+export function evaluateFile(entry: SpanEntry, currentDisk: Buffer | null): EvalResult {
+  const target: TargetState = {
+    preExisted: entry.initialPre.preExisted,
+    preStatus: entry.initialPre.preStatus,
+    preBlobSha: entry.initialPre.preBlobSha,
+    postBlobSha: null,
+  }
+  const currentSha = currentDisk === null ? null : sha256Of(currentDisk)
+  return evaluateBoundary(entry, target, currentSha)
 }
 
 export async function buildRevertPlan(

@@ -129,7 +129,7 @@ export class RevertExecutor {
         // TOCTOU guard: re-check disk right before writing.
         const current = await opts.readDisk(targetKey)
         const currentSha = current === null ? null : sha256Of(current)
-        if (p.expectedDiskSha !== null && currentSha !== p.expectedDiskSha) {
+        if (currentSha !== p.expectedDiskSha) {
           outcomes[targetKey] = { status: 'conflict_escalated', reason: 'disk changed between evaluation and write' }
           continue
         }

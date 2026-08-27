@@ -255,6 +255,162 @@ describe('partial restore & interleaving', () => {
     expect(result.state).toBe(STATE.CLEAN_RESTORE)
     expect(result.targetBlobSha).toBe(entry.finalPost.postBlobSha)
   })
+
+  it('composing revert: create -> edit -> revert edit (v1) -> revert create (trash) -> file ENOENT', async () => {
+    // Realistic sequence numbering: user/message seq < tool/call seq.
+    // Turn 1: userSeq 10 -> toolSeq 12 (create v1)
+    await simulateMutation({ seq: 12, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: userSeq 20 -> toolSeq 22 (edit v2)
+    await simulateMutation({ seq: 22, callId: 'c2', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+
+    // 3. Revert Turn 2 (fromSeq = userSeq 20): target = state at userSeq 20 = v1. Disk is v2.
+    const entrySeq20 = env.manifest.aggregateSpan(20).get('doc.txt')!
+    const targetSeq20 = env.manifest.resolveRestoreTarget('doc.txt', 20)
+    expect(targetSeq20.postBlobSha).toBe(env.manifest.records[0].postBlobSha) // v1!
+    const evalSeq20 = evaluateBoundary(entrySeq20, targetSeq20, sha256Of(Buffer.from('v2')))
+    expect(evalSeq20.state).toBe(STATE.CLEAN_RESTORE)
+    const planSeq20 = new Map([['doc.txt', { ...evalSeq20 }]])
+    await runPlan(planSeq20, 20)
+    expect(await readFile(join(env.work, 'doc.txt'), 'utf8')).toBe('v1')
+
+    // 4. Revert Turn 1 (fromSeq = userSeq 10): target = state at userSeq 10 = absent. Disk is v1 (intermediate!).
+    // R1 guard: must resolve as CLEAN_TRASH and expectedDiskSha must be v1 (not v2).
+    const entrySeq10 = env.manifest.aggregateSpan(10).get('doc.txt')!
+    const targetSeq10 = env.manifest.resolveRestoreTarget('doc.txt', 10)
+    const evalSeq10 = evaluateBoundary(entrySeq10, targetSeq10, sha256Of(Buffer.from('v1')))
+    expect(evalSeq10.state).toBe(STATE.CLEAN_TRASH)
+    expect(evalSeq10.expectedDiskSha).toBe(sha256Of(Buffer.from('v1'))) // R1 check!
+    const planSeq10 = new Map([['doc.txt', { ...evalSeq10 }]])
+    const { outcomes } = await runPlan(planSeq10, 10)
+    expect(outcomes['doc.txt']?.status).toBe('trashed')
+    await expect(readFile(join(env.work, 'doc.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('restore-all from intermediate: disk at v1, target v2 -> CLEAN_RESTORE -> disk v2', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // Disk at intermediate state v1.
+    await writeFile(join(env.work, 'doc.txt'), 'v1')
+
+    const entry = env.manifest.aggregateSpan(10).get('doc.txt')!
+    const target = env.manifest.resolveRestoreTarget('doc.txt', null) // restore all -> v2
+    const result = evaluateBoundary(entry, target, sha256Of(Buffer.from('v1')))
+    expect(result.state).toBe(STATE.CLEAN_RESTORE)
+    expect(result.targetBlobSha).toBe(entry.finalPost.postBlobSha)
+    const plan = new Map([['doc.txt', { ...result }]])
+    const { outcomes } = await runPlan(plan, null as unknown as number)
+    expect(outcomes['doc.txt']?.status).toBe('restored')
+    expect(await readFile(join(env.work, 'doc.txt'), 'utf8')).toBe('v2')
+  })
+
+  it('restore-all from absent disk (created file trashed by revert): CLEAN_RESTORE -> recreates v2', async () => {
+    // 1. Create v1, Edit v2
+    await simulateMutation({ seq: 12, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    await simulateMutation({ seq: 22, callId: 'c2', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+
+    // 2. Revert creation -> trashes doc.txt -> disk is absent (null)
+    const entrySeq10 = env.manifest.aggregateSpan(10).get('doc.txt')!
+    const targetSeq10 = env.manifest.resolveRestoreTarget('doc.txt', 10)
+    const evalTrash = evaluateBoundary(entrySeq10, targetSeq10, sha256Of(Buffer.from('v2')))
+    await runPlan(new Map([['doc.txt', { ...evalTrash }]]), 10)
+    await expect(readFile(join(env.work, 'doc.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    // 3. Restore all: target is v2, disk is absent (null).
+    // Must evaluate to CLEAN_RESTORE with expectedDiskSha: null (not MISSING prompt!).
+    const targetRestoreAll = env.manifest.resolveRestoreTarget('doc.txt', null)
+    const evalRestoreAll = evaluateBoundary(entrySeq10, targetRestoreAll, null)
+    expect(evalRestoreAll.state).toBe(STATE.CLEAN_RESTORE)
+    expect(evalRestoreAll.action).toBe('restore')
+    expect(evalRestoreAll.targetBlobSha).toBe(entrySeq10.finalPost.postBlobSha)
+    expect(evalRestoreAll.expectedDiskSha).toBeNull()
+
+    // 4. Executor recreates file from blob store cleanly.
+    const { outcomes } = await runPlan(new Map([['doc.txt', { ...evalRestoreAll }]]), null as unknown as number)
+    expect(outcomes['doc.txt']?.status).toBe('restored')
+    expect(await readFile(join(env.work, 'doc.txt'), 'utf8')).toBe('v2')
+  })
+
+  it('strict TOCTOU guard: expectedDiskSha null escalates when disk is unexpectedly present', async () => {
+    await simulateMutation({ seq: 12, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // User unexpectedly created doc.txt on disk before write execution
+    await writeFile(join(env.work, 'doc.txt'), 'unexpected content')
+
+    const plan = new Map([['doc.txt', {
+      action: 'restore' as const,
+      targetBlobSha: env.manifest.records[0].postBlobSha,
+      expectedDiskSha: null, // plan asserted disk was absent!
+      entry: env.manifest.aggregateSpan(10).get('doc.txt')!,
+      state: STATE.CLEAN_RESTORE,
+    }]])
+    const { outcomes } = await env.executor.execute({
+      sessionId: 's1', revertSeq: null as unknown as number, plan,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(outcomes['doc.txt']?.status).toBe('conflict_escalated')
+    expect(await readFile(join(env.work, 'doc.txt'), 'utf8')).toBe('unexpected content') // untouched!
+  })
+
+  it('interleaved foreign-pre: record with foreign pre-state -> CONFLICT preserved (R2 guard)', async () => {
+    // Record 1: created v1
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Interleaved Record 2: user wrote USER_CONTENT between c1 and c2
+    await env.blobs.put(Buffer.from('USER_CONTENT'))
+    const postSha2 = await env.blobs.put(Buffer.from('v2'))
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: 20, callId: 'c2', targetKey: 'doc.txt', displayPath: 'doc.txt',
+      operation: 'update', preExisted: true, preStatus: 'ok',
+      preBlobSha: sha256Of(Buffer.from('USER_CONTENT')), // foreign pre-state!
+      postStatus: 'ok', postBlobSha: postSha2,
+      isInterleaved: true, // flagged!
+      timestamp: Date.now(),
+    })
+    // Disk is currently at USER_CONTENT.
+    await writeFile(join(env.work, 'doc.txt'), 'USER_CONTENT')
+
+    const entry = env.manifest.aggregateSpan(10).get('doc.txt')!
+    const target = env.manifest.resolveRestoreTarget('doc.txt', 10) // target = absent
+    // R2 check: USER_CONTENT must NOT be treated as a known agent state. Must CONFLICT.
+    const result = evaluateBoundary(entry, target, sha256Of(Buffer.from('USER_CONTENT')))
+    expect(result.state).toBe(STATE.CONFLICT)
+    expect(result.action).toBe('prompt')
+    expect(await readFile(join(env.work, 'doc.txt'), 'utf8')).toBe('USER_CONTENT') // untouched!
+  })
+
+  it('un-captured intermediate: postStatus too-large -> CONFLICT', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Record 2 has postStatus 'too-large' (postBlobSha is null)
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: 20, callId: 'c2', targetKey: 'doc.txt', displayPath: 'doc.txt',
+      operation: 'update', preExisted: true, preStatus: 'ok',
+      preBlobSha: sha256Of(Buffer.from('v1')),
+      postStatus: 'too-large', postBlobSha: null,
+      isInterleaved: false, timestamp: Date.now(),
+    })
+    // Disk is at uncaptured v2
+    await writeFile(join(env.work, 'doc.txt'), 'v2-uncaptured')
+
+    const entry = env.manifest.aggregateSpan(10).get('doc.txt')!
+    const target = env.manifest.resolveRestoreTarget('doc.txt', 10)
+    const result = evaluateBoundary(entry, target, sha256Of(Buffer.from('v2-uncaptured')))
+    expect(result.state).toBe(STATE.UNAVAILABLE)
+    expect(result.action).toBe('skip')
+  })
+
+  it('mid-span target through evaluateBoundary: restoreSeq=15 targets intermediate v1', async () => {
+    await writeFile(join(env.work, 'doc.txt'), 'v0')
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: Buffer.from('v0'), postBytes: Buffer.from('v1') })
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'doc.txt', displayPath: 'doc.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // Disk currently v2.
+    const entry = env.manifest.aggregateSpan(10).get('doc.txt')!
+    const target = env.manifest.resolveRestoreTarget('doc.txt', 15) // target is v1
+    const result = evaluateBoundary(entry, target, sha256Of(Buffer.from('v2')))
+    expect(result.state).toBe(STATE.CLEAN_RESTORE)
+    expect(result.targetBlobSha).toBe(env.manifest.records[0].postBlobSha) // v1
+    const plan = new Map([['doc.txt', { ...result }]])
+    const { outcomes } = await runPlan(plan, 15)
+    expect(outcomes['doc.txt']?.status).toBe('restored')
+    expect(await readFile(join(env.work, 'doc.txt'), 'utf8')).toBe('v1')
+  })
 })
 
 describe('WAL, crash recovery & durability', () => {

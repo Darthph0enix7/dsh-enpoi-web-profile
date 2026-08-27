@@ -1,11 +1,11 @@
-// src/index.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/index.ts
 import Schema from "schemastery";
 import { homedir } from "node:os";
 import { join as join4 } from "node:path";
 import { randomUUID as randomUUID2, createHash as createHash2 } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 
-// src/blob-store.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/blob-store.ts
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, unlink, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -53,7 +53,7 @@ var BlobStore = class {
   }
 };
 
-// src/manifest.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/manifest.ts
 import { mkdir as mkdir2, readFile as readFile2, appendFile } from "node:fs/promises";
 import { join as join2 } from "node:path";
 var MutationManifest = class {
@@ -171,7 +171,7 @@ var MutationManifest = class {
   }
 };
 
-// src/evaluator.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/evaluator.ts
 var STATE = {
   CLEAN_RESTORE: "clean_restore",
   CLEAN_TRASH: "clean_trash",
@@ -184,7 +184,6 @@ var STATE = {
 function evaluateBoundary(entry, target, currentSha) {
   const { initialPre, finalPost } = entry;
   const postSha = finalPost.postBlobSha;
-  const preSha = initialPre.preBlobSha;
   const targetSha = target.postBlobSha ?? target.preBlobSha;
   const targetAbsent = target.postBlobSha === null && target.preBlobSha === null;
   if (initialPre.preExisted && initialPre.preStatus !== "ok") {
@@ -209,6 +208,14 @@ function evaluateBoundary(entry, target, currentSha) {
     if (targetAbsent) {
       return { state: STATE.ALREADY_ABSENT, action: "noop", targetBlobSha: null, expectedDiskSha: null };
     }
+    if (!initialPre.preExisted) {
+      return {
+        state: STATE.CLEAN_RESTORE,
+        action: "restore",
+        targetBlobSha: targetSha,
+        expectedDiskSha: null
+      };
+    }
     return {
       state: STATE.MISSING,
       action: "prompt",
@@ -220,22 +227,42 @@ function evaluateBoundary(entry, target, currentSha) {
   if (currentSha === targetSha) {
     return { state: STATE.ALREADY_CLEAN, action: "noop", targetBlobSha: null, expectedDiskSha: currentSha };
   }
-  if (currentSha === postSha || preSha !== null && currentSha === preSha) {
+  const isKnownSpanState = entry.records.some((r) => r.postBlobSha !== null && r.postBlobSha === currentSha) || entry.records.some((r) => !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha);
+  if (isKnownSpanState) {
     if (targetAbsent) {
-      return { state: STATE.CLEAN_TRASH, action: "trash", targetBlobSha: null, expectedDiskSha: postSha };
+      if (target.preExisted) {
+        return {
+          state: STATE.UNAVAILABLE,
+          action: "skip",
+          targetBlobSha: null,
+          expectedDiskSha: currentSha,
+          reason: "target is absent but file pre-existed before span"
+        };
+      }
+      return {
+        state: STATE.CLEAN_TRASH,
+        action: "trash",
+        targetBlobSha: null,
+        expectedDiskSha: currentSha
+      };
     }
-    return { state: STATE.CLEAN_RESTORE, action: "restore", targetBlobSha: targetSha, expectedDiskSha: currentSha };
+    return {
+      state: STATE.CLEAN_RESTORE,
+      action: "restore",
+      targetBlobSha: targetSha,
+      expectedDiskSha: currentSha
+    };
   }
   return {
     state: STATE.CONFLICT,
     action: "prompt",
     targetBlobSha: targetSha,
     expectedDiskSha: currentSha,
-    reason: "current disk content differs from both the boundary state and the agent post-state"
+    reason: "current disk content differs from all known agent mutation states in the span"
   };
 }
 
-// src/executor.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/executor.ts
 import { mkdir as mkdir3, readFile as readFile3, appendFile as appendFile2, writeFile as writeFile2, rename } from "node:fs/promises";
 import { join as join3, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -317,7 +344,7 @@ var RevertExecutor = class {
         }
         const current = await opts.readDisk(targetKey);
         const currentSha = current === null ? null : sha256Of(current);
-        if (p.expectedDiskSha !== null && currentSha !== p.expectedDiskSha) {
+        if (currentSha !== p.expectedDiskSha) {
           outcomes[targetKey] = { status: "conflict_escalated", reason: "disk changed between evaluation and write" };
           continue;
         }
@@ -435,7 +462,7 @@ var RevertExecutor = class {
   }
 };
 
-// src/capture.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/capture.ts
 import { readFile as readFile4 } from "node:fs/promises";
 var MUTATION_TOOLS = /* @__PURE__ */ new Set(["edit", "write"]);
 async function capturePre(ctx, exec, pendingCaptures, maxSnapshotBytes) {
@@ -528,7 +555,7 @@ async function capturePost(ctx, exec, result, pendingCaptures, manifestFor, blob
   });
 }
 
-// src/index.ts
+// .dsh/profiles/web/packages/enpoi-file-revert/src/index.ts
 var name = "enpoi-file-revert";
 var inject = ["tools", "fs", "sessions", "sessionPersistence", "timer"];
 var FILE_HISTORY_ROOT = join4(homedir(), ".dsh", "file-history");
