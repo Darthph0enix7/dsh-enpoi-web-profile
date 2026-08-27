@@ -166,6 +166,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
     on: (name: string, fn: (...args: unknown[]) => unknown) => () => void
   }).on
   onAny('file-revert/resolve', async (...args: unknown[]) => {
+    diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`)
     const request = args[0] as {
       sessionId: string
       conflictId: string
@@ -173,8 +174,10 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
     }
     try {
       const outcome = await applyConflictResolution(ctx, request, executorFor)
+      diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`)
       return { accepted: true as const, ...outcome }
     } catch (err) {
+      diag(`file-revert/resolve ERROR: ${String(err)}`)
       return { accepted: false as const, reason: String(err) }
     }
   })

@@ -1,11 +1,11 @@
-// .dsh/profiles/web/packages/enpoi-file-revert/src/index.ts
+// src/index.ts
 import Schema from "schemastery";
 import { homedir } from "node:os";
 import { join as join4 } from "node:path";
 import { randomUUID as randomUUID2, createHash as createHash2 } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 
-// .dsh/profiles/web/packages/enpoi-file-revert/src/blob-store.ts
+// src/blob-store.ts
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, unlink, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -53,7 +53,7 @@ var BlobStore = class {
   }
 };
 
-// .dsh/profiles/web/packages/enpoi-file-revert/src/manifest.ts
+// src/manifest.ts
 import { mkdir as mkdir2, readFile as readFile2, appendFile } from "node:fs/promises";
 import { join as join2 } from "node:path";
 var MutationManifest = class {
@@ -171,7 +171,7 @@ var MutationManifest = class {
   }
 };
 
-// .dsh/profiles/web/packages/enpoi-file-revert/src/evaluator.ts
+// src/evaluator.ts
 var STATE = {
   CLEAN_RESTORE: "clean_restore",
   CLEAN_TRASH: "clean_trash",
@@ -262,7 +262,7 @@ function evaluateBoundary(entry, target, currentSha) {
   };
 }
 
-// .dsh/profiles/web/packages/enpoi-file-revert/src/executor.ts
+// src/executor.ts
 import { mkdir as mkdir3, readFile as readFile3, appendFile as appendFile2, writeFile as writeFile2, rename } from "node:fs/promises";
 import { join as join3, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -462,7 +462,7 @@ var RevertExecutor = class {
   }
 };
 
-// .dsh/profiles/web/packages/enpoi-file-revert/src/capture.ts
+// src/capture.ts
 import { readFile as readFile4 } from "node:fs/promises";
 var MUTATION_TOOLS = /* @__PURE__ */ new Set(["edit", "write"]);
 async function capturePre(ctx, exec, pendingCaptures, maxSnapshotBytes) {
@@ -555,7 +555,7 @@ async function capturePost(ctx, exec, result, pendingCaptures, manifestFor, blob
   });
 }
 
-// .dsh/profiles/web/packages/enpoi-file-revert/src/index.ts
+// src/index.ts
 var name = "enpoi-file-revert";
 var inject = ["tools", "fs", "sessions", "sessionPersistence", "timer"];
 var FILE_HISTORY_ROOT = join4(homedir(), ".dsh", "file-history");
@@ -664,11 +664,14 @@ function apply(ctx, config) {
   });
   const onAny = ctx.on;
   onAny("file-revert/resolve", async (...args) => {
+    diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
     const request = args[0];
     try {
       const outcome = await applyConflictResolution(ctx, request, executorFor);
+      diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
       return { accepted: true, ...outcome };
     } catch (err) {
+      diag(`file-revert/resolve ERROR: ${String(err)}`);
       return { accepted: false, reason: String(err) };
     }
   });
