@@ -119,7 +119,30 @@ export interface DynamicSkillEntry {
 }
 
 let globalSkills: DynamicSkillEntry[] = []
-let snapshotCache: { caps: CapabilitiesState; skills: DynamicSkillEntry[] } = { caps: globalCapsState, skills: globalSkills }
+
+/** Host-side MCP reachability heartbeat (enpoi-capabilities writes enpoi-orchestration.mcpStatus). */
+export interface McpStatusEntry {
+  state: 'online' | 'down'
+  mounted: boolean
+  checkedAt: number
+  authError?: boolean
+}
+
+/** Server catalog entries (enpoi-orchestration.mcpServers). */
+export interface McpServerEntry {
+  serverName?: string
+  url?: string
+}
+
+let globalMcpStatus: Record<string, McpStatusEntry> = {}
+let globalMcpServers: Record<string, McpServerEntry> = {}
+
+let snapshotCache: { caps: CapabilitiesState; skills: DynamicSkillEntry[]; mcpStatus: Record<string, McpStatusEntry>; mcpServers: Record<string, McpServerEntry> } = {
+  caps: globalCapsState,
+  skills: globalSkills,
+  mcpStatus: globalMcpStatus,
+  mcpServers: globalMcpServers,
+}
 
 function subscribe(fn: () => void) {
   listeners.add(fn)
@@ -127,7 +150,7 @@ function subscribe(fn: () => void) {
 }
 
 function notify() {
-  snapshotCache = { caps: globalCapsState, skills: globalSkills }
+  snapshotCache = { caps: globalCapsState, skills: globalSkills, mcpStatus: globalMcpStatus, mcpServers: globalMcpServers }
   for (const fn of listeners) fn()
 }
 
@@ -157,6 +180,33 @@ export async function refreshSkills(sessionId: string): Promise<void> {
   }
 }
 
+/** Re-read MCP heartbeat + server catalog from settings.describe (cheap, periodic while drawer open). */
+export async function refreshMcpStatus(): Promise<void> {
+  try {
+    const res = await fetch('/api/settings.describe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', method: 'settings.describe', rpcId: 'mcp-status-poll', payload: {} }),
+    })
+    if (!res.ok) return
+    const json = await res.json() as { result?: { value?: { namespaces?: Array<{ ns?: string; value?: { mcpStatus?: Record<string, McpStatusEntry>; mcpServers?: Record<string, McpServerEntry> } }> } } }
+    const namespaces = json?.result?.value?.namespaces
+    const orch = Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
+    let changed = false
+    if (orch?.value?.mcpStatus && typeof orch.value.mcpStatus === 'object') {
+      globalMcpStatus = orch.value.mcpStatus
+      changed = true
+    }
+    if (orch?.value?.mcpServers && typeof orch.value.mcpServers === 'object') {
+      globalMcpServers = orch.value.mcpServers
+      changed = true
+    }
+    if (changed) notify()
+  } catch {
+    // keep last known status on transient failures
+  }
+}
+
 // Initial prime from describe
 if (typeof window !== 'undefined') {
   void fetch('/api/settings.describe', {
@@ -170,7 +220,7 @@ if (typeof window !== 'undefined') {
     }),
   }).then(async (res) => {
     if (!res.ok) return
-    const json = await res.json() as { result?: { value?: { namespaces?: Array<{ ns?: string; value?: { capabilities?: Partial<CapabilitiesState> } }> } } }
+    const json = await res.json() as { result?: { value?: { namespaces?: Array<{ ns?: string; value?: { capabilities?: Partial<CapabilitiesState>; mcpStatus?: Record<string, McpStatusEntry>; mcpServers?: Record<string, McpServerEntry> } }> } } }
     const namespaces = json?.result?.value?.namespaces
     const orch = Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
     const serverCaps = orch?.value?.capabilities
@@ -181,6 +231,14 @@ if (typeof window !== 'undefined') {
       if (serverCaps.mcp) Object.assign(next.mcp, serverCaps.mcp)
       for (const p of PROTECTED_CAPABILITIES) next.tools[p] = true
       globalCapsState = next
+      notify()
+    }
+    if (orch?.value?.mcpStatus && typeof orch.value.mcpStatus === 'object') {
+      globalMcpStatus = orch.value.mcpStatus
+      notify()
+    }
+    if (orch?.value?.mcpServers && typeof orch.value.mcpServers === 'object') {
+      globalMcpServers = orch.value.mcpServers
       notify()
     }
   }).catch(() => {})
@@ -244,12 +302,33 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
 
   // Refresh the live skill catalog every time the drawer opens (and on mount),
   // so newly created/removed skill folders are reflected immediately.
+  // MCP heartbeat + server catalog re-poll every 15s while visible.
   const sessionId = props.scope?.sessionId ?? ''
   React.useEffect(() => {
     if (props.visible && sessionId) void refreshSkills(sessionId)
+    if (props.visible) void refreshMcpStatus()
   }, [props.visible, sessionId])
+  React.useEffect(() => {
+    if (!props.visible) return
+    const iv = window.setInterval(() => { void refreshMcpStatus() }, 15_000)
+    return () => { window.clearInterval(iv) }
+  }, [props.visible])
 
-  const mcpList = KNOWN_CAPABILITIES.filter(c => c.kind === 'mcp')
+  const mcpList: CapabilityDescriptor[] = (() => {
+    const rows = new Map<string, CapabilityDescriptor>()
+    for (const c of KNOWN_CAPABILITIES.filter(k => k.kind === 'mcp')) rows.set(c.id, { ...c })
+    for (const [id, def] of Object.entries(view.mcpServers)) {
+      if (!rows.has(id)) {
+        const friendly = def.serverName
+          ? def.serverName.charAt(0).toUpperCase() + def.serverName.slice(1)
+          : id.replace(/-mcp$/, '').split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+        let desc = 'MCP server'
+        try { desc = new URL(def.url ?? '').host } catch { /* keep default */ }
+        rows.set(id, { id, name: `${friendly} MCP`, kind: 'mcp', category: 'mcp', description: desc, defaultEnabled: false })
+      }
+    }
+    return [...rows.values()]
+  })()
   const skillList: CapabilityDescriptor[] = view.skills.map(s => ({
     id: s.name,
     name: s.name.split('-').map(w => (w.length <= 3 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(' '),
@@ -315,6 +394,28 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
                   ? (caps.skills[item.id] !== false)
                   : (caps.mcp[item.id] === true)
 
+            // MCP rows: connection heartbeat instead of enable-dot.
+            let dotColor = isEnabled ? '#34d399' : '#64748b'
+            let dotGlow = isEnabled ? '0 0 5px rgba(52, 211, 153, 0.6)' : 'none'
+            let connTitle = ''
+            if (kind === 'mcp') {
+              const st = view.mcpStatus[item.id]
+              const stale = !st || Date.now() - st.checkedAt > 45_000
+              if (stale) {
+                dotColor = '#475569'; dotGlow = 'none'
+                connTitle = 'Checking availability…'
+              } else if (st.state === 'down') {
+                dotColor = '#e5716f'; dotGlow = '0 0 4px rgba(229, 113, 111, 0.35)'
+                connTitle = 'Not reachable — server not running'
+              } else if (st.mounted) {
+                dotColor = '#34d399'; dotGlow = '0 0 5px rgba(52, 211, 153, 0.6)'
+                connTitle = 'Connected & mounted — tools active'
+              } else {
+                dotColor = '#67dce7'; dotGlow = '0 0 5px rgba(103, 220, 231, 0.45)'
+                connTitle = st.authError ? 'Server running · auth rejected' : 'Server running · toggled off'
+              }
+            }
+
             return (
               <div
                 key={item.id}
@@ -337,14 +438,17 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
                     alignItems: 'center',
                     gap: '5px',
                   }}>
-                    <span style={{
-                      width: '5px',
-                      height: '5px',
-                      borderRadius: '50%',
-                      flexShrink: 0,
-                      background: isEnabled ? '#34d399' : '#64748b',
-                      boxShadow: isEnabled ? '0 0 5px rgba(52, 211, 153, 0.6)' : 'none',
-                    }} />
+                    <span
+                      title={kind === 'mcp' ? connTitle : undefined}
+                      style={{
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '50%',
+                        flexShrink: 0,
+                        background: dotColor,
+                        boxShadow: dotGlow,
+                        cursor: kind === 'mcp' ? 'help' : undefined,
+                      }} />
                     <span>{item.name}</span>
                     {isProtected && (
                       <span style={{

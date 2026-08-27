@@ -222,6 +222,57 @@ function apply(ctx) {
       if (String(ns) !== "enpoi-orchestration") return;
       void syncMcpMounts();
     }));
+    let lastWrittenJson = "";
+    async function probeServer(id, def) {
+      if (!def.url) return { state: "down" };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      try {
+        const headers = {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          ...def.headers ?? {}
+        };
+        const apiKey = resolveCredential(def.apiKeyEnv);
+        if (apiKey && !headers.Authorization) headers.Authorization = `Bearer ${apiKey}`;
+        const res = await fetch(def.url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "enpoi-capabilities-probe", version: "1.0.0" } } }),
+          signal: controller.signal
+        });
+        return { state: "online", authError: res.status === 401 || res.status === 403 };
+      } catch {
+        return { state: "down" };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    async function probeAll() {
+      const catalog = getServerCatalog();
+      const next = {};
+      for (const [id, def] of Object.entries(catalog)) {
+        const isMounted = mounted.has(id) || mountedPending.has(id);
+        if (isMounted) {
+          next[id] = { state: "online", mounted: true, checkedAt: Date.now() };
+          continue;
+        }
+        const probe = await probeServer(id, def);
+        next[id] = { state: probe.state, mounted: false, checkedAt: Date.now(), ...probe.authError ? { authError: true } : {} };
+      }
+      const json = JSON.stringify(next);
+      if (json === lastWrittenJson) return;
+      lastWrittenJson = json;
+      try {
+        const settingsApi = ctx.get("settings");
+        void settingsApi.mutate?.(ORCH_NS, [{ op: "set", path: ["mcpStatus"], value: next }]);
+      } catch {
+      }
+    }
+    ctx.setInterval(() => void probeAll().catch(() => {
+    }), 15e3);
+    ctx.setTimeout(() => void probeAll().catch(() => {
+    }), 4e3);
   }).catch(() => {
   });
   ctx.on("agent/pre-step", (async (_params, next) => {

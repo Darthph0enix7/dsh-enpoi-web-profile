@@ -157,6 +157,67 @@ export function apply(ctx: Context): void {
       if (String(ns) !== 'enpoi-orchestration') return
       void syncMcpMounts()
     }) as (...args: unknown[]) => unknown)
+
+    // 2c. Reachability heartbeat (Adam): liveness of each catalog server,
+    //     INDEPENDENT of the enable toggle. green=mounted, blue=running but
+    //     toggled off, grey=unreachable. Results land in
+    //     enpoi-orchestration.mcpStatus so every client renders the same dots.
+    interface McpStatusEntry { state: 'online' | 'down'; mounted: boolean; checkedAt: number; authError?: boolean }
+    let lastWrittenJson = ''
+
+    /** One Streamable-HTTP liveness handshake; any HTTP response ⇒ online. */
+    async function probeServer(id: string, def: { url?: string; headers?: Record<string, string>; apiKeyEnv?: string }): Promise<{ state: 'online' | 'down'; authError?: boolean }> {
+      if (!def.url) return { state: 'down' }
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 2500)
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          ...(def.headers ?? {}),
+        }
+        const apiKey = resolveCredential(def.apiKeyEnv)
+        if (apiKey && !headers.Authorization) headers.Authorization = `Bearer ${apiKey}`
+        // Minimal Streamable-HTTP liveness: a JSON-RPC initialize handshake.
+        const res = await fetch(def.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'enpoi-capabilities-probe', version: '1.0.0' } } }),
+          signal: controller.signal,
+        })
+        return { state: 'online', authError: res.status === 401 || res.status === 403 }
+      } catch {
+        return { state: 'down' }
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+
+    async function probeAll(): Promise<void> {
+      const catalog = getServerCatalog()
+      const next: Record<string, McpStatusEntry> = {}
+      for (const [id, def] of Object.entries(catalog)) {
+        const isMounted = mounted.has(id) || mountedPending.has(id)
+        if (isMounted) {
+          next[id] = { state: 'online', mounted: true, checkedAt: Date.now() }
+          continue
+        }
+        const probe = await probeServer(id, def)
+        next[id] = { state: probe.state, mounted: false, checkedAt: Date.now(), ...(probe.authError ? { authError: true } : {}) }
+      }
+      const json = JSON.stringify(next)
+      if (json === lastWrittenJson) return
+      lastWrittenJson = json
+      try {
+        const settingsApi = ctx.get('settings') as unknown as { mutate?: (ns: unknown, ops: { op: string; path: string[]; value?: unknown }[]) => Promise<unknown> | undefined }
+        void settingsApi.mutate?.(ORCH_NS, [{ op: 'set', path: ['mcpStatus'], value: next }])
+      } catch {
+        // non-fatal: status is advisory only
+      }
+    }
+
+    ctx.setInterval(() => void probeAll().catch(() => {}), 15_000)
+    ctx.setTimeout(() => void probeAll().catch(() => {}), 4_000)
   }).catch(() => {})
 
   // 3. Invariant B4: Disabled skills are stripped from the skill-catalog message
