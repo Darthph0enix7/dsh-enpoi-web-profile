@@ -275,6 +275,9 @@ export function TextEditor(props: FileViewerProps) {
         if (lastStat !== null && (info.mtimeMs !== lastStat.mtimeMs || info.size !== lastStat.size)) {
           const fresh = await api.fsRead(scope, path)
           if (cancelled || fresh.kind !== 'text') return
+          // Keystroke-loss guard (Oracle B2): the user may have typed during
+          // the stat/read awaits — never swap over a now-dirty document.
+          if (dirtyRef.current) return
           if (fresh.content !== contentRef.current) {
             // External change: swap the document in place (preserve undo).
             const view = viewRef.current

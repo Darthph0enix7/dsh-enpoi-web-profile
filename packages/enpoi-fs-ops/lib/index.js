@@ -3,6 +3,7 @@ import Schema from "schemastery";
 import { homedir } from "node:os";
 import { join, dirname, basename, resolve, isAbsolute, relative } from "node:path";
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 var name = "enpoi-fs-ops";
 var inject = ["webServer", "webRuntime", "sessions"];
 var TRASH_ROOT = join(homedir(), ".dsh", "trash", "sidebar");
@@ -132,7 +133,7 @@ function apply(ctx, _config) {
       if (path === cwd || relative(cwd, path) === "") {
         throw new FsOpsError("fs-error", "cannot delete the workspace root", 400);
       }
-      const destDir = join(TRASH_ROOT, `${Date.now()}-${basename(path)}`);
+      const destDir = join(TRASH_ROOT, `${Date.now()}-${randomUUID()}-${basename(path)}`);
       try {
         await mkdir(dirname(destDir), { recursive: true });
         await rename(path, destDir);
@@ -165,15 +166,12 @@ function apply(ctx, _config) {
         throw new FsOpsError("fs-error", "new file must stay inside the workspace", 400);
       }
       try {
-        await stat(target);
-        throw new FsOpsError("fs-error", `"${target}" already exists`, 409);
-      } catch (error) {
-        if (error instanceof FsOpsError) throw error;
-      }
-      try {
         await mkdir(parent, { recursive: true });
-        await writeFile(target, "", "utf8");
+        await writeFile(target, "", { flag: "wx" });
       } catch (error) {
+        if (error.code === "EEXIST") {
+          throw new FsOpsError("fs-error", `"${target}" already exists`, 409);
+        }
         throw new FsOpsError("fs-error", `cannot create "${target}": ${error instanceof Error ? error.message : String(error)}`, 400);
       }
       return { ok: true, path: target };
@@ -201,6 +199,31 @@ function apply(ctx, _config) {
         if (!isTrustedRequest(httpReq, trustedHosts)) {
           writeJson(httpRes, 403, { ok: false, error: { code: "forbidden", message: "forbidden" } });
           return;
+        }
+        const contentType = header(httpReq.headers, "content-type") ?? "";
+        if (!contentType.toLowerCase().includes("application/json")) {
+          writeJson(httpRes, 415, { ok: false, error: { code: "bad-request", message: "content-type must be application/json" } });
+          return;
+        }
+        const origin = header(httpReq.headers, "origin");
+        if (origin !== void 0 && origin !== "null") {
+          let originHost;
+          try {
+            originHost = new URL(origin).hostname;
+          } catch {
+            writeJson(httpRes, 403, { ok: false, error: { code: "forbidden", message: "forbidden" } });
+            return;
+          }
+          if (!isLoopbackHostname(originHost) && !trustedHosts.some((entry) => {
+            try {
+              return new URL(`http://${entry}`).hostname === originHost;
+            } catch {
+              return false;
+            }
+          })) {
+            writeJson(httpRes, 403, { ok: false, error: { code: "forbidden", message: "forbidden" } });
+            return;
+          }
         }
         if (httpReq.method !== "POST") {
           writeJson(httpRes, 405, { ok: false, error: { code: "method-error", message: "method not allowed" } });

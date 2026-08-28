@@ -123,6 +123,14 @@ export class RevertExecutor {
           outcomes[targetKey] = { status: 'no_op' }
           continue
         }
+        // Beside resolutions cannot be replayed: the timestamped beside path
+        // is not recorded in the WAL, and replaying to the ORIGINAL path
+        // would clobber the user's version. Escalate explicitly — the
+        // conflict card stays actionable (Oracle fix-soon #6).
+        if (action === 'recreate') {
+          outcomes[targetKey] = { status: 'conflict_escalated', reason: 'beside resolution cannot be replayed after a crash — resolve the conflict again' }
+          continue
+        }
         if (action === 'prompt' || action === 'skip') {
           outcomes[targetKey] = { status: 'pending_conflict' }
           continue

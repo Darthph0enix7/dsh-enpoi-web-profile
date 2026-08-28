@@ -369,6 +369,10 @@ var RevertExecutor = class {
           outcomes[targetKey] = { status: "no_op" };
           continue;
         }
+        if (action === "recreate") {
+          outcomes[targetKey] = { status: "conflict_escalated", reason: "beside resolution cannot be replayed after a crash \u2014 resolve the conflict again" };
+          continue;
+        }
         if (action === "prompt" || action === "skip") {
           outcomes[targetKey] = { status: "pending_conflict" };
           continue;

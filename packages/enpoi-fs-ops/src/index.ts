@@ -20,6 +20,7 @@ import Schema from 'schemastery'
 import { homedir } from 'node:os'
 import { join, dirname, basename, resolve, isAbsolute, relative } from 'node:path'
 import { mkdir, rename, stat, writeFile, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import type { IncomingHttpHeaders } from 'node:http'
 
 export const name = 'enpoi-fs-ops'
@@ -184,7 +185,9 @@ export function apply(ctx: Context, _config: FsOpsConfig): void {
         throw new FsOpsError('fs-error', 'cannot delete the workspace root', 400)
       }
       // Trash staging: never rm — recoverable by hand from ~/.dsh/trash/sidebar.
-      const destDir = join(TRASH_ROOT, `${Date.now()}-${basename(path)}`)
+      // UUID suffix prevents same-millisecond same-basename collisions
+      // (Oracle fix-soon #4).
+      const destDir = join(TRASH_ROOT, `${Date.now()}-${randomUUID()}-${basename(path)}`)
       try {
         await mkdir(dirname(destDir), { recursive: true })
         await rename(path, destDir)
@@ -219,15 +222,14 @@ export function apply(ctx: Context, _config: FsOpsConfig): void {
         throw new FsOpsError('fs-error', 'new file must stay inside the workspace', 400)
       }
       try {
-        await stat(target)
-        throw new FsOpsError('fs-error', `"${target}" already exists`, 409)
-      } catch (error) {
-        if (error instanceof FsOpsError) throw error
-      }
-      try {
+        // 'wx' = fail if the file exists (atomic no-clobber — closes the
+        // stat-then-write TOCTOU truncation window, Oracle fix-soon #1).
         await mkdir(parent, { recursive: true })
-        await writeFile(target, '', 'utf8')
+        await writeFile(target, '', { flag: 'wx' })
       } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new FsOpsError('fs-error', `"${target}" already exists`, 409)
+        }
         throw new FsOpsError('fs-error', `cannot create "${target}": ${error instanceof Error ? error.message : String(error)}`, 400)
       }
       return { ok: true, path: target }
@@ -266,6 +268,32 @@ export function apply(ctx: Context, _config: FsOpsConfig): void {
         if (!isTrustedRequest(httpReq, trustedHosts)) {
           writeJson(httpRes, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
           return
+        }
+        // Cross-site simple-request CSRF (Oracle B1): a text/plain POST from
+        // a malicious page is a CORS simple request — no preflight — and the
+        // fence (Host-only) would let it through. Requiring application/json
+        // forces a preflight for cross-site JSON, which our 405 on OPTIONS
+        // blocks. Also reject any explicit untrusted Origin outright.
+        const contentType = header(httpReq.headers, 'content-type') ?? ''
+        if (!contentType.toLowerCase().includes('application/json')) {
+          writeJson(httpRes, 415, { ok: false, error: { code: 'bad-request', message: 'content-type must be application/json' } })
+          return
+        }
+        const origin = header(httpReq.headers, 'origin')
+        if (origin !== undefined && origin !== 'null') {
+          let originHost: string
+          try {
+            originHost = new URL(origin).hostname
+          } catch {
+            writeJson(httpRes, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+            return
+          }
+          if (!isLoopbackHostname(originHost) && !trustedHosts.some((entry) => {
+            try { return new URL(`http://${entry}`).hostname === originHost } catch { return false }
+          })) {
+            writeJson(httpRes, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+            return
+          }
         }
         if (httpReq.method !== 'POST') {
           writeJson(httpRes, 405, { ok: false, error: { code: 'method-error', message: 'method not allowed' } })
