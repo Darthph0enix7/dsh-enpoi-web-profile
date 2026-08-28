@@ -454,6 +454,8 @@ var RevertExecutor = class {
         }
       }
       const path = await opts.resolvePath(opts.targetKey);
+      const beside = opts.beside === true;
+      const verifyPath = beside ? path : opts.targetKey;
       let outcome;
       if (opts.resolution === "restore" || opts.resolution === "recreate") {
         let bytes;
@@ -470,9 +472,11 @@ var RevertExecutor = class {
           return outcome;
         }
         await opts.writeDisk(path, bytes);
-        const verify = await opts.readDisk(opts.targetKey);
+        const verify = await opts.readDisk(verifyPath);
         if (verify === null || sha256Of(verify) !== opts.targetBlobSha) {
           outcome = { status: "conflict_escalated", reason: "post-write verification failed" };
+        } else if (beside) {
+          outcome = { status: "saved_beside", dest: path, toSha: opts.targetBlobSha };
         } else {
           outcome = { status: "restored", toSha: opts.targetBlobSha };
         }
@@ -901,13 +905,32 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, st
   } else if (resolution === "trash") {
     resolution = "trash";
   }
+  const besidePathOf = async (key) => {
+    const slash = key.lastIndexOf("/");
+    const dir = slash === -1 ? "." : key.slice(0, slash);
+    const base = slash === -1 ? key : key.slice(slash + 1);
+    const ts = Date.now();
+    let candidate = `${dir}/${base}.pre-revert.${ts}`;
+    let counter = 2;
+    while (true) {
+      try {
+        await import("node:fs/promises").then((m) => m.stat(candidate));
+        candidate = `${dir}/${base}.pre-revert.${ts}.${counter}`;
+        counter += 1;
+      } catch {
+        break;
+      }
+    }
+    return candidate;
+  };
   const outcome = await executor.applyResolution({
     sessionId: request.sessionId,
     targetKey: conflict.targetKey,
     resolution,
     targetBlobSha,
     expectedDiskSha: conflict.currentSha,
-    resolvePath: async (key) => key,
+    beside: resolution === "recreate" && conflict.currentSha !== null,
+    resolvePath: async (key) => resolution === "recreate" && conflict.currentSha !== null ? besidePathOf(key) : key,
     readDisk: async (key) => readDiskBytes(ctx, key),
     writeDisk: async (path, bytes) => executor.atomicWrite(path, bytes),
     trashFile: async (path) => executor.trash(path, request.sessionId)

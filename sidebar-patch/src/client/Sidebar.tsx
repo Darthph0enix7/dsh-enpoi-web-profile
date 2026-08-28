@@ -78,12 +78,25 @@ function TabContent(props: {
   onSubagentJump: (childSessionId: string) => void
   /** Open a diff tab from the git panel (placement handled by the store). */
   onOpenDiff: (tab: SidebarTab) => void
+  /** Bump to refresh the file tree after fs operations. */
+  fsChangedTick: number
+  /** Called after any successful fs operation (bumps the tree refresh). */
+  onFsChanged: () => void
 }) {
-  const { tab, sessionId, cwd, expanded, onToggleDir, onReferenceFile, ctx, store, visible, onSubagentJump, onOpenDiff } = props
+  const { tab, sessionId, cwd, expanded, onToggleDir, onReferenceFile, ctx, store, visible, onSubagentJump, onOpenDiff, fsChangedTick, onFsChanged } = props
   const scope = { sessionId, cwd }
   const descriptor = ctx.betterSidebar?.getTab(tab.type)
   if (descriptor === undefined) {
     return <OrphanedTab ctx={ctx} store={store} scope={scope} tab={tab} visible={visible} />
+  }
+  // File-system operations (enpoi-fs-ops plugin): rename / delete / create.
+  const onFsOp = {
+    rename: async (from: string, to: string): Promise<void> => { await api.fsRename(scope, from, to) },
+    delete: async (path: string, isDir: boolean): Promise<void> => { await api.fsDelete(scope, path) },
+    create: async (parent: string, name: string, isDir: boolean): Promise<void> => {
+      if (isDir) await api.fsMkdir(scope, parent, name)
+      else await api.fsCreate(scope, parent, name)
+    },
   }
   // One boundary per tab: a render crash in a viewer/editor shows a strip in
   // THIS tab's pane only — the toggle cluster, the other tabs, and the panel
@@ -99,6 +112,7 @@ function TabContent(props: {
     createElement(descriptor.component, {
       ctx, store, scope, tab, visible, expanded,
       onToggleDir, onReferenceFile, onOpenDiff, onSubagentJump,
+      onFsOp, onFsChanged, fsChangedTick,
     }),
   )
 }
@@ -155,6 +169,8 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   // Guarded: browsers without visualViewport (older WebViews, jsdom) stay
   // at 0. rAF-throttled, same pattern as useNarrowViewport.
   const [keyboardInset, setKeyboardInset] = useState(0)
+  /** Bumped after any fs operation so the file tree refreshes. */
+  const [fsChangedTick, setFsChangedTick] = useState(0)
   useEffect(() => {
     const vv = window.visualViewport
     if (vv === null || vv === undefined) return
@@ -930,6 +946,8 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
       visible={bottom ? state.bottomOpen && active : state.panelOpen && active}
       onSubagentJump={(childSessionId) => { subagentJumpRef.current = childSessionId }}
       onOpenDiff={(diffTab) => { store.reduce(s => openDiffTab(s, paneId, diffTab)) }}
+      fsChangedTick={fsChangedTick}
+      onFsChanged={() => { setFsChangedTick(tick => tick + 1) }}
     />
   )
 

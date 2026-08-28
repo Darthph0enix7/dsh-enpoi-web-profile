@@ -189,6 +189,10 @@ export class RevertExecutor {
     resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     targetBlobSha: string | null
     expectedDiskSha: string | null
+    /** True when the caller redirected the write to a NEW beside path
+     *  (Save Beside): the post-write verification targets the resolved
+     *  path and the outcome is `saved_beside`. */
+    beside?: boolean
     resolvePath: (targetKey: string) => Promise<string>
     readDisk: (targetKey: string) => Promise<Buffer | null>
     writeDisk: (path: string, bytes: Buffer) => Promise<void>
@@ -240,6 +244,11 @@ export class RevertExecutor {
       }
 
       const path = await opts.resolvePath(opts.targetKey)
+      // A beside write (Save Beside) must verify against the RESOLVED path,
+      // never the original key (Oracle G: verifying the original would
+      // falsely escalate after a successful beside write).
+      const beside = opts.beside === true
+      const verifyPath = beside ? path : opts.targetKey
       let outcome: { status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }
       if (opts.resolution === 'restore' || opts.resolution === 'recreate') {
         let bytes: Buffer | null
@@ -256,9 +265,13 @@ export class RevertExecutor {
           return outcome
         }
         await opts.writeDisk(path, bytes)
-        const verify = await opts.readDisk(opts.targetKey)
+        const verify = await opts.readDisk(verifyPath)
         if (verify === null || sha256Of(verify) !== opts.targetBlobSha) {
           outcome = { status: 'conflict_escalated', reason: 'post-write verification failed' }
+        } else if (beside) {
+          // Save Beside: the user's version stays untouched at the original
+          // path; the pre-agent snapshot is written beside it.
+          outcome = { status: 'saved_beside', dest: path, toSha: opts.targetBlobSha }
         } else {
           outcome = { status: 'restored', toSha: opts.targetBlobSha }
         }

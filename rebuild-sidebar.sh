@@ -29,6 +29,7 @@ if [ -d "$PATCH_DIR" ]; then
   cp -r "$PATCH_DIR/src/"* "$PKG_DIR/src/" 2>/dev/null || true
   cp "$PATCH_DIR/build-client.mjs" "$PKG_DIR/build-client.mjs" 2>/dev/null || true
   cp "$PATCH_DIR/build-client.cjs" "$PKG_DIR/build-client.cjs" 2>/dev/null || true
+  cp "$PATCH_DIR/build-chunks.cjs" "$PKG_DIR/build-chunks.cjs" 2>/dev/null || true
   echo "synced patched sidebar sources from $PATCH_DIR"
 fi
 
@@ -68,6 +69,10 @@ PY
 cd "$PKG_DIR"
 node build-client.mjs
 node --check lib/client.js
+# Rebuild the lazy chunk bundles (client-editor.js etc.) — the npm-published
+# copies predate our TextEditor/FileTree patches.
+node build-chunks.cjs
+node --check lib/client-editor.js
 
 # Rebuild the HOST bundle too (PTY quota/eviction + host routes live in
 # lib/index.js; the npm-published copy predates our patches).

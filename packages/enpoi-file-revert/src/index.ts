@@ -458,13 +458,38 @@ async function applyConflictResolution(
     resolution = 'trash'
   }
 
+  // Save Beside: when the user edited on top (file exists on disk), the
+  // pre-agent snapshot is written to a NEW path beside the original
+  // (`<base>.pre-revert.<ts>`), leaving the user's version untouched. For a
+  // MISSING conflict (file absent) recreate restores at the original path.
+  // Collision-safe: append a counter when the target already exists.
+  const besidePathOf = async (key: string): Promise<string> => {
+    const slash = key.lastIndexOf('/')
+    const dir = slash === -1 ? '.' : key.slice(0, slash)
+    const base = slash === -1 ? key : key.slice(slash + 1)
+    const ts = Date.now()
+    let candidate = `${dir}/${base}.pre-revert.${ts}`
+    let counter = 2
+    while (true) {
+      try {
+        await import('node:fs/promises').then(m => m.stat(candidate))
+        candidate = `${dir}/${base}.pre-revert.${ts}.${counter}`
+        counter += 1
+      } catch {
+        break
+      }
+    }
+    return candidate
+  }
+
   const outcome = await executor.applyResolution({
     sessionId: request.sessionId,
     targetKey: conflict.targetKey,
     resolution,
     targetBlobSha,
     expectedDiskSha: conflict.currentSha,
-    resolvePath: async (key: string) => key,
+    beside: resolution === 'recreate' && conflict.currentSha !== null,
+    resolvePath: async (key: string) => (resolution === 'recreate' && conflict.currentSha !== null ? besidePathOf(key) : key),
     readDisk: async (key: string) => readDiskBytes(ctx, key),
     writeDisk: async (path: string, bytes: Buffer) => executor.atomicWrite(path, bytes),
     trashFile: async (path: string) => executor.trash(path, request.sessionId),

@@ -1,0 +1,4 @@
+# dsh-enpoi-fs-ops — file-system operations for the sidebar.
+- insert:
+    - id: enpoi-fs-ops
+      name: 'dsh-enpoi-fs-ops'

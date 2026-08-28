@@ -72,7 +72,10 @@ async function simulateMutation(opts: {
 }
 
 const readDisk = async (targetKey: string): Promise<Buffer | null> => {
-  try { return await readFile(join(env.work, targetKey)) } catch (err) { if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null; throw err }
+  // Path-aware: the executor may pass a RESOLVED absolute path (beside
+  // writes); join only relative keys onto the work dir.
+  const p = targetKey.startsWith('/') ? targetKey : join(env.work, targetKey)
+  try { return await readFile(p) } catch (err) { if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null; throw err }
 }
 const resolvePath = async (targetKey: string): Promise<string> => join(env.work, targetKey)
 const atomicWriter = async (p: string, b: Buffer): Promise<void> => env.executor.atomicWrite(p, b)
@@ -777,5 +780,26 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     // The batch intent (seq 10) must still be unsealed
     const unsealed = await env.executor.findUnsealedIntents()
     expect(unsealed.some(i => i.revertSeq === 10)).toBe(true)
+  })
+
+  it('save beside: recreate writes the pre-agent snapshot to a NEW path, user version untouched', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    const manualSha = sha256Of(Buffer.from('user manual edit'))
+    // Beside resolution: resolvePath returns a NEW path for recreate.
+    const besidePath = join(env.work, 'a.txt.pre-revert.1234')
+    const outcome = await env.executor.applyResolution({
+      sessionId: 's1', targetKey: 'a.txt',
+      resolution: 'recreate', targetBlobSha: env.manifest.records[0].preBlobSha, expectedDiskSha: manualSha,
+      beside: true,
+      resolvePath: async (key: string) => (key === 'a.txt' ? besidePath : key),
+      readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(outcome.status).toBe('saved_beside')
+    expect(outcome.dest).toBe(besidePath)
+    // User version untouched at the original path
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+    // Pre-agent snapshot written beside
+    expect(await readFile(besidePath, 'utf8')).toBe('original')
   })
 })
