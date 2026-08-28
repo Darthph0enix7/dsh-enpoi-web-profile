@@ -594,14 +594,15 @@ case "pull"
                 rsync -a --delete "$g_dotfiles/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or cp -r "$g_dotfiles/presets/"* "$g_dsh_home/.agent-presets/"
                 echo "  ✔ Agent Presets deployed (global)"
             end
-            # Device-patch presets overlay (device-specific versions)
+            # Device-patch presets overlay (device-specific versions — ADDITIVE,
+            # never --delete: the patch may only override SOME presets)
             if test -d "$g_dotfiles/device-patches/$host/presets"
-                rsync -a --delete "$g_dotfiles/device-patches/$host/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or true
+                rsync -a "$g_dotfiles/device-patches/$host/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or true
                 echo "  ✔ Device presets overlaid (device-patches/$host/presets/)"
             end
-            # Local patches overlay (never synced, highest precedence)
+            # Local patches overlay (never synced, highest precedence — ADDITIVE)
             if test -d "$HOME/.dsh/local-patches/presets"
-                rsync -a --delete "$HOME/.dsh/local-patches/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or true
+                rsync -a "$HOME/.dsh/local-patches/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or true
                 echo "  ✔ Local preset patches overlaid (~/.dsh/local-patches/presets/)"
             end
 
