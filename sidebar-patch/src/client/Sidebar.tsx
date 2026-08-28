@@ -981,6 +981,8 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   ]
 
   const handleActivityClick = (type: string, title?: string) => {
+    // Prefs live on the SNAPSHOT, not the state — capture before the reduce.
+    const mergedExplorer = store.getSnapshot().prefs.editorExplorer
     store.reduce((s) => {
       // 1. Sanitize any cross-panel contamination: if bottomSplits has non-terminal tabs, migrate them to splits
       const bottomLeaves = allLeaves(s.bottomSplits)
@@ -1019,9 +1021,12 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
         }
       }
 
-      // 3. Re-activate if this tab type already exists in the right pane
+      // 3. Re-activate if this tab type already exists in the right pane.
+      // Merged mode: ANY editor tab re-activates (the open file + tree state
+      // restore exactly as left). Split mode: the path-less home tab is the
+      // standalone explorer.
       const existing = type === 'editor'
-        ? rightPane.tabs.find(t => t.type === 'editor' && t.path === undefined)
+        ? rightPane.tabs.find(t => t.type === 'editor' && (mergedExplorer ? true : t.path === undefined))
         : rightPane.tabs.find(t => t.type === type)
 
       if (existing !== undefined) {

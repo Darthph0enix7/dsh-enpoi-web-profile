@@ -284,6 +284,8 @@ export interface EditorToolbarState {
   /** Whether saving applies (text content loaded). */
   editable: boolean
   saveState: 'idle' | 'saving' | 'saved' | 'failed'
+  /** Line wrapping active (the wrap toggle's pressed state). */
+  wrap?: boolean
 }
 
 /** The commands the host's merged-mode header sends back to the viewer. */

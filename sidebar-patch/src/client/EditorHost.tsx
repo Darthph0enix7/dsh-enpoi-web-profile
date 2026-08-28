@@ -407,26 +407,18 @@ export function EditorHost(props: {
         {toolbar?.editable === true && controlsRef.current?.toggleWrap !== undefined && (
           <button
             type="button"
-            className={css.iconButton}
+            className={clsx(css.iconButton, toolbar.wrap !== false && css.editorTreeToggleActive)}
             aria-label={t('wrapToggle')}
-            title={t('wrapToggle')}
+            title={toolbar.wrap !== false ? t('wrapOn') : t('wrapOff')}
+            aria-pressed={toolbar.wrap !== false}
             onClick={() => { controlsRef.current?.toggleWrap?.() }}
           >
-            <IconWrap16 wrapped />
+            <IconWrap16 wrapped={toolbar.wrap !== false} />
           </button>
         )}
         {saveLabel !== '' && (
           <span className={clsx(css.editorStatus, toolbar?.saveState === 'failed' && css.editorStatusError)}>{saveLabel}</span>
         )}
-        <button
-          type="button"
-          className={css.iconButton}
-          aria-label={t('revealInTree')}
-          title={t('revealInTree')}
-          onClick={revealInTree}
-        >
-          <IconFolderOpen16 size={14} />
-        </button>
         <button
           type="button"
           className={clsx(css.iconButton, treeOpen && css.editorTreeToggleActive)}

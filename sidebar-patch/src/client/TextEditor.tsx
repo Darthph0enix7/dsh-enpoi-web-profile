@@ -247,11 +247,15 @@ export function TextEditor(props: FileViewerProps) {
 
   // Wrap toggle: reconfigure only the wrap compartment — document, undo
   // history and scroll position survive. No-wrap = horizontal scroll.
+  // The current state is read from a ref so the host-toolbar registration
+  // (captured once on mount) never goes stale — each click flips correctly.
+  const wrapRef = useRef(wrap)
+  wrapRef.current = wrap
   const toggleWrap = (): void => {
     const view = viewRef.current
     const wrapComp = wrapCompRef.current
     if (view === null || wrapComp === null) return
-    const next = !wrap
+    const next = !wrapRef.current
     setWrap(next)
     view.dispatch({ effects: wrapComp.reconfigure(next ? CodeMirrorView.lineWrapping : []) })
   }
@@ -397,7 +401,7 @@ export function TextEditor(props: FileViewerProps) {
   const lastToolbarRef = useRef('')
   useEffect(() => {
     if (!hostToolbar) return
-    const state: EditorToolbarState = { modes: markdown || html, mode, dirty, editable, saveState }
+    const state: EditorToolbarState = { modes: markdown || html, mode, dirty, editable, saveState, wrap }
     const key = JSON.stringify(state)
     if (lastToolbarRef.current === key) return
     lastToolbarRef.current = key
