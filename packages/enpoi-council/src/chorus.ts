@@ -9,6 +9,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { getBriefService } from 'dsh-enpoi-context-keeper'
+import { getCouncilParams } from './params'
 import {
   VISIONARY_SYSTEM,
   EXPERIENCER_SYSTEM,
@@ -23,7 +25,6 @@ import {
   type DebaterResponse,
   executeParallelRound,
   disposeCouncilFibers,
-  MAX_DEBATE_TOKENS,
   startDebaterFiber,
   waitForFiberTurn,
   estimateTokens,
@@ -83,14 +84,27 @@ export async function runChorus(
   signal: AbortSignal,
 ): Promise<ChorusResult> {
   const startedAt = Date.now()
-  const maxRounds = args.maxRounds ?? 4
-  const hideLimit = args.hideLimit ?? true
+  // Doc 38: runtime parameters resolved fresh per brainstorm (hot-swap).
+  const params = getCouncilParams(ctx)
+  const maxRounds = args.maxRounds ?? params.defaultMaxRounds
+  const hideLimit = args.hideLimit ?? params.defaultHideLimit
 
   const modelsUsed: Record<string, string> = {
     Visionary: 'flagship',
     Experiencer: 'flagship',
     Integrator: 'flash',
     Curator: 'flagship',
+  }
+
+  // Demand-driven cognition (Oracle amendment 6): materialize the prose brief
+  // BEFORE the lens fibers spawn — the frozen brief package and model pinning
+  // stay atomic. Soft-degrading on failure.
+  try {
+    await getBriefService()?.ensureFreshBrief(parent.session, signal)
+  } catch {
+    // Oracle nit: a cancelled caller must not spawn lens fibers on a dead
+    // signal — propagate the abort.
+    if (signal.aborted) throw signal.reason ?? new Error('aborted')
   }
 
   const briefText = getLivingBriefText(ctx, parent)
@@ -108,7 +122,7 @@ export async function runChorus(
     maxRounds,
     hideLimit,
     cumulativeTokens: 0,
-    maxTokens: MAX_DEBATE_TOKENS,
+    maxTokens: params.maxDebateTokens,
     history: [],
   }
 
@@ -146,6 +160,7 @@ export async function runChorus(
         isRound1,
         CHORUS_SYSTEMS,
         signal,
+        { quorumFraction: params.quorumFraction, debaterRetryCount: params.debaterRetryCount, debaterTimeoutMs: params.debaterTimeoutMs },
       )
 
       if (signal.aborted) throw new Error('chorus brainstorm cancelled by user')
@@ -181,7 +196,7 @@ Provide:
         })
       }
 
-      const curatorText = await waitForFiberTurn(ctx, curatorFiber.childId, signal)
+      const curatorText = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs)
       stoppingState.cumulativeTokens += estimateTokens(curatorText)
       lastCuratorBrief = curatorText
 
@@ -199,7 +214,7 @@ Provide:
       })
 
       // 3. Evaluate Plateau / Stopping
-      const decision = evaluateStopping(stoppingState, null, currentIdeaTokens)
+      const decision = evaluateStopping(stoppingState, null, currentIdeaTokens, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold })
       stoppingState.history.push({
         round,
         claims: currentIdeaTokens,
@@ -227,7 +242,7 @@ Provide:
         source: { kind: 'user' },
         signal,
       })
-      finalHarvest = await waitForFiberTurn(ctx, curatorFiber.childId, signal)
+      finalHarvest = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs)
       stoppingState.cumulativeTokens += estimateTokens(finalHarvest)
     } else {
       finalHarvest = `## Chorus Harvest\n\nBrainstorm completed after ${stoppingState.round} rounds.\n\n${allRoundsText}`

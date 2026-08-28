@@ -88,6 +88,7 @@ export function evaluateStopping(
   state: StoppingState,
   criticOutput: CriticScore | null,
   currentClaims: Set<string>,
+  thresholds: { consensusThreshold: number; plateauDeltaThreshold: number } = { consensusThreshold: 0.8, plateauDeltaThreshold: 0.05 },
 ): StoppingDecision {
   const round = state.round
 
@@ -133,11 +134,11 @@ export function evaluateStopping(
     consensusRatio = jaccardSim // high similarity ~ high agreement
   }
 
-  // 4. Consensus reached threshold check (>= 0.80)
-  if (consensusRatio >= 0.80 && round >= 2) {
+  // 4. Consensus reached threshold check (>= consensusThreshold)
+  if (consensusRatio >= thresholds.consensusThreshold && round >= 2) {
     return {
       shouldStop: true,
-      reason: `Consensus reached (consensus ratio: ${consensusRatio.toFixed(2)} >= 0.80).`,
+      reason: `Consensus reached (consensus ratio: ${consensusRatio.toFixed(2)} >= ${thresholds.consensusThreshold.toFixed(2)}).`,
       stopCode: 'CONSENSUS_REACHED',
       heuristicFallback,
       consensusRatio,
@@ -145,8 +146,8 @@ export function evaluateStopping(
     }
   }
 
-  // 5. Plateau detection check (Delta < 0.05 on Round 3+)
-  if (round >= 3 && delta < 0.05) {
+  // 5. Plateau detection check (Delta < plateauDeltaThreshold on Round 3+)
+  if (round >= 3 && delta < thresholds.plateauDeltaThreshold) {
     const prevDelta = state.history.length >= 2
       ? 1.0 - calculateJaccardSimilarity(state.history[state.history.length - 2]!.claims, prevClaims)
       : 1.0
@@ -154,7 +155,7 @@ export function evaluateStopping(
     if (prevDelta < 0.25 || delta < 0.02) {
       return {
         shouldStop: true,
-        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)} < 0.05).`,
+        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)} < ${thresholds.plateauDeltaThreshold.toFixed(2)}).`,
         stopCode: 'PLATEAU_DETECTED',
         heuristicFallback,
         consensusRatio,

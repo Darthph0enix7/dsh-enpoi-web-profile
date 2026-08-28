@@ -1,21 +1,33 @@
 /**
- * Enpoi Harness Context Keeper — the silent background prose worker (doc 31 §7).
+ * Enpoi Harness Context Keeper — demand-driven cognition (Oracle-approved
+ * redesign, docs 31/35 amendments).
  *
- * Subscribes to `session/event`, reacts ONLY to `turn/end` milestones
- * (roundtable: milestone heuristics are YAGNI), debounces (config default
- * 15s, deployed profile 30s), single-flight per session, 45s hard lease
- * (doc 35 §4.3). Summarizes the recent turn with a flash-tier model
- * (primary + one fallback, soft-degrading — never blocks the session), then
- * appends `brief/prose-updated` via `session.append`. The primary route is
- * resolved per wake from `enpoi-orchestration.personas.keeper` when assigned,
- * else the plugin Config route.
+ * The prose Living Brief is NO LONGER pushed on every turn end. It is
+ * materialized ON DEMAND via `ensureFreshBrief()`, consumed exclusively by
+ * the Oracle (call #1) and Council (roundtable/chorus start) — both blocking
+ * tools that await it. Workers receive the deterministic fold + task card +
+ * whatever prose cache exists at spawn (read-only; they never trigger
+ * generation and never receive deltas).
  *
- * Deadlock discipline (Oracle): the turn/end listener NEVER appends
- * synchronously — it only arms the debounce timer. The append happens on a
- * clean stack after the LLM resolves, so `session.append`'s non-reentrant
- * guard can never trip. Self-ignore: the keeper's own appends emit
- * `brief/prose-updated` (not `turn/end`), so they cannot re-arm the
- * subscription — the origin filter is defense-in-depth insurance.
+ * Cache policy (Oracle amendments 2-4):
+ * - Freshness is STRUCTURAL-SEQ distance (basedOnSeq vs current seq, counting
+ *   only user/message, turn/end, tool/call, tool/result), not wall-clock.
+ * - `structuralDistanceK` (default 24) structural events → re-distill.
+ * - `minRefreshMs` (default 60s) is an anti-thrash floor, not a TTL.
+ * - Single-flight keyed per (session, basedOnSeq window): a caller joins the
+ *   in-flight pass only when its window is still fresh.
+ * - Failures are negative-cached for `negativeCacheMs` (default 120s) so a
+ *   provider outage cannot fire repeated fallback chains.
+ *
+ * Memory claims (CBDC Stream B) are DECOUPLED from prose: a batched listener
+ * runs one extraction pass per `claimsBatchSize` (default 8) non-aborted
+ * turn/ends or `claimsBatchMinutes` (default 5), whichever first. Per-claim
+ * trust labels: tool-sourced → `verified_execution`, chat-sourced →
+ * `operator` (Oracle amendment 5 — fixes the pre-existing trust bug where
+ * chat hearsay auto-graduated as verified).
+ *
+ * Deleted machinery (P3): the turn/end prose arming, debounce, rerun latch,
+ * and wedge-race state machine. The keeper is now a service, not a watcher.
  *
  * @module dsh-enpoi-context-keeper
  */
@@ -52,10 +64,19 @@ export interface Config {
   model?: string
   fallbackProvider?: string
   fallbackModel?: string
-  debounceMs?: number
   leaseMs?: number
   maxInputEvents?: number
   maxOutputTokens?: number
+  /** Structural-event distance that triggers a re-distillation. */
+  structuralDistanceK?: number
+  /** Anti-thrash floor: reuse a distillation younger than this. */
+  minRefreshMs?: number
+  /** Failure negative-cache window. */
+  negativeCacheMs?: number
+  /** Claims batch: one pass per N non-aborted turn/ends… */
+  claimsBatchSize?: number
+  /** …or T minutes, whichever first. */
+  claimsBatchMinutes?: number
 }
 
 export const Config = Schema.object({
@@ -63,16 +84,20 @@ export const Config = Schema.object({
   model: Schema.string().default('auto'),
   fallbackProvider: Schema.string().default('antigravity'),
   fallbackModel: Schema.string().default('gemini-3.7-flash-tiered'),
-  debounceMs: Schema.number().default(15_000),
   leaseMs: Schema.number().default(45_000),
   maxInputEvents: Schema.number().default(80),
   maxOutputTokens: Schema.number().default(2048),
+  structuralDistanceK: Schema.number().default(24),
+  minRefreshMs: Schema.number().default(60_000),
+  negativeCacheMs: Schema.number().default(120_000),
+  claimsBatchSize: Schema.number().default(8),
+  claimsBatchMinutes: Schema.number().default(5),
 })
 
 /** Secrets-exclusion instruction (doc 35 §1.1) — summarization never credentials. */
-const SYSTEM_PROMPT = [
+const PROSE_PROMPT = [
   'You are the Enpoi Harness context keeper — the master background summarizer and architectural keeper for this coding session.',
-  'You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to subagent workers, the Oracle, Council debaters, and permanent memory.',
+  'You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to the Oracle and Council debaters.',
   'If a [PREVIOUS SESSION BRIEF] is provided, incrementally merge it with the [RECENT SESSION EVENTS & TOOL RESULTS] (including Council/Roundtable consensus, Oracle verdicts, subagent returns, tool results, documentation paths, and user directives).',
   'NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.',
   '',
@@ -83,12 +108,8 @@ const SYSTEM_PROMPT = [
   '- If there are no open blockers, DO NOT emit the ⚡ section and NEVER write "No blockers remain...".',
   '- For simple queries, greetings, or health-checks (e.g. ping), emit ONLY a single-line 🎯 ACTIVE GOAL or keep the brief empty. NEVER invent placeholder bullets.',
   '',
-  'You have ONE background tool: memory_save. Use it via the CLAIMS block below.',
+  'Output ONLY the relevant section headers from below (omit any section with no substantive content):',
   '',
-  'Output EXACTLY two blocks, IN THIS ORDER (no other text at all):',
-  '',
-  'BLOCK 1 — PROSE:',
-  'Use ONLY the relevant section headers from below (omit any section with no substantive content):',
   '🎯 ACTIVE GOAL & CORE TRAJECTORY:',
   '- Current active objective, user directives, and high-level technical paradigms.',
   '',
@@ -104,21 +125,45 @@ const SYSTEM_PROMPT = [
   '⚡ ACTIVE BLOCKERS & OPEN QUESTIONS:',
   '- Unresolved technical questions, pending implementation tasks, or immediate next steps.',
   '',
-  'BLOCK 2 — CLAIMS:',
-  'A line starting with "CLAIMS:" followed by a JSON array of permanent facts you are SAVING to memory.db: [{"fact":"...","category":"ARCHITECTURE","tags":"..."}]',
-  '  - File 2–4 durable facts about Adam\'s environment/infrastructure/architecture whenever the session surfaces them.',
-  '  - Categories limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.',
-  '  - If no new permanent facts emerged, emit "CLAIMS: []".',
-  '  - NO credentials/passwords/tokens/secrets; skip transient chatter.',
+  'No other text at all — no preamble, no CLAIMS block, no JSON.',
 ].join('\n')
 
-/** Per-session keeper state: debounce timer + single-flight + lease. */
-export interface KeeperState {
-  timer: NodeJS.Timeout | null
-  running: boolean
-  /** A turn ended while a pass was in flight — schedule a trailing re-run. */
-  rerunRequested: boolean
-  turn: number
+/** Claims-only extraction prompt — decoupled from prose (Oracle amendment 5). */
+const CLAIMS_PROMPT = [
+  'You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about Adam\'s environment, infrastructure, and architecture.',
+  'NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.',
+  '',
+  'Output EXACTLY one line: "CLAIMS:" followed by a JSON array: [{"fact":"...","category":"ARCHITECTURE","tags":"...","source":"tool"}]',
+  '- category limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.',
+  '- source MUST be "tool" when the fact is derived from tool results/executions (verified by execution), or "chat" when it was stated by the user or assistant in conversation.',
+  '- File 2-4 durable facts whenever the session surfaces them; else "CLAIMS: []".',
+  '- Skip transient chatter and anything already obvious from the session itself.',
+  'No other text at all.',
+].join('\n')
+
+/** Structural event types — the only events that age the brief (Oracle amendment 3). */
+const STRUCTURAL_TYPES = new Set(['user/message', 'turn/end', 'tool/call', 'tool/result'])
+
+/** Count structural events with seq > fromSeq (backwards scan, O(distance)). */
+function countStructuralAfter(session: Session, fromSeq: number): number {
+  let count = 0
+  const events = session.events
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event.seq <= fromSeq) break
+    if (STRUCTURAL_TYPES.has(event.type)) count += 1
+  }
+  return count
+}
+
+/** Count structural events with seq <= toSeq (forward scan). */
+function countStructuralUpTo(session: Session, toSeq: number): number {
+  let count = 0
+  for (const event of session.events) {
+    if (event.seq > toSeq) break
+    if (STRUCTURAL_TYPES.has(event.type)) count += 1
+  }
+  return count
 }
 
 /** Resolved model route for one keeper wake (Oracle: resolve once per run, never inside executeRoute). */
@@ -128,6 +173,35 @@ interface ResolvedRoute {
   fallbackProvider: string
   fallbackModel: string
   reasoningEffort?: string
+}
+
+/**
+ * Resolve the keeper's runtime parameters (doc 38): the
+ * `enpoi-orchestration.parameters.keeper` settings namespace overrides the
+ * plugin Config per wake — hot-swap, no restart. Values are clamped to the
+ * doc-38 ranges.
+ */
+export function resolveKeeperParams(ctx: Context, config: Config): Config {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { keeper?: Partial<Config> } } } | undefined
+    const p = settings?.get?.('enpoi-orchestration')?.parameters?.keeper
+    if (p === undefined || typeof p !== 'object') return config
+    const clamp = (v: unknown, fallback: number, min: number, max: number): number =>
+      typeof v === 'number' && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback
+    return {
+      ...config,
+      leaseMs: clamp(p.leaseMs, config.leaseMs ?? 45_000, 15_000, 120_000),
+      maxInputEvents: clamp(p.maxInputEvents, config.maxInputEvents ?? 80, 20, 200),
+      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, 4096),
+      structuralDistanceK: clamp(p.structuralDistanceK, config.structuralDistanceK ?? 24, 4, 200),
+      minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 60_000, 5_000, 300_000),
+      negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 120_000, 5_000, 600_000),
+      claimsBatchSize: clamp(p.claimsBatchSize, config.claimsBatchSize ?? 8, 1, 50),
+      claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60),
+    }
+  } catch {
+    return config
+  }
 }
 
 /**
@@ -163,145 +237,299 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
   }
 }
 
+/** Result of an ensureFreshBrief call. */
+export interface BriefResult {
+  ok: boolean
+  prose: string | null
+  model?: string
+  reason: 'cache-hit' | 'distilled' | 'failed' | 'negative-cached'
+}
+
+/** Per-session brief cache entry. */
+interface BriefCacheEntry {
+  basedOnSeq: number
+  basedOnStructuralCount: number
+  prose: string
+  model: string
+  updatedAt: number
+  /** Failure negative-cache deadline (ms epoch); 0 = none. */
+  negativeUntil: number
+  /** In-flight distillation promise (single-flight). */
+  inFlight: Promise<BriefResult> | null
+  /** The snapshot seq the in-flight pass is based on. */
+  inFlightSnapshotSeq: number
+}
+
+function emptyEntry(): BriefCacheEntry {
+  return {
+    basedOnSeq: 0,
+    basedOnStructuralCount: 0,
+    prose: '',
+    model: '',
+    updatedAt: 0,
+    negativeUntil: 0,
+    inFlight: null,
+    inFlightSnapshotSeq: 0,
+  }
+}
+
+/**
+ * The demand-driven brief service. Owns the per-session prose cache and the
+ * single-flight distillation. Exposed to consumers (oracle, council) via the
+ * module-level singleton set in apply() — the profile packages are bundled
+ * separately, so a Cordis service registry cannot be shared reliably.
+ */
+export class BriefService {
+  private readonly cache = new Map<string, BriefCacheEntry>()
+
+  constructor(
+    private readonly ctx: Context,
+    private readonly config: Config,
+  ) {}
+
+  /**
+   * Materialize (or reuse) the session's prose brief.
+   *
+   * Cache policy: negative-cache → anti-thrash floor → structural distance →
+   * single-flight join → distill. Never throws for provider failures — it
+   * returns `{ ok: false }` (soft-degrading, frozen doc principle). Throws
+   * only when the CALLER's signal aborts (the consumer is being cancelled).
+   */
+  async ensureFreshBrief(session: Session, signal?: AbortSignal): Promise<BriefResult> {
+    const key = session.id
+    // Doc 38: runtime parameters resolved fresh per call (hot-swap).
+    const cfg = resolveKeeperParams(this.ctx, this.config)
+    const entry = this.cache.get(key)
+    const now = Date.now()
+
+    // 1. Negative cache: a recent failure is reused (no fallback-chain storms).
+    if (entry !== undefined && entry.negativeUntil > now) {
+      return { ok: false, prose: null, reason: 'negative-cached' }
+    }
+
+    // 2. Anti-thrash floor: a distillation younger than minRefreshMs is reused.
+    if (entry !== undefined && entry.prose.length > 0 && now - entry.updatedAt < (cfg.minRefreshMs ?? 60_000)) {
+      return { ok: true, prose: entry.prose, model: entry.model, reason: 'cache-hit' }
+    }
+
+    // 3. Structural freshness: silence never invalidates prose.
+    if (entry !== undefined && entry.prose.length > 0) {
+      const distance = countStructuralAfter(session, entry.basedOnSeq)
+      if (distance <= (cfg.structuralDistanceK ?? 24)) {
+        return { ok: true, prose: entry.prose, model: entry.model, reason: 'cache-hit' }
+      }
+    }
+
+    // 4. Single-flight: join an in-flight pass whose window is still fresh.
+    if (entry !== undefined && entry.inFlight !== null) {
+      const inFlightDistance = countStructuralAfter(session, entry.inFlightSnapshotSeq)
+      if (inFlightDistance <= (cfg.structuralDistanceK ?? 24)) {
+        try {
+          return await entry.inFlight
+        } catch (error) {
+          // Oracle defect 2: a joiner must NOT inherit the ORIGINATOR's abort
+          // rejection — only this caller's own cancellation propagates.
+          if (signal?.aborted) throw error
+          return { ok: false, prose: null, reason: 'failed' }
+        }
+      }
+      // The in-flight pass is for an older window — start a new one.
+    }
+
+    // 5. Distill (snapshot the seq BEFORE the async call — I3 causal ordering).
+    const snapshotSeq = session.events.at(-1)?.seq ?? session.seq
+    const promise = this.distill(session, signal, snapshotSeq, cfg)
+    this.cache.set(key, {
+      ...(entry ?? emptyEntry()),
+      inFlight: promise,
+      inFlightSnapshotSeq: snapshotSeq,
+    })
+    try {
+      return await promise
+    } finally {
+      const current = this.cache.get(key)
+      if (current !== undefined && current.inFlight === promise) {
+        this.cache.set(key, { ...current, inFlight: null })
+      }
+    }
+  }
+
+  /** One distillation pass: lease-bound LLM call, then append + cache. */
+  private async distill(session: Session, signal: AbortSignal | undefined, snapshotSeq: number, cfg: Config): Promise<BriefResult> {
+    const lease = new AbortController()
+    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
+    const combined = signal !== undefined ? AbortSignal.any([signal, lease.signal]) : lease.signal
+    try {
+      const input = frameInput(session, cfg.maxInputEvents ?? 80)
+      if (input.length === 0) {
+        diag(`ensureFreshBrief: session=${session.id} — empty input, skipping`)
+        return { ok: false, prose: null, reason: 'failed' }
+      }
+      const route = resolveKeeperRoute(this.ctx, cfg)
+      const snapshotStructural = countStructuralUpTo(session, snapshotSeq)
+      diag(`ensureFreshBrief: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`)
+      const result = await summarize(this.ctx, cfg, session, input, combined, route, PROSE_PROMPT, false)
+      const prose = cleanKeeperProse(result.text)
+      if (prose.length === 0) {
+        diag(`ensureFreshBrief: session=${session.id} — empty or cleaned-empty prose, skipping`)
+        return { ok: false, prose: null, reason: 'failed' }
+      }
+      // Clean stack: the LLM resolved, no append is being published.
+      session.append('brief/prose-updated', {
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: snapshotStructural,
+        structuralDistanceK: cfg.structuralDistanceK ?? 24,
+        model: result.route,
+        text: prose,
+        origin: 'context-keeper',
+      })
+      // Preserve the CURRENT entry's in-flight registration — a superseding
+      // pass for a newer window may be registered while this one completes
+      // (Oracle defect 1: unconditional inFlight:null erased it).
+      const current = this.cache.get(session.id)
+      this.cache.set(session.id, {
+        ...(current ?? emptyEntry()),
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: snapshotStructural,
+        prose,
+        model: result.route,
+        updatedAt: Date.now(),
+        negativeUntil: 0,
+      })
+      diag(`ensureFreshBrief: session=${session.id} — appended brief/prose-updated via ${result.route} (${prose.length} chars, basedOnSeq ${snapshotSeq})`)
+      return { ok: true, prose, model: result.route, reason: 'distilled' }
+    } catch (error) {
+      if (signal?.aborted) throw error // caller cancelled — propagate
+      const entry = this.cache.get(session.id)
+      this.cache.set(session.id, {
+        ...(entry ?? emptyEntry()),
+        negativeUntil: Date.now() + (cfg.negativeCacheMs ?? 120_000),
+      })
+      diag(`ensureFreshBrief: session=${session.id} — FAILED ${String(error)} (negative-cached ${cfg.negativeCacheMs ?? 120_000}ms)`)
+      return { ok: false, prose: null, reason: 'failed' }
+    } finally {
+      clearTimeout(leaseTimer)
+    }
+  }
+}
+
+/** Module-level singleton — set by apply(), read by consumers (oracle/council). */
+let briefService: BriefService | null = null
+
+/** Get the mounted brief service (null before apply or if the plugin is absent). */
+export function getBriefService(): BriefService | null {
+  return briefService
+}
+
+/** Create a standalone service (tests / headless use). */
+export function createBriefService(ctx: Context, config: Config): BriefService {
+  return new BriefService(ctx, config)
+}
+
 export function apply(ctx: Context, config: Config): void {
-  const states = new Map<string, KeeperState>()
-  diag(`apply: mounted (provider=${config.provider}/${config.model}, debounce=${config.debounceMs}ms, lease=${config.leaseMs}ms)`)
+  const ownedService = createBriefService(ctx, config)
+  briefService = ownedService
+  diag(`apply: mounted (demand-driven; prose on oracle/council use, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`)
+
+  // ── Claims batched listener (P1, survives P3) ─────────────────────────────
+  // A plain counter + timer — NO debounce, NO rerun latch, NO wedge machinery.
+  const claimCounters = new Map<string, { count: number; timer: NodeJS.Timeout | null }>()
+  const claimsRunning = new Set<string>()
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type !== 'turn/end') return
     const reason = (event.data as { reason: { kind: string } }).reason
-    if (reason.kind === 'aborted') return // don't summarize interrupted turns
-    diag(`turn/end: session=${session.id} turn=${(event.data as { turn: number }).turn} reason=${reason.kind} — arming`)
-    arm(ctx, config, states, session, (event.data as { turn: number }).turn)
+    if (reason.kind === 'aborted') return // don't extract from interrupted turns
+    let counter = claimCounters.get(session.id)
+    if (counter === undefined) {
+      counter = { count: 0, timer: null }
+      claimCounters.set(session.id, counter)
+    }
+    counter.count += 1
+    // 5-min timer, reset on each turn/end ("or T minutes, whichever first").
+    if (counter.timer !== null) clearTimeout(counter.timer)
+    counter.timer = setTimeout(() => {
+      counter!.timer = null
+      void runClaimsPass(ctx, config, session, claimsRunning)
+    }, (config.claimsBatchMinutes ?? 5) * 60_000)
+    // Batch size reached — run now.
+    if (counter.count >= (config.claimsBatchSize ?? 8)) {
+      counter.count = 0
+      if (counter.timer !== null) {
+        clearTimeout(counter.timer)
+        counter.timer = null
+      }
+      void runClaimsPass(ctx, config, session, claimsRunning)
+    }
   })
 
   ctx.on('dispose', () => {
-    for (const state of states.values()) {
-      if (state.timer !== null) clearTimeout(state.timer)
+    for (const counter of claimCounters.values()) {
+      if (counter.timer !== null) clearTimeout(counter.timer)
     }
-    states.clear()
+    claimCounters.clear()
+    claimsRunning.clear()
+    // Oracle Q4 nit: only null the singleton if WE own it — a second mounted
+    // instance (tests + runtime) must not kill the first's service.
+    if (briefService === ownedService) briefService = null
   })
 }
 
-/** Arm (or re-arm) the debounce for one session. Never appends synchronously. */
-export function arm(
+/** One batched claims pass: single-flight, lease-bound, trust-split intake. */
+async function runClaimsPass(
   ctx: Context,
   config: Config,
-  states: Map<string, KeeperState>,
   session: Session,
-  turn: number,
-): void {
-  const key = session.id
-  let state = states.get(key)
-  if (state === undefined) {
-    // Create the per-session state object ONCE and mutate it afterwards —
-    // replacing it while a run() holds the old reference wedges the keeper
-    // (the in-flight run resets `running` on the stale object, never this one).
-    state = { timer: null, running: false, rerunRequested: false, turn }
-    states.set(key, state)
-  }
-  if (state.timer !== null) clearTimeout(state.timer)
-  state.turn = turn
-  state.timer = setTimeout(() => {
-    state!.timer = null
-    void run(ctx, config, states, session, turn)
-  }, config.debounceMs)
-}
-
-/** One keeper pass: single-flight, lease-bound LLM call, then append. */
-export async function run(
-  ctx: Context,
-  config: Config,
-  states: Map<string, KeeperState>,
-  session: Session,
-  turn: number,
+  running: Set<string>,
 ): Promise<void> {
-  const key = session.id
-  const state = states.get(key)
-  if (state === undefined) return
-  state.timer = null
-  if (state.running) {
-    // A turn ended while a pass is in flight — latch a trailing re-run so the
-    // newest events are never dropped (Oracle wedge fix: the in-flight run's
-    // finally block schedules the trailing pass).
-    state.rerunRequested = true
-    return
-  }
-  state.running = true
-
+  if (running.has(session.id)) return // single-flight — the next batch catches it
+  running.add(session.id)
+  // Doc 38: runtime parameters resolved fresh per pass (hot-swap).
+  const cfg = resolveKeeperParams(ctx, config)
   const lease = new AbortController()
-  const leaseTimer = setTimeout(() => lease.abort(), config.leaseMs)
+  const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
   try {
-    const input = frameInput(session, config.maxInputEvents)
-    if (input.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} — empty input, skipping`)
+    const input = frameInput(session, cfg.maxInputEvents ?? 80)
+    if (input.length === 0) return
+    const route = resolveKeeperRoute(ctx, cfg)
+    diag(`claims: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`)
+    const result = await summarize(ctx, cfg, session, input, lease.signal, route, CLAIMS_PROMPT, true)
+    const claims = splitClaims(result.text)
+    if (claims.length === 0) {
+      diag(`claims: session=${session.id} — no claims extracted`)
       return
     }
-    // Resolve the model route ONCE per wake, at entry (Oracle: never inside
-    // executeRoute — one coherent primary/fallback pair per wake).
-    const route = resolveKeeperRoute(ctx, config)
-    diag(`run: session=${session.id} turn=${turn} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`)
-    // Capture the input's snapshot seq BEFORE the async LLM call — events
-    // landing during the call must not shift basedOnSeq forward (I3 causal
-    // ordering: a stale summary must never look fresher than a steered goal).
-    const snapshotSeq = session.events.at(-1)?.seq ?? session.seq
-    const result = await summarize(ctx, config, session, input, lease.signal, route)
-    if (result.text.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} — empty summary, skipping`)
-      return
-    }
-    // A3.5 isolation: split PROSE + CLAIMS (malformed claims never block prose).
-    diag(`run: session=${session.id} turn=${turn} — raw output: ${result.text.slice(0, 1200).replace(/\n/g, ' | ')}`)
-    const { prose: rawProse, claims } = splitProseClaims(result.text)
-    const prose = cleanKeeperProse(rawProse)
-    if (prose.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} — empty or cleaned-empty prose, skipping`)
-      return
-    }
-    // Clean stack: the LLM resolved, no append is being published.
-    session.append('brief/prose-updated', {
-      basedOnSeq: snapshotSeq,
-      model: result.route,
-      text: prose,
-      origin: 'context-keeper',
-    })
-    diag(`run: session=${session.id} turn=${turn} — appended brief/prose-updated via ${result.route} (${prose.length} chars, ${claims.length} claims)`)
-    ctx.logger.info(`enpoi-context-keeper: brief updated for session ${session.id} (turn ${turn})`)
-    // Durable-claim intake (Stage 1 of the CBDC pipeline) — verified_execution,
-    // auto-graduate; category boundaries enforced inside the pipeline (A3.4).
-    if (claims.length > 0) {
-      try {
-        const memDb = openMemoryDb()
-        const mem = makePipeline(memDb)
-        const inserted = await mem.intake(
-          claims.map(c => ({ fact: c.fact, category: c.category, tags: c.tags })),
-          { origin: 'keeper', trust: 'verified_execution', provenance: JSON.stringify({ sessionId: session.id, turn }) },
+    // Open INSIDE the try (Oracle D1): makePipeline construction must also be
+    // covered by the close — a construction throw must not leak the handle.
+    const memDb = openMemoryDb()
+    try {
+      const mem = makePipeline(memDb)
+      const provenance = JSON.stringify({ sessionId: session.id })
+      const toolClaims = claims.filter(c => c.source === 'tool')
+      const chatClaims = claims.filter(c => c.source !== 'tool')
+      if (toolClaims.length > 0) {
+        await mem.intake(
+          toolClaims.map(c => ({ fact: c.fact, category: c.category, tags: c.tags })),
+          { origin: 'keeper', trust: 'verified_execution', provenance },
         )
-        diag(`run: session=${session.id} turn=${turn} — memory intake: ${inserted.length} claim(s) filed`)
-      } catch (err) {
-        diag(`run: session=${session.id} turn=${turn} — memory intake FAILED: ${String(err)}`)
       }
+      if (chatClaims.length > 0) {
+        await mem.intake(
+          chatClaims.map(c => ({ fact: c.fact, category: c.category, tags: c.tags })),
+          { origin: 'keeper', trust: 'operator', provenance },
+        )
+      }
+      diag(`claims: session=${session.id} — ${toolClaims.length} tool + ${chatClaims.length} chat claim(s) filed`)
+    } finally {
+      // Oracle defect 4: node:sqlite does not auto-close on GC — close the
+      // per-pass handle or the fd leaks.
+      memDb.close()
     }
   } catch (error) {
-    if (lease.signal.aborted) {
-      diag(`run: session=${session.id} turn=${turn} — KEEPER_TIMEOUT`)
-      ctx.logger.warn(`enpoi-context-keeper: KEEPER_TIMEOUT session ${session.id} (turn ${turn})`)
-    } else {
-      diag(`run: session=${session.id} turn=${turn} — ERROR ${String(error)}`)
-      ctx.logger.warn(`enpoi-context-keeper: ${String(error)} (session ${session.id}, turn ${turn})`)
-    }
+    diag(`claims: session=${session.id} — FAILED ${String(error)}`)
   } finally {
     clearTimeout(leaseTimer)
-    state.running = false
-    // Trailing re-run: a turn ended while we were running — schedule a fresh
-    // debounced pass so the newest events get summarized (Oracle wedge fix).
-    if (state.rerunRequested) {
-      state.rerunRequested = false
-      state.timer = setTimeout(() => {
-        state!.timer = null
-        void run(ctx, config, states, session, state!.turn)
-      }, config.debounceMs)
-    }
+    running.delete(session.id)
   }
 }
 
@@ -343,32 +571,31 @@ export function cleanKeeperProse(text: string): string {
   return cleaned.join('\n\n')
 }
 
-/** Split the keeper output into PROSE + CLAIMS (A3.5: claims parse is isolated). */
-function splitProseClaims(text: string): {
-  prose: string
-  claims: Array<{ fact: string; category: string; tags?: string }>
-} {
+/** Parse the CLAIMS block with per-claim source tags (A3.5: parse is isolated). */
+export function splitClaims(text: string): Array<{ fact: string; category: string; tags?: string; source: 'tool' | 'chat' }> {
   const idx = text.indexOf('CLAIMS:')
-  if (idx === -1) return { prose: text.trim(), claims: [] }
-  const prose = text.slice(0, idx).replace(/^PROSE\s*:/m, '').trim()
+  if (idx === -1) return []
   const jsonPart = text.slice(idx + 'CLAIMS:'.length).trim()
   try {
-    const m = jsonPart.match(/\[[\s\S]*\]/)
-    if (m === null) return { prose, claims: [] }
+    // Non-greedy match (Oracle defect 5): the greedy [\s\S]* ran to the LAST
+    // ']' in the output, so trailing bracketed prose broke JSON.parse and
+    // silently dropped the whole pass's claims.
+    const m = jsonPart.match(/\[[\s\S]*?\]/)
+    if (m === null) return []
     const arr: unknown = JSON.parse(m[0])
-    if (!Array.isArray(arr)) return { prose, claims: [] }
-    const claims = arr
+    if (!Array.isArray(arr)) return []
+    return arr
       .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null && typeof (c as Record<string, unknown>).fact === 'string')
       .map(c => ({
         fact: String(c.fact).trim().slice(0, 300),
         category: String(c.category ?? 'PROJECT').slice(0, 32),
         tags: typeof c.tags === 'string' ? c.tags : undefined,
+        source: c.source === 'tool' ? 'tool' : 'chat',
       }))
       .filter(c => c.fact.length > 0)
-    return { prose, claims }
   } catch {
-    diag('splitProseClaims: CLAIMS JSON parse failed (isolated, prose kept)')
-    return { prose, claims: [] }
+    diag('splitClaims: CLAIMS JSON parse failed (isolated)')
+    return []
   }
 }
 
@@ -494,7 +721,7 @@ interface KeeperValidationResult {
  * Validates that keeper output completed cleanly rather than cutting off mid-stream.
  * Checks authoritative provider finish signals and structural JSON balance without arbitrary length cutoffs.
  */
-function validateKeeperOutput(text: string, finishKind?: string): KeeperValidationResult {
+function validateKeeperOutput(text: string, finishKind?: string, expectClaims = false): KeeperValidationResult {
   // 1. Authoritative provider signal
   if (finishKind === 'max-tokens') {
     return { valid: false, reason: 'Stream truncated by maxOutputTokens limit' }
@@ -505,23 +732,25 @@ function validateKeeperOutput(text: string, finishKind?: string): KeeperValidati
     return { valid: false, reason: 'Empty output received from model' }
   }
 
-  // 2. Case-insensitive CLAIMS structure verification
-  const claimsMatch = trimmed.match(/CLAIMS:\s*([\s\S]*)$/i)
-  if (claimsMatch) {
-    const rawClaims = claimsMatch[1].trim()
-    // Explicit empty indicators are valid
-    if (/^(none|n\/a|\[\s*\])$/i.test(rawClaims)) {
-      return { valid: true }
-    }
-    // Non-greedy JSON block match
-    const jsonMatch = rawClaims.match(/\[[\s\S]*?\]/)
-    if (!jsonMatch) {
-      return { valid: false, reason: 'CLAIMS tag present but JSON array was truncated/unclosed' }
-    }
-    try {
-      JSON.parse(jsonMatch[0])
-    } catch (e) {
-      return { valid: false, reason: `Malformed CLAIMS JSON: ${String(e)}` }
+  // 2. Case-insensitive CLAIMS structure verification (claims passes only)
+  if (expectClaims) {
+    const claimsMatch = trimmed.match(/CLAIMS:\s*([\s\S]*)$/i)
+    if (claimsMatch) {
+      const rawClaims = claimsMatch[1].trim()
+      // Explicit empty indicators are valid
+      if (/^(none|n\/a|\[\s*\])$/i.test(rawClaims)) {
+        return { valid: true }
+      }
+      // Non-greedy JSON block match
+      const jsonMatch = rawClaims.match(/\[[\s\S]*?\]/)
+      if (!jsonMatch) {
+        return { valid: false, reason: 'CLAIMS tag present but JSON array was truncated/unclosed' }
+      }
+      try {
+        JSON.parse(jsonMatch[0])
+      } catch (e) {
+        return { valid: false, reason: `Malformed CLAIMS JSON: ${String(e)}` }
+      }
     }
   }
 
@@ -536,6 +765,8 @@ async function summarize(
   input: string,
   signal: AbortSignal,
   route: ResolvedRoute,
+  systemPrompt: string,
+  expectClaims: boolean,
 ): Promise<{ text: string; route: string }> {
   const messages = [createUserMessage({
     content: [{ type: 'text', text: input }],
@@ -545,7 +776,7 @@ async function summarize(
     provider: route.provider,
     model: route.model,
     messages,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     maxTokens: config.maxOutputTokens,
     sessionId: session.id,
     purpose: 'context-keeper',
@@ -555,7 +786,7 @@ async function summarize(
 
   async function executeRoute(provider: string, model: string): Promise<string> {
     const result = await streamTextWithMeta(ctx, { ...base, provider, model })
-    const validation = validateKeeperOutput(result.text, result.finishKind)
+    const validation = validateKeeperOutput(result.text, result.finishKind, expectClaims)
     if (!validation.valid) {
       throw new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`)
     }

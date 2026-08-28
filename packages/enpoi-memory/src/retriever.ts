@@ -12,6 +12,35 @@ import type { Pipeline } from './pipeline'
 export const MAX_FACTS = 5
 export const MAX_BLOCK_CHARS = 1200
 
+/** Doc 38 memory parameters — resolved fresh per call (hot-swap). */
+export interface MemoryParams {
+  retrieverTopK: number
+  retrieverCharBudget: number
+}
+
+export const MEMORY_PARAM_DEFAULTS: MemoryParams = {
+  retrieverTopK: 10,
+  retrieverCharBudget: 1200,
+}
+
+/** Read memory parameters from `enpoi-orchestration.parameters.memory` (clamped). */
+export function getMemoryParams(ctx: unknown): MemoryParams {
+  const d = MEMORY_PARAM_DEFAULTS
+  try {
+    const settings = (ctx as { get?: (ns: string) => { parameters?: { memory?: Partial<MemoryParams> } } } | undefined)?.get?.('settings')
+    const p = settings?.get?.('enpoi-orchestration')?.parameters?.memory
+    if (p === undefined || typeof p !== 'object') return d
+    const clamp = (v: unknown, fallback: number, min: number, max: number): number =>
+      typeof v === 'number' && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback
+    return {
+      retrieverTopK: clamp(p.retrieverTopK, d.retrieverTopK, 1, 20),
+      retrieverCharBudget: clamp(p.retrieverCharBudget, d.retrieverCharBudget, 200, 4000),
+    }
+  } catch {
+    return d
+  }
+}
+
 /** Oracle fix 1: weight by origin+trust, NOT raw source_trust (verified_execution
  * covers keeper AND worker claims — the origin string tells them apart). */
 function getOriginWeight(origin: string, trust: string): number {

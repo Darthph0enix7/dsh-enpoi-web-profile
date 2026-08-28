@@ -320,7 +320,7 @@ export async function waitForFiberTurn(
 }
 
 /**
- * Execute one round across all active debaters in parallel with 1 retry and 2/3 quorum (A4.2).
+ * Execute one round across all active debaters in parallel with the configured retry count and quorum fraction (doc 38).
  */
 export async function executeParallelRound(
   ctx: Context,
@@ -330,6 +330,7 @@ export async function executeParallelRound(
   isRound1: boolean,
   systemPromptMap: Record<string, string>,
   signal: AbortSignal,
+  params: { quorumFraction: number; debaterRetryCount: number; debaterTimeoutMs: number },
 ): Promise<DebaterResponse[]> {
   const activeFibers = fibers.filter(f => !f.isOffline)
 
@@ -338,7 +339,8 @@ export async function executeParallelRound(
     let attempt = 0
     let lastError: Error | null = null
 
-    while (attempt < 2) {
+    const maxAttempts = 1 + Math.max(0, Math.min(3, params.debaterRetryCount))
+    while (attempt < maxAttempts) {
       attempt++
       try {
         if (isRound1) {
@@ -353,7 +355,7 @@ export async function executeParallelRound(
         }
 
         councilDiag(`waiting for turn on ${fiber.persona} (${fiber.childId})...`)
-        const text = await waitForFiberTurn(ctx, fiber.childId, signal)
+        const text = await waitForFiberTurn(ctx, fiber.childId, signal, params.debaterTimeoutMs)
         councilDiag(`turn complete on ${fiber.persona} (${fiber.childId}) -> text len ${text.length}`)
         const tokens = estimateTokens(text)
         fiber.totalTokens += tokens
@@ -371,8 +373,8 @@ export async function executeParallelRound(
         lastError = err instanceof Error ? err : new Error(String(err))
         councilDiag(`ERROR on ${fiber.persona} attempt ${attempt}: ${lastError.stack || lastError.message}`)
         if (signal.aborted) throw lastError
-        if (attempt >= 2) break
-        // Brief backoff before single retry
+        if (attempt >= maxAttempts) break
+        // Brief backoff before the next retry
         await new Promise(r => setTimeout(r, 500))
       }
     }
@@ -409,10 +411,10 @@ export async function executeParallelRound(
     }
   }
 
-  // 2/3 Quorum check: require at least 2 active debaters
-  if (onlineCount < 2 && fibers.length >= 3) {
+  // Quorum check (doc 38): require onlineCount / fibers.length >= quorumFraction
+  if (fibers.length >= 3 && onlineCount / fibers.length < params.quorumFraction) {
     const errorDetails = responses.filter(r => r.error).map(r => `${r.persona}: ${r.error}`).join('; ')
-    throw new Error(`Council failed 2/3 quorum: only ${onlineCount}/${fibers.length} debaters responded online. Errors: ${errorDetails}`)
+    throw new Error(`Council failed quorum: only ${onlineCount}/${fibers.length} debaters responded online (required ${(params.quorumFraction * 100).toFixed(0)}%). Errors: ${errorDetails}`)
   }
 
   return responses

@@ -93,3 +93,25 @@ describe('enpoi-oracle background and output schema conformance', () => {
     expect(renderOutput(rejected)[0]?.text).toBe('Oracle verdict: CONCERNS — bad architecture | blockers: critical flaw')
   })
 })
+
+describe('enpoi-oracle scorecard rollover (doc 35 2.4)', () => {
+  it('buildInitialPackage renders PRIOR REVIEWS when the scorecard carries verdicts', async () => {
+    const { buildInitialPackage } = await import('../src/index.ts')
+    const out = buildInitialPackage('brief', { request: 'r' }, {
+      files: [],
+      verdicts: [
+        { approved: true, concerns: [] },
+        { approved: false, concerns: ['race in spawn'] },
+      ],
+    })
+    expect(out).toContain('PRIOR REVIEWS')
+    expect(out).toContain('approved')
+    expect(out).toContain('race in spawn')
+  })
+
+  it('renders no PRIOR REVIEWS section for an empty scorecard', async () => {
+    const { buildInitialPackage } = await import('../src/index.ts')
+    const out = buildInitialPackage('brief', { request: 'r' }, { files: [], verdicts: [] })
+    expect(out).not.toContain('PRIOR REVIEWS')
+  })
+})
