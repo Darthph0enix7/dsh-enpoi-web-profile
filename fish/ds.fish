@@ -364,9 +364,24 @@ for i in idents:
                 echo "  ✔ Skills synced"
             end
 
-            # 2. Agent Presets
+            # 2. Agent Presets (device-specific ones → device patch)
+            set -l device_presets ""
+            if test -f "$HOME/.local/bin/dsh-sync-merge.mjs" -a -f "$HOME/.dsh/sync-local.yaml"
+                set device_presets (node "$HOME/.local/bin/dsh-sync-merge.mjs" device-presets "$HOME/.dsh/sync-local.yaml" 2>/dev/null)
+            end
             if test -d "$g_dsh_home/.agent-presets"
-                rsync -a --delete "$g_dsh_home/.agent-presets/" "$g_dotfiles/presets/" 2>/dev/null; or __ds_sync_dir "$g_dsh_home/.agent-presets" "presets"
+                for preset_dir in "$g_dsh_home/.agent-presets"/*/
+                    set -l name (basename "$preset_dir")
+                    if contains -- "$name" $device_presets
+                        # Device-specific: extract to device patch, keep global version in repo
+                        mkdir -p "$g_dotfiles/device-patches/$host/presets/$name"
+                        rsync -a --delete "$preset_dir/" "$g_dotfiles/device-patches/$host/presets/$name/" 2>/dev/null; or true
+                        echo "  ✔ Preset $name → device-patches/$host/presets/ (device-specific)"
+                    else
+                        mkdir -p "$g_dotfiles/presets/$name"
+                        rsync -a --delete "$preset_dir/" "$g_dotfiles/presets/$name/" 2>/dev/null; or true
+                    end
+                end
                 echo "  ✔ Agent Presets synced"
             end
 
@@ -573,11 +588,21 @@ case "pull"
                 echo "  ✔ Skills deployed"
             end
 
-            # Agent Presets
+            # Agent Presets (3-layer: global → device patch → local patches)
             if test -d "$g_dotfiles/presets"
                 mkdir -p "$g_dsh_home/.agent-presets"
                 rsync -a --delete "$g_dotfiles/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or cp -r "$g_dotfiles/presets/"* "$g_dsh_home/.agent-presets/"
-                echo "  ✔ Agent Presets deployed"
+                echo "  ✔ Agent Presets deployed (global)"
+            end
+            # Device-patch presets overlay (device-specific versions)
+            if test -d "$g_dotfiles/device-patches/$host/presets"
+                rsync -a --delete "$g_dotfiles/device-patches/$host/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or true
+                echo "  ✔ Device presets overlaid (device-patches/$host/presets/)"
+            end
+            # Local patches overlay (never synced, highest precedence)
+            if test -d "$HOME/.dsh/local-patches/presets"
+                rsync -a --delete "$HOME/.dsh/local-patches/presets/" "$g_dsh_home/.agent-presets/" 2>/dev/null; or true
+                echo "  ✔ Local preset patches overlaid (~/.dsh/local-patches/presets/)"
             end
 
             # Profile packages (itemize-changes detects rebuild need)
