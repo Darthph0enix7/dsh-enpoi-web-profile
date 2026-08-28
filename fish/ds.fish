@@ -395,7 +395,7 @@ for i in idents:
 
             # 6. Skin
             if test -d "$g_dsh_home/skin-center"
-                rsync -a --delete "$g_dsh_home/skin-center/" "$g_dotfiles/skin-center/" 2>/dev/null; or true
+                rsync -a --delete --exclude .cache "$g_dsh_home/skin-center/" "$g_dotfiles/skin-center/" 2>/dev/null; or true
             end
             __ds_sync_file "$g_dsh_home/skin-center-active.json" "skin-center-active.json"
             echo "  ✔ Skin synced"
@@ -466,9 +466,10 @@ case "pull"
             end
 
             # Check for locally-changed files before overwriting
+            # (settings.yaml is EXCLUDED — local is always the merged
+            # baseline+patch, repo holds the stripped baseline by design)
             set -l pending
             set -l checks \
-                "settings.yaml:~/.dsh/settings.yaml" \
                 "cordis.patch.yml:~/.dsh/profiles/web/cordis.patch.yml" \
                 "package.json:~/.dsh/profiles/web/package.json" \
                 "fish/ds.fish:~/.config/fish/functions/ds.fish" \
@@ -611,7 +612,7 @@ case "pull"
             # Skin
             if test -d "$g_dotfiles/skin-center"
                 mkdir -p "$g_dsh_home/skin-center"
-                rsync -a --delete "$g_dotfiles/skin-center/" "$g_dsh_home/skin-center/" 2>/dev/null; or true
+                rsync -a --delete --exclude .cache "$g_dotfiles/skin-center/" "$g_dsh_home/skin-center/" 2>/dev/null; or true
             end
             __ds_apply_file "skin-center-active.json" ~/.dsh/skin-center-active.json
 
