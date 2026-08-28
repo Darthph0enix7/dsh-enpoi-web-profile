@@ -736,7 +736,7 @@ function apply(ctx, config) {
     diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
     const request = args[0];
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, sessionStates);
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor);
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
       return { accepted: true, ...outcome };
     } catch (err) {
@@ -866,7 +866,7 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
   }
   appendIgnorable(session, "revert/file-result", { revertSeq: newBoundary ?? -1, outcomes });
 }
-async function applyConflictResolution(ctx, request, executorFor, _blobStore, sessionStates) {
+async function applyConflictResolution(ctx, request, executorFor, _blobStore, stateFor) {
   const executor = executorFor(request.sessionId);
   const sessions = ctx.get("sessions");
   const session = sessions?.get?.(request.sessionId);
@@ -874,8 +874,8 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, se
   const conflictEvent = [...session.events].reverse().find((e) => e.type === "revert/file-conflict" && e.data.conflictId === request.conflictId);
   if (conflictEvent === void 0) throw new Error(`conflict ${request.conflictId} not found`);
   const conflict = conflictEvent.data;
-  const state = sessionStates.get(request.sessionId);
-  if (state !== void 0 && state.boundary !== (conflict.boundarySeq ?? null)) {
+  const state = stateFor(session);
+  if (state.boundary !== (conflict.boundarySeq ?? null)) {
     diag(`file-revert/resolve: stale conflict ${request.conflictId} for ${request.sessionId} (card boundary=${String(conflict.boundarySeq ?? null)}, current=${String(state.boundary)}) \u2014 refusing`);
     throw new Error("conflict is stale: the session boundary moved since this card was shown");
   }
@@ -903,7 +903,6 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, se
   }
   const outcome = await executor.applyResolution({
     sessionId: request.sessionId,
-    revertSeq: conflict.boundarySeq ?? -1,
     targetKey: conflict.targetKey,
     resolution,
     targetBlobSha,

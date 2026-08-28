@@ -195,7 +195,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
       resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     }
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, sessionStates)
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor)
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`)
       return { accepted: true as const, ...outcome }
     } catch (err) {
@@ -390,7 +390,7 @@ async function applyConflictResolution(
   request: { sessionId: string; conflictId: string; resolution: 'keep' | 'restore' | 'recreate' | 'trash' },
   executorFor: (id: string) => RevertExecutor,
   _blobStore: BlobStore,
-  sessionStates: Map<string, SessionRevertState>,
+  stateFor: (session: Session) => SessionRevertState,
 ): Promise<{ outcome?: unknown }> {
   const executor = executorFor(request.sessionId)
   const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
@@ -420,9 +420,10 @@ async function applyConflictResolution(
   // Stale-card gate (Oracle E-class): a card from an earlier boundary must not
   // be resolvable after the session moved on (e.g. restore-all then resolving
   // an old revert card would write stale content). Only the card matching the
-  // CURRENT folded boundary is actionable.
-  const state = sessionStates.get(request.sessionId)
-  if (state !== undefined && state.boundary !== (conflict.boundarySeq ?? null)) {
+  // CURRENT folded boundary is actionable. stateFor folds the boundary from the
+  // session log on first touch, so the gate also holds after a host restart.
+  const state = stateFor(session)
+  if (state.boundary !== (conflict.boundarySeq ?? null)) {
     diag(`file-revert/resolve: stale conflict ${request.conflictId} for ${request.sessionId} (card boundary=${String(conflict.boundarySeq ?? null)}, current=${String(state.boundary)}) — refusing`)
     throw new Error('conflict is stale: the session boundary moved since this card was shown')
   }
@@ -459,7 +460,6 @@ async function applyConflictResolution(
 
   const outcome = await executor.applyResolution({
     sessionId: request.sessionId,
-    revertSeq: conflict.boundarySeq ?? -1,
     targetKey: conflict.targetKey,
     resolution,
     targetBlobSha,

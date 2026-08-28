@@ -185,7 +185,6 @@ export class RevertExecutor {
    */
   async applyResolution(opts: {
     sessionId: string
-    revertSeq: number
     targetKey: string
     resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     targetBlobSha: string | null
