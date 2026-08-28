@@ -633,9 +633,13 @@ case "pull"
                 echo "  Rebuilding profile packages..."
                 cd "$g_dsh_home/profiles/web"
                 pnpm install 2>/dev/null; or echo "  ⚠ pnpm install failed"
-                for p in packages/enpoi-*/
+                for p in "$g_dsh_home/profiles/web/packages"/enpoi-*/
                     set -l pkg (basename "$p")
-                    cd "$p"; and pnpm run build 2>/dev/null; or echo "  ⚠ build failed: $pkg"
+                    # Skip packages without a build script (bundle-patch plugins
+                    # like enpoi-provider-sync are built by the harness itself).
+                    if grep -q '"build"' "$p/package.json" 2>/dev/null
+                        cd "$p"; and pnpm run build 2>/dev/null; or echo "  ⚠ build failed: $pkg"
+                    end
                 end
                 echo "  ✔ Packages rebuilt"
             end
