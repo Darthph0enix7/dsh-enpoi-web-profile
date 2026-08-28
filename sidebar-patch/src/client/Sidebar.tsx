@@ -35,7 +35,7 @@ import { IconBranchOutline16, IconCloseFill14, IconFolderOpen16, IconThinkOutlin
 import type { Context, SidebarSessionList } from '../context-types.ts'
 import { appendToDraft } from './conversation-draft.ts'
 import {
-  activateTab as activateTabReducer, allLeaves, BOTTOM_MIN, PANEL_MIN, agentUuidOf, firstLeaf, isAgentTabId, leafWithTab, mapLeaf, migrateBottomTabs, moveTab, moveTabToEdge, openDiffTab,
+  activateTab as activateTabReducer, allLeaves, BOTTOM_MIN, PANEL_MIN, agentUuidOf, defaultWidthFor, firstLeaf, isAgentTabId, leafWithTab, mapLeaf, migrateBottomTabs, moveTab, moveTabToEdge, openDiffTab,
   reconcileAgentTerminals,
   resizeSplitIn, setBottomHeight, setWidth, toggleBottomPanel, toggleExpanded, togglePanel, treeOf,
   type DropZone, type SidebarState, type SidebarStore, type SidebarTab, type SplitNode,
@@ -833,6 +833,49 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     }
     return undefined
   }, [state])
+
+  /**
+   * Auto-widen the panel on the FIRST file open per session (Adam): a fresh
+   * session seeds the panel at defaultWidthPercent (20% — the tree dock alone
+   * nearly fills it, leaving a few characters of editor). When an editor tab
+   * with a path becomes active and the panel is still at the seeded default
+   * width, widen it so the editor gets a comfortable reading width. After
+   * that the user owns the width (manual drags persist per session; the
+   * widened width also persists, so later sessions start comfortable).
+   */
+  const autoWidenedSessions = useRef(new Set<string>())
+  useEffect(() => {
+    if (state === undefined || sessionId === undefined || !state.panelOpen) return
+    if (autoWidenedSessions.current.has(sessionId)) return
+    // Find the active editor tab carrying a file path.
+    let activeTab: SidebarTab | undefined
+    for (const leaf of allLeaves(state.splits)) {
+      const active = leaf.tabs.find(t => t.id === leaf.active)
+      if (active?.type === 'editor' && active.path !== undefined && active.path !== '') {
+        activeTab = active
+        break
+      }
+    }
+    if (activeTab === undefined) return
+    // Only auto-widen when the panel is still at the seeded default width
+    // (the user has not dragged it).
+    const viewport = window.innerWidth
+    const defaultWidth = defaultWidthFor(viewport, snapshot.prefs.defaultWidthPercent)
+    if (Math.abs(state.width - defaultWidth) > 8) return
+    // Tree dock width from the tab's persisted meta (default 240).
+    const meta = activeTab.meta !== null && typeof activeTab.meta === 'object' && !Array.isArray(activeTab.meta)
+      ? activeTab.meta as Record<string, unknown>
+      : {}
+    const treeW = typeof meta.treeWidth === 'number' && Number.isFinite(meta.treeWidth)
+      ? Math.min(480, Math.max(160, Math.round(meta.treeWidth)))
+      : 240
+    // Editor target: a comfortable reading width (~90 chars at 14px).
+    const target = Math.min(Math.max(PANEL_MIN, viewport - PANEL_MIN), treeW + 560)
+    if (target > state.width) {
+      store.reduce(s => setWidth(s, target))
+    }
+    autoWidenedSessions.current.add(sessionId)
+  }, [state, sessionId, store, snapshot.prefs.defaultWidthPercent])
 
   if (state === undefined || sessionId === undefined) {
     return (
