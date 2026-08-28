@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import clsx from 'clsx'
 import {
-  IconCodeOutline16, IconCopyOutline16, IconDownloadOutline16, IconFolderClose16, IconFolderOpen16,
+  IconCodeOutline16, IconCopyOutline16, IconDownloadOutline16, IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16,
   IconLinkOutline16, Menu, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { api, downloadUrl, type FsEntry } from './api.ts'
@@ -161,24 +161,45 @@ export function FileTree(props: {
     })
   }, [])
 
-  /** The row's trailing actions: the @-reference button, or the copied label. */
+  /** The row's trailing actions: the @-reference button and 3-dots context menu button, or the copied label. */
   const rowActions = (entry: FsEntry): ReactNode => {
     if (copiedPath === entry.path) {
       return <span className={css.explorerCopied}>{t('copied')}</span>
     }
     return (
-      <button
-        type="button"
-        className={css.explorerRef}
-        aria-label={t('referenceFile')}
-        title={t('referenceFile')}
-        onClick={(event) => {
-          event.stopPropagation()
-          onReferenceFile(entry.path)
-        }}
-      >
-        {t('referenceFile')}
-      </button>
+      <div className={css.explorerRowActions}>
+        <button
+          type="button"
+          className={css.explorerRef}
+          aria-label={t('referenceFile')}
+          title={t('referenceFile')}
+          onClick={(event) => {
+            event.stopPropagation()
+            onReferenceFile(entry.path)
+          }}
+        >
+          {t('referenceFile')}
+        </button>
+        <button
+          type="button"
+          className={css.explorerMore}
+          aria-label={t('more') || 'More'}
+          title={t('more') || 'More options'}
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            const rect = event.currentTarget.getBoundingClientRect()
+            setRowMenu({
+              path: entry.path,
+              isDir: entry.isDir,
+              x: rect.left,
+              y: rect.bottom + 4,
+            })
+          }}
+        >
+          <IconEllipsisOutline16 size={14} />
+        </button>
+      </div>
     )
   }
 
@@ -331,18 +352,39 @@ export function FileTree(props: {
             {copiedPath === root
               ? <span className={css.explorerCopied}>{t('copied')}</span>
               : (
-                <button
-                  type="button"
-                  className={css.explorerRef}
-                  aria-label={t('referenceFile')}
-                  title={t('referenceFile')}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onReferenceFile(root)
-                  }}
-                >
-                  {t('referenceFile')}
-                </button>
+                <div className={css.explorerRowActions}>
+                  <button
+                    type="button"
+                    className={css.explorerRef}
+                    aria-label={t('referenceFile')}
+                    title={t('referenceFile')}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onReferenceFile(root)
+                    }}
+                  >
+                    {t('referenceFile')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.explorerMore}
+                    aria-label={t('more') || 'More'}
+                    title={t('more') || 'More options'}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      const rect = event.currentTarget.getBoundingClientRect()
+                      setRowMenu({
+                        path: root,
+                        isDir: true,
+                        x: rect.left,
+                        y: rect.bottom + 4,
+                      })
+                    }}
+                  >
+                    <IconEllipsisOutline16 size={14} />
+                  </button>
+                </div>
               )}
           </div>
           {data[root] !== undefined && renderLevel(root, 1)}
