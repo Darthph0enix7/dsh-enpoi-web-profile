@@ -46,3 +46,25 @@ merge:
 `sessions/`, `logs/`, `storages/`, `trash/`, `file-history/`, `revert-ledger/`,
 `task-board/`, `pet.json`, `legacy-memory.json`, `sync-local.yaml`,
 `profiles/web/node_modules/`, `packages/*/lib/`, `packages/*/node_modules/`.
+## Device-specific agent presets
+
+Presets are global by default. A device can mark presets as device-specific
+via `~/.dsh/sync-local.yaml`:
+
+```yaml
+devicePresets:
+  - sysadmin
+```
+
+- **On sync**: the marked preset is extracted to
+  `device-patches/<hostname>/presets/<name>/` (the repo keeps the generic
+  global version in `presets/`).
+- **On pull**: three layers are applied — global `presets/` (mirror), then
+  `device-patches/<hostname>/presets/` (additive overlay), then
+  `~/.dsh/local-patches/presets/` (additive, never synced, highest
+  precedence).
+
+Example: the sysadmin persona is generic globally ("operational
+system-administration agent for this device") while serverlocal's patch
+carries the fleet-specific persona (systemd, Docker, Cloudflare, CLAIX,
+P40).
