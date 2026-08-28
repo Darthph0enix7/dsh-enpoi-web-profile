@@ -59,8 +59,10 @@ export interface FileRevertConfig {
 interface SessionRevertState {
   /** The active revert boundary (fromSeq) for this session, or null when none. */
   boundary: number | null
-  /** Single-flight mutex (I7): one revert execution per session at a time. */
-  flight: Promise<void> | null
+  /** Initialized flag: true if boundary was folded from session events. */
+  initialized: boolean
+  /** Chained flight promise: serialized execution queue per session (I7). */
+  flight: Promise<void>
 }
 
 export function apply(ctx: Context, config: FileRevertConfig): void {
@@ -96,11 +98,21 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
     return e
   }
 
-  function stateFor(sessionId: string): SessionRevertState {
-    let s = sessionStates.get(sessionId)
+  function stateFor(session: Session): SessionRevertState {
+    let s = sessionStates.get(session.id)
     if (s === undefined) {
-      s = { boundary: null, flight: null }
-      sessionStates.set(sessionId, s)
+      let recoveredBoundary: number | null = null
+      if (session.events !== undefined) {
+        for (let i = session.events.length - 1; i >= 0; i--) {
+          const ev = session.events[i]
+          if (ev?.type === 'revert/state') {
+            recoveredBoundary = (ev.data as { fromSeq: number | null }).fromSeq
+            break
+          }
+        }
+      }
+      s = { boundary: recoveredBoundary, initialized: true, flight: Promise.resolve() }
+      sessionStates.set(session.id, s)
     }
     return s
   }
@@ -131,37 +143,40 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
   // ── 2. Revert trigger: react to revert/state events ───────────────────────
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type !== 'revert/state') return
-    const fromSeq = (event.data as { fromSeq: number | null }).fromSeq
-    diag(`revert/state: session=${session.id} fromSeq=${String(fromSeq)} ctor=${(session as unknown as { constructor?: { name?: string } }).constructor?.name} hasLog=${'log' in (session as object)} hasEvents=${'events' in (session as object)}`)
-    const state = stateFor(session.id)
-    state.boundary = fromSeq
-    // Serialize executions per session (I7 single-flight).
-    if (state.flight !== null) {
-      diag(`revert/state: session=${session.id} — flight in progress, skipping`)
+    const data = event.data as { fromSeq: number | null; cause?: 'revert' | 'restore' | 'commit' }
+    const fromSeq = data.fromSeq
+    const cause = data.cause ?? (fromSeq === null ? 'restore' : 'revert')
+    diag(`revert/state: session=${session.id} fromSeq=${String(fromSeq)} cause=${cause}`)
+
+    const state = stateFor(session)
+    const oldBoundary = state.boundary
+    const newBoundary = fromSeq
+    state.boundary = newBoundary
+
+    if (cause === 'commit') {
+      // Revert-commit: clear boundary without running file reversions
+      // (the new prompt commits from the reverted state; files stay as-is).
+      diag(`revert/state: commit for ${session.id} — clearing boundary without file execution`)
       return
     }
-    state.flight = (async () => {
+
+    // Queue transition on flight chain so rapid clicks execute strictly in order.
+    state.flight = state.flight.then(async () => {
       try {
-        await executeFileRevert(ctx, session, fromSeq, state, manifestFor, executorFor, blobStore)
+        await executeFileTransition(ctx, session, oldBoundary, newBoundary, manifestFor, executorFor, blobStore)
       } catch (err) {
         diag(`revert execution FAILED for ${session.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
-        // Error-sealing event (Oracle amendment #4): the client must never wait
-        // forever on a revert that failed unexpectedly.
         try {
           appendIgnorable(session, 'revert/file-result', {
             revertSeq: fromSeq ?? -1,
             outcomes: { _error: { status: 'error', reason: err instanceof Error ? err.message : String(err) } },
           })
         } catch { /* session may be gone */ }
-      } finally {
-        state.flight = null
       }
-    })()
+    })
   })
 
   // ── 3. Operator conflict resolution bridge (host RPC → waterfall) ─────────
-  // Custom event name (not in the core Events map): cast through the runtime
-  // event channel, matching the profile-plugin convention.
   const onAny = (ctx as unknown as {
     on: (name: string, fn: (...args: unknown[]) => unknown) => () => void
   }).on
@@ -173,7 +188,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
       resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     }
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor)
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore)
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`)
       return { accepted: true as const, ...outcome }
     } catch (err) {
@@ -204,27 +219,39 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
 
 /** Append a custom (plugin-merged) session event with the ignorable envelope. */
 function appendIgnorable(session: Session, type: string, data: unknown): void {
-  // Call as a METHOD (this-bound) — extracting the function would lose `this`.
   const s = session as unknown as {
     append: (t: string, d: unknown, opts: { ignorable: true }) => void
   }
   s.append(type, data, { ignorable: true })
 }
 
-async function executeFileRevert(
+async function executeFileTransition(
   ctx: Context,
   session: Session,
-  fromSeq: number | null,
-  state: SessionRevertState,
+  oldBoundary: number | null,
+  newBoundary: number | null,
   manifestFor: (id: string) => MutationManifest,
   executorFor: (id: string) => RevertExecutor,
-  blobStore: BlobStore,
+  _blobStore: BlobStore,
 ): Promise<void> {
   const manifest = manifestFor(session.id)
   const executor = executorFor(session.id)
-  const spanStart = fromSeq ?? state.boundary ?? 0
+
+  const isRevert = newBoundary !== null && (oldBoundary === null || newBoundary <= oldBoundary)
+  const isRestore = (newBoundary === null && oldBoundary !== null) || (newBoundary !== null && oldBoundary !== null && newBoundary > oldBoundary)
+
+  if (!isRevert && !isRestore) {
+    diag(`executeFileTransition: no-op transition for ${session.id} (old=${String(oldBoundary)}, new=${String(newBoundary)})`)
+    return
+  }
+
+  const mode: 'revert' | 'restore' = isRevert ? 'revert' : 'restore'
+  // On revert: span starts at newBoundary.
+  // On restore: span starts at oldBoundary (the mutations being un-reverted).
+  const spanStart = isRevert ? newBoundary! : oldBoundary!
   const aggregated = manifest.aggregateSpan(spanStart)
-  diag(`executeFileRevert: session=${session.id} fromSeq=${String(fromSeq)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`)
+  diag(`executeFileTransition: session=${session.id} mode=${mode} oldBoundary=${String(oldBoundary)} newBoundary=${String(newBoundary)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`)
+
   if (aggregated.size === 0) return
 
   // Active-child guard (Doc 44 §3.3): refuse file revert while any child fiber
@@ -232,7 +259,7 @@ async function executeFileRevert(
   const activeChildren = await findActiveChildren(ctx, session.id)
   if (activeChildren.length > 0) {
     appendIgnorable(session, 'revert/file-result', {
-      revertSeq: fromSeq ?? -1,
+      revertSeq: newBoundary ?? -1,
       outcomes: {
         _guard: { status: 'refused', reason: `active subagent fibers: ${activeChildren.join(', ')}` },
       },
@@ -241,12 +268,27 @@ async function executeFileRevert(
     return
   }
 
-  // Build the plan: target = state at boundary (resolveRestoreTarget handles
-  // null → finalPost, number → latest mutation ≤ seq, none → initialPre).
+  // Build the plan: target = state at newBoundary (null → finalPost, number → latest mutation ≤ seq).
   const plan = new Map<string, { entry: unknown; state: string; action: string; targetBlobSha: string | null; expectedDiskSha: string | null; reason?: string }>()
-  const conflicts: Array<{ targetKey: string; displayPath: string; state: 'conflict' | 'missing' | 'unavailable'; reason: string; preSha: string | null; postSha: string | null; currentSha: string | null }> = []
+  const conflicts: Array<{
+    targetKey: string
+    displayPath: string
+    state: 'conflict' | 'missing' | 'unavailable'
+    reason: string
+    mode: 'revert' | 'restore'
+    boundarySeq: number | null
+    spanStartSeq: number
+    targetBlobSha: string | null
+    targetAbsent: boolean
+    spanPreExisted: boolean
+    sessionCreated: boolean
+    preSha: string | null
+    postSha: string | null
+    currentSha: string | null
+  }> = []
+
   for (const [targetKey, entry] of aggregated) {
-    const target = manifest.resolveRestoreTarget(targetKey, fromSeq)
+    const target = manifest.resolveRestoreTarget(targetKey, newBoundary)
     const current = await readDiskBytes(ctx, targetKey)
     const currentSha = current === null ? null : sha256Hex(current)
     const evalResult = evaluateBoundary(entry, target, currentSha)
@@ -264,6 +306,13 @@ async function executeFileRevert(
         displayPath: entry.finalPost.displayPath,
         state: evalResult.state as 'conflict' | 'missing' | 'unavailable',
         reason: evalResult.reason ?? '',
+        mode,
+        boundarySeq: newBoundary,
+        spanStartSeq: spanStart,
+        targetBlobSha: evalResult.targetBlobSha,
+        targetAbsent: evalResult.targetAbsent ?? (target.postBlobSha === null && target.preBlobSha === null),
+        spanPreExisted: target.preExisted,
+        sessionCreated: entry.sessionCreated ?? !entry.initialPre.preExisted,
         preSha: entry.initialPre.preBlobSha,
         postSha: entry.finalPost.postBlobSha,
         currentSha,
@@ -273,7 +322,7 @@ async function executeFileRevert(
 
   // Append intent WAL event BEFORE any disk mutation.
   appendIgnorable(session, 'revert/file-intent', {
-    revertSeq: fromSeq ?? -1,
+    revertSeq: newBoundary ?? -1,
     plan: Object.fromEntries([...plan].map(([key, p]) => [key, { action: p.action, targetBlobSha: p.targetBlobSha, expectedDiskSha: p.expectedDiskSha }])),
   })
 
@@ -281,7 +330,7 @@ async function executeFileRevert(
   const typedPlan = plan as Map<string, { action: string; targetBlobSha: string | null; expectedDiskSha: string | null }>
   const { outcomes } = await executor.execute({
     sessionId: session.id,
-    revertSeq: fromSeq ?? -1,
+    revertSeq: newBoundary ?? -1,
     plan: typedPlan,
     resolvePath: async (key: string) => key,
     readDisk: async (key: string) => readDiskBytes(ctx, key),
@@ -297,6 +346,13 @@ async function executeFileRevert(
       displayPath: c.displayPath,
       state: c.state,
       reason: c.reason,
+      mode: c.mode,
+      boundarySeq: c.boundarySeq,
+      spanStartSeq: c.spanStartSeq,
+      targetBlobSha: c.targetBlobSha,
+      targetAbsent: c.targetAbsent,
+      spanPreExisted: c.spanPreExisted,
+      sessionCreated: c.sessionCreated,
       preSha: c.preSha,
       postSha: c.postSha,
       currentSha: c.currentSha,
@@ -304,7 +360,7 @@ async function executeFileRevert(
   }
 
   // Seal with the terminal marker.
-  appendIgnorable(session, 'revert/file-result', { revertSeq: fromSeq ?? -1, outcomes })
+  appendIgnorable(session, 'revert/file-result', { revertSeq: newBoundary ?? -1, outcomes })
 }
 
 // ── Conflict resolution ──────────────────────────────────────────────────────
@@ -313,6 +369,7 @@ async function applyConflictResolution(
   ctx: Context,
   request: { sessionId: string; conflictId: string; resolution: 'keep' | 'restore' | 'recreate' | 'trash' },
   executorFor: (id: string) => RevertExecutor,
+  _blobStore: BlobStore,
 ): Promise<{ outcome?: unknown }> {
   const executor = executorFor(request.sessionId)
   const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
@@ -322,28 +379,56 @@ async function applyConflictResolution(
     (e as unknown as { type: string }).type === 'revert/file-conflict'
     && (e.data as { conflictId?: string }).conflictId === request.conflictId)
   if (conflictEvent === undefined) throw new Error(`conflict ${request.conflictId} not found`)
-  const conflict = (conflictEvent as unknown as { data: { targetKey: string; state: string; preSha: string | null; postSha: string | null; currentSha: string | null } }).data
+  const conflict = (conflictEvent as unknown as {
+    data: {
+      targetKey: string
+      state: string
+      mode?: 'revert' | 'restore'
+      boundarySeq?: number | null
+      spanStartSeq?: number
+      targetBlobSha?: string | null
+      targetAbsent?: boolean
+      spanPreExisted?: boolean
+      sessionCreated?: boolean
+      preSha: string | null
+      postSha: string | null
+      currentSha: string | null
+    }
+  }).data
 
-  // Resolution semantics (Oracle amendment #3):
+  // Resolution semantics (Oracle-certified):
   // - keep: leave disk untouched.
-  // - restore: revert to the pre-agent state; for a file CREATED in the span
-  //   (preSha === null) the pre-state is ABSENCE -> trash the current file.
-  // - recreate: rebuild from the best available snapshot (preSha ?? postSha).
-  // - trash: move the current file to the trash staging area.
+  // - restore: apply boundary target state. If target is absence (e.g. backward revert past creation), trash current file.
+  //            If target has a SHA, write targetBlobSha.
+  // - recreate: rebuild from targetBlobSha ?? postSha ?? preSha.
+  // - trash: explicitly move current file to trash staging area.
   let resolution = request.resolution
   let targetBlobSha: string | null = null
-  if (resolution === 'restore') {
-    if (conflict.preSha !== null) {
+
+  if (resolution === 'keep') {
+    targetBlobSha = null
+  } else if (resolution === 'restore') {
+    if (conflict.targetAbsent === true) {
+      resolution = 'trash'
+      targetBlobSha = null
+    } else if (conflict.targetBlobSha !== undefined && conflict.targetBlobSha !== null) {
+      targetBlobSha = conflict.targetBlobSha
+    } else if (conflict.mode === 'restore' && conflict.postSha !== null) {
+      targetBlobSha = conflict.postSha
+    } else if (conflict.preSha !== null) {
       targetBlobSha = conflict.preSha
     } else {
-      resolution = 'trash' // created-in-span: pre-state is absence
+      resolution = 'trash'
     }
   } else if (resolution === 'recreate') {
-    targetBlobSha = conflict.preSha ?? conflict.postSha
+    targetBlobSha = conflict.targetBlobSha ?? conflict.postSha ?? conflict.preSha
+  } else if (resolution === 'trash') {
+    resolution = 'trash'
   }
+
   const outcome = await executor.applyResolution({
     sessionId: request.sessionId,
-    revertSeq: -1,
+    revertSeq: conflict.boundarySeq ?? -1,
     targetKey: conflict.targetKey,
     resolution,
     targetBlobSha,
@@ -353,9 +438,10 @@ async function applyConflictResolution(
     writeDisk: async (path: string, bytes: Buffer) => executor.atomicWrite(path, bytes),
     trashFile: async (path: string) => executor.trash(path, request.sessionId),
   })
+
   // Mirror the resolution into the session log so the client can close the modal.
   appendIgnorable(session, 'revert/file-result', {
-    revertSeq: -1,
+    revertSeq: conflict.boundarySeq ?? -1,
     outcomes: { [conflict.targetKey]: outcome },
   })
   return { outcome }

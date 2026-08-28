@@ -176,6 +176,13 @@ declare module '@deepseek-ai/dsh-session/types' {
       displayPath: string
       state: 'conflict' | 'missing' | 'unavailable'
       reason: string
+      mode?: 'revert' | 'restore'
+      boundarySeq?: number | null
+      spanStartSeq?: number
+      targetBlobSha?: string | null
+      targetAbsent?: boolean
+      spanPreExisted?: boolean
+      sessionCreated?: boolean
       preSha: string | null
       postSha: string | null
       currentSha: string | null

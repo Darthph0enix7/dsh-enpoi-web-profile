@@ -86,7 +86,11 @@ importers:
 
   packages/enpoi-dispatcher: {}
 
-  packages/enpoi-file-revert: {}
+  packages/enpoi-file-revert:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
   packages/enpoi-living-brief:
     dependencies:

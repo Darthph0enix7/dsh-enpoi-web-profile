@@ -600,4 +600,122 @@ describe('applyResolution', () => {
     expect(outcome.status).toBe('restored')
     expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('original')
   })
+
+  it('pre-clobber staging: unknown manual edits on disk are staged to blobStore before overwrite or trash', async () => {
+    await writeFile(join(env.work, 'a.txt'), 'original')
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    const manualBytes = Buffer.from('precious manual human edit that must not be lost')
+    await writeFile(join(env.work, 'a.txt'), manualBytes)
+    const manualSha = sha256Of(manualBytes)
+
+    // Apply resolution restore (force overwrite)
+    await env.executor.applyResolution({
+      sessionId: 's1', revertSeq: 10, targetKey: 'a.txt',
+      resolution: 'restore', targetBlobSha: env.manifest.records[0].preBlobSha, expectedDiskSha: manualSha,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+
+    // Verify disk was reverted to 'original'
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('original')
+    // Verify the manual edit was staged into blobStore (zero data loss!)
+    const recoveredBytes = await env.blobs.get(manualSha)
+    expect(recoveredBytes).not.toBeNull()
+    expect(recoveredBytes?.toString()).toBe('precious manual human edit that must not be lost')
+  })
+})
+
+describe('matrix: 3-turn combination with creation, edit, text-only turn, and conflict resolution', () => {
+  it('Adam incident combination: Turn 1 create + Turn 2 edit + Turn 3 text', async () => {
+    // Turn 1: Write file (creates file)
+    // Turn 1: User message at seq 5 -> tool mutation at seq 10 (creates file)
+    await simulateMutation({
+      seq: 10, callId: 'c1', targetKey: 'test_file.txt', displayPath: 'test_file.txt',
+      preBytes: null, postBytes: Buffer.from('V1: created'),
+    })
+    // Turn 2: User message at seq 15 -> tool mutation at seq 20 (edits file)
+    await simulateMutation({
+      seq: 20, callId: 'c2', targetKey: 'test_file.txt', displayPath: 'test_file.txt',
+      preBytes: Buffer.from('V1: created'), postBytes: Buffer.from('V2: edited'),
+    })
+    // Turn 3: User message at seq 25 ("tell me a joke", no file mutations)
+
+    // User makes a manual edit on disk
+    await writeFile(join(env.work, 'test_file.txt'), 'V2: edited + manual test test')
+    const manualSha = sha256Of(Buffer.from('V2: edited + manual test test'))
+
+    // 1. Revert Turn 3 (fromSeq: 25) -> span records with toolSeq >= 25 is EMPTY
+    const span25 = env.manifest.aggregateSpan(25)
+    expect(span25.size).toBe(0)
+
+    // 2. Restore Turn 3 / Restore All with oldBoundary = 25 -> span is records >= 25 (EMPTY!)
+    // When oldBoundary was 25, files modified only in Turn 1/2 are NOT in the span, so disk stays untouched!
+    expect(await readFile(join(env.work, 'test_file.txt'), 'utf8')).toBe('V2: edited + manual test test')
+
+    // 3. Revert Turn 2 (fromSeq: 15) -> span records >= 15 contains Turn 2 (seq 20)
+    const span15 = env.manifest.aggregateSpan(15)
+    expect(span15.size).toBe(1)
+    const entry15 = span15.get('test_file.txt')!
+    // Target state at seq 15 is Turn 1's post-state (V1: created)
+    const target15 = env.manifest.resolveRestoreTarget('test_file.txt', 15)
+    expect(target15.postBlobSha).toBe(sha256Of(Buffer.from('V1: created')))
+    const eval15 = evaluateBoundary(entry15, target15, manualSha)
+    // Manual edit on disk produces CONFLICT with targetBlobSha = V1: created
+    expect(eval15.state).toBe(STATE.CONFLICT)
+    expect(eval15.targetBlobSha).toBe(sha256Of(Buffer.from('V1: created')))
+    expect(eval15.targetAbsent).toBe(false)
+
+    // Force revert on Turn 2 overwrites manual edit with V1
+    await env.executor.applyResolution({
+      sessionId: 's1', revertSeq: 15, targetKey: 'test_file.txt',
+      resolution: 'restore', targetBlobSha: eval15.targetBlobSha, expectedDiskSha: manualSha,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'test_file.txt'), 'utf8')).toBe('V1: created')
+
+    // 4. Restore Turn 2 / Restore All (target = finalPost = V2)
+    const targetRestore = env.manifest.resolveRestoreTarget('test_file.txt', null)
+    expect(targetRestore.postBlobSha).toBe(sha256Of(Buffer.from('V2: edited')))
+    expect(targetRestore.sessionCreated).toBe(true)
+    const evalRestore = evaluateBoundary(entry15, targetRestore, sha256Of(Buffer.from('V1: created')))
+    expect(evalRestore.state).toBe(STATE.CLEAN_RESTORE)
+    expect(evalRestore.action).toBe('restore')
+    expect(evalRestore.targetBlobSha).toBe(sha256Of(Buffer.from('V2: edited')))
+
+    await env.executor.execute({
+      sessionId: 's1', revertSeq: -1,
+      plan: new Map([['test_file.txt', { action: 'restore', targetBlobSha: evalRestore.targetBlobSha, expectedDiskSha: sha256Of(Buffer.from('V1: created')) }]]),
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'test_file.txt'), 'utf8')).toBe('V2: edited')
+
+    // 5. Revert Turn 1 (fromSeq: 5) -> created file reverted past creation (target is initialPre = absence)
+    const span5 = env.manifest.aggregateSpan(5)
+    const entry5 = span5.get('test_file.txt')!
+    const target5 = env.manifest.resolveRestoreTarget('test_file.txt', 5)
+    expect(target5.postBlobSha).toBe(null) // target is initialPre = absence
+    const eval5 = evaluateBoundary(entry5, target5, sha256Of(Buffer.from('V2: edited')))
+    expect(eval5.state).toBe(STATE.CLEAN_TRASH)
+    expect(eval5.action).toBe('trash')
+
+    await env.executor.execute({
+      sessionId: 's1', revertSeq: 5,
+      plan: new Map([['test_file.txt', { action: 'trash', targetBlobSha: null, expectedDiskSha: sha256Of(Buffer.from('V2: edited')) }]]),
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    // File is safely moved to trash
+    expect(await readDisk('test_file.txt')).toBeNull()
+
+    // 6. Restore Turn 1 / Restore All from absence -> clean recreation!
+    const evalRecreate = evaluateBoundary(entry5, targetRestore, null)
+    expect(evalRecreate.state).toBe(STATE.CLEAN_RESTORE)
+    expect(evalRecreate.action).toBe('restore')
+    expect(evalRecreate.targetBlobSha).toBe(sha256Of(Buffer.from('V2: edited')))
+
+    await env.executor.execute({
+      sessionId: 's1', revertSeq: -1,
+      plan: new Map([['test_file.txt', { action: 'restore', targetBlobSha: evalRecreate.targetBlobSha, expectedDiskSha: null }]]),
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'test_file.txt'), 'utf8')).toBe('V2: edited')
+  })
 })

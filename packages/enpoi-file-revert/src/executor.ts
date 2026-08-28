@@ -115,9 +115,10 @@ export class RevertExecutor {
     let interrupted = false
     try {
       for (const [targetKey, p] of opts.plan) {
-        // Normalize resolution intents (resolve:restore → restore) so crash
+        // Normalize resolution intents (resolve:restore → restore, resolve:keep → noop) so crash
         // recovery replays them through the same execution path.
-        const action = p.action.startsWith('resolve:') ? p.action.slice('resolve:'.length) : p.action
+        let action = p.action.startsWith('resolve:') ? p.action.slice('resolve:'.length) : p.action
+        if (action === 'keep') action = 'noop'
         if (action === 'noop') {
           outcomes[targetKey] = { status: 'no_op' }
           continue
@@ -132,6 +133,13 @@ export class RevertExecutor {
         if (currentSha !== p.expectedDiskSha) {
           outcomes[targetKey] = { status: 'conflict_escalated', reason: 'disk changed between evaluation and write' }
           continue
+        }
+        // Pre-clobber backup (Zero Data Loss): stage current content to blob store
+        // before overwriting or trashing so uncommitted user edits are never destroyed.
+        if (current !== null) {
+          try {
+            await this.opts.blobStore.put(current)
+          } catch { /* best-effort backup */ }
         }
         const path = await opts.resolvePath(targetKey)
         if (action === 'restore') {
@@ -187,59 +195,73 @@ export class RevertExecutor {
     writeDisk: (path: string, bytes: Buffer) => Promise<void>
     trashFile: (path: string) => Promise<string>
   }): Promise<{ status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }> {
+    const walSeq = opts.revertSeq !== -1 ? opts.revertSeq : -Date.now()
     await this.writeWal({
       kind: 'intent',
       sessionId: opts.sessionId,
-      revertSeq: opts.revertSeq,
+      revertSeq: walSeq,
       plan: { [opts.targetKey]: { action: `resolve:${opts.resolution}`, targetBlobSha: opts.targetBlobSha, expectedDiskSha: opts.expectedDiskSha } },
       ts: Date.now(),
     })
 
-    if (opts.resolution === 'keep') {
-      const outcome: { status: string } = { status: 'kept' }
-      await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
-      return outcome
-    }
-
-    const current = await opts.readDisk(opts.targetKey)
-    const currentSha = current === null ? null : sha256Of(current)
-    if (opts.expectedDiskSha !== null && currentSha !== opts.expectedDiskSha) {
-      const outcome = { status: 'conflict_escalated', reason: 'disk changed since the conflict was presented' }
-      await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
-      return outcome
-    }
-
-    const path = await opts.resolvePath(opts.targetKey)
-    let outcome: { status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }
-    if (opts.resolution === 'restore' || opts.resolution === 'recreate') {
-      let bytes: Buffer | null
-      try {
-        bytes = await this.opts.blobStore.get(opts.targetBlobSha)
-      } catch {
-        outcome = { status: 'conflict_escalated', reason: 'pre-agent blob missing from store' }
-        await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+    try {
+      if (opts.resolution === 'keep') {
+        const outcome: { status: string } = { status: 'kept' }
+        await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
         return outcome
       }
-      if (bytes === null) {
-        outcome = { status: 'conflict_escalated', reason: 'pre-agent blob missing from store' }
-        await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+
+      const current = await opts.readDisk(opts.targetKey)
+      const currentSha = current === null ? null : sha256Of(current)
+      if (opts.expectedDiskSha !== null && currentSha !== opts.expectedDiskSha) {
+        const outcome = { status: 'conflict_escalated', reason: 'disk changed since the conflict was presented' }
+        await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
         return outcome
       }
-      await opts.writeDisk(path, bytes)
-      const verify = await opts.readDisk(opts.targetKey)
-      if (verify === null || sha256Of(verify) !== opts.targetBlobSha) {
-        outcome = { status: 'conflict_escalated', reason: 'post-write verification failed' }
+
+      // Pre-clobber backup (Zero Data Loss): stage current content to blob store before write/trash
+      if (current !== null) {
+        try {
+          await this.opts.blobStore.put(current)
+        } catch { /* best-effort backup */ }
+      }
+
+      const path = await opts.resolvePath(opts.targetKey)
+      let outcome: { status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }
+      if (opts.resolution === 'restore' || opts.resolution === 'recreate') {
+        let bytes: Buffer | null
+        try {
+          bytes = await this.opts.blobStore.get(opts.targetBlobSha)
+        } catch {
+          outcome = { status: 'conflict_escalated', reason: 'pre-agent blob missing from store' }
+          await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+          return outcome
+        }
+        if (bytes === null) {
+          outcome = { status: 'conflict_escalated', reason: 'pre-agent blob missing from store' }
+          await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+          return outcome
+        }
+        await opts.writeDisk(path, bytes)
+        const verify = await opts.readDisk(opts.targetKey)
+        if (verify === null || sha256Of(verify) !== opts.targetBlobSha) {
+          outcome = { status: 'conflict_escalated', reason: 'post-write verification failed' }
+        } else {
+          outcome = { status: 'restored', toSha: opts.targetBlobSha }
+        }
+      } else if (opts.resolution === 'trash') {
+        const dest = await opts.trashFile(path)
+        outcome = { status: 'trashed', dest }
       } else {
-        outcome = { status: 'restored', toSha: opts.targetBlobSha }
+        outcome = { status: 'invalid_resolution' }
       }
-    } else if (opts.resolution === 'trash') {
-      const dest = await opts.trashFile(path)
-      outcome = { status: 'trashed', dest }
-    } else {
-      outcome = { status: 'invalid_resolution' }
+      await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+      return outcome
+    } catch (err) {
+      const outcome = { status: 'error', reason: String(err) }
+      await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+      return outcome
     }
-    await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
-    return outcome
   }
 
   /**

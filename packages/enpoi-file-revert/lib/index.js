@@ -104,13 +104,24 @@ var MutationManifest = class {
   upTo(seq) {
     return this.records.filter((r) => r.toolSeq <= seq);
   }
+  isSessionCreated(targetKey) {
+    const recs = this.records.filter((r) => r.targetKey === targetKey);
+    if (recs.length === 0) return false;
+    const earliest = recs.reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
+    return !earliest.preExisted;
+  }
   aggregateSpan(fromSeq) {
     const span = this.inSpan(fromSeq);
     const byKey = /* @__PURE__ */ new Map();
     for (const rec of span) {
       let entry = byKey.get(rec.targetKey);
       if (entry === void 0) {
-        entry = { initialPre: rec, finalPost: rec, records: [] };
+        entry = {
+          initialPre: rec,
+          finalPost: rec,
+          records: [],
+          sessionCreated: this.isSessionCreated(rec.targetKey)
+        };
         byKey.set(rec.targetKey, entry);
       }
       entry.records.push(rec);
@@ -125,39 +136,49 @@ var MutationManifest = class {
    * final post-state (restore-all).
    */
   resolveRestoreTarget(targetKey, restoreSeq) {
+    const sessionCreated = this.isSessionCreated(targetKey);
     if (restoreSeq === null) {
       const spanRecs = this.records.filter((r) => r.targetKey === targetKey);
-      if (spanRecs.length === 0) return { preExisted: false, preStatus: "ok", preBlobSha: null, postBlobSha: null, isInterleaved: false };
+      if (spanRecs.length === 0) {
+        return { preExisted: false, preStatus: "ok", preBlobSha: null, postBlobSha: null, isInterleaved: false, sessionCreated };
+      }
+      const earliest = spanRecs.reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
       const latest2 = spanRecs.reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
       return {
-        preExisted: latest2.preExisted,
-        preStatus: latest2.preStatus,
-        preBlobSha: latest2.preBlobSha,
+        preExisted: earliest.preExisted,
+        preStatus: earliest.preStatus,
+        preBlobSha: earliest.preBlobSha,
         postBlobSha: latest2.postBlobSha,
-        isInterleaved: spanRecs.some((r) => r.isInterleaved)
+        isInterleaved: spanRecs.some((r) => r.isInterleaved),
+        sessionCreated
       };
     }
     const recs = this.upTo(restoreSeq).filter((r) => r.targetKey === targetKey);
     if (recs.length === 0) {
       const spanRecs = this.records.filter((r) => r.targetKey === targetKey);
-      if (spanRecs.length === 0) return { preExisted: false, preStatus: "ok", preBlobSha: null, postBlobSha: null, isInterleaved: false };
+      if (spanRecs.length === 0) {
+        return { preExisted: false, preStatus: "ok", preBlobSha: null, postBlobSha: null, isInterleaved: false, sessionCreated };
+      }
       const earliest = spanRecs.reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
       return {
         preExisted: earliest.preExisted,
         preStatus: earliest.preStatus,
         preBlobSha: earliest.preBlobSha,
         postBlobSha: null,
-        isInterleaved: false
+        isInterleaved: false,
+        sessionCreated
       };
     }
+    const earliestSpan = this.records.filter((r) => r.targetKey === targetKey).reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
     const latest = recs.reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
     const chainInterleaved = recs.some((r) => r.isInterleaved) || this.records.some((r) => r.targetKey === targetKey && r.toolSeq > restoreSeq && r.isInterleaved);
     return {
-      preExisted: latest.preExisted,
-      preStatus: latest.preStatus,
-      preBlobSha: latest.preBlobSha,
+      preExisted: earliestSpan.preExisted,
+      preStatus: earliestSpan.preStatus,
+      preBlobSha: earliestSpan.preBlobSha,
       postBlobSha: latest.postBlobSha,
-      isInterleaved: chainInterleaved
+      isInterleaved: chainInterleaved,
+      sessionCreated
     };
   }
   /** All SHAs referenced by live records (for reachability GC). */
@@ -192,6 +213,7 @@ function evaluateBoundary(entry, target, currentSha) {
       action: "skip",
       targetBlobSha: null,
       expectedDiskSha: currentSha,
+      targetAbsent,
       reason: `pre-agent snapshot unavailable (${initialPre.preStatus})`
     };
   }
@@ -201,19 +223,22 @@ function evaluateBoundary(entry, target, currentSha) {
       action: "skip",
       targetBlobSha: targetSha,
       expectedDiskSha: currentSha,
+      targetAbsent,
       reason: `post-agent snapshot unavailable (${finalPost.postStatus})`
     };
   }
   if (currentSha === null) {
     if (targetAbsent) {
-      return { state: STATE.ALREADY_ABSENT, action: "noop", targetBlobSha: null, expectedDiskSha: null };
+      return { state: STATE.ALREADY_ABSENT, action: "noop", targetBlobSha: null, expectedDiskSha: null, targetAbsent: true };
     }
-    if (!initialPre.preExisted) {
+    const isSessionCreated = entry.sessionCreated ?? !initialPre.preExisted;
+    if (isSessionCreated) {
       return {
         state: STATE.CLEAN_RESTORE,
         action: "restore",
         targetBlobSha: targetSha,
-        expectedDiskSha: null
+        expectedDiskSha: null,
+        targetAbsent: false
       };
     }
     return {
@@ -221,11 +246,12 @@ function evaluateBoundary(entry, target, currentSha) {
       action: "prompt",
       targetBlobSha: targetSha,
       expectedDiskSha: null,
+      targetAbsent: false,
       reason: "file is missing on disk but the revert boundary expects it to exist"
     };
   }
   if (currentSha === targetSha) {
-    return { state: STATE.ALREADY_CLEAN, action: "noop", targetBlobSha: null, expectedDiskSha: currentSha };
+    return { state: STATE.ALREADY_CLEAN, action: "noop", targetBlobSha: null, expectedDiskSha: currentSha, targetAbsent };
   }
   const isKnownSpanState = entry.records.some((r) => r.postBlobSha !== null && r.postBlobSha === currentSha) || entry.records.some((r) => !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha);
   if (isKnownSpanState) {
@@ -236,6 +262,7 @@ function evaluateBoundary(entry, target, currentSha) {
           action: "skip",
           targetBlobSha: null,
           expectedDiskSha: currentSha,
+          targetAbsent: true,
           reason: "target is absent but file pre-existed before span"
         };
       }
@@ -243,14 +270,16 @@ function evaluateBoundary(entry, target, currentSha) {
         state: STATE.CLEAN_TRASH,
         action: "trash",
         targetBlobSha: null,
-        expectedDiskSha: currentSha
+        expectedDiskSha: currentSha,
+        targetAbsent: true
       };
     }
     return {
       state: STATE.CLEAN_RESTORE,
       action: "restore",
       targetBlobSha: targetSha,
-      expectedDiskSha: currentSha
+      expectedDiskSha: currentSha,
+      targetAbsent: false
     };
   }
   return {
@@ -258,6 +287,7 @@ function evaluateBoundary(entry, target, currentSha) {
     action: "prompt",
     targetBlobSha: targetSha,
     expectedDiskSha: currentSha,
+    targetAbsent,
     reason: "current disk content differs from all known agent mutation states in the span"
   };
 }
@@ -333,7 +363,8 @@ var RevertExecutor = class {
     let interrupted = false;
     try {
       for (const [targetKey, p] of opts.plan) {
-        const action = p.action.startsWith("resolve:") ? p.action.slice("resolve:".length) : p.action;
+        let action = p.action.startsWith("resolve:") ? p.action.slice("resolve:".length) : p.action;
+        if (action === "keep") action = "noop";
         if (action === "noop") {
           outcomes[targetKey] = { status: "no_op" };
           continue;
@@ -347,6 +378,12 @@ var RevertExecutor = class {
         if (currentSha !== p.expectedDiskSha) {
           outcomes[targetKey] = { status: "conflict_escalated", reason: "disk changed between evaluation and write" };
           continue;
+        }
+        if (current !== null) {
+          try {
+            await this.opts.blobStore.put(current);
+          } catch {
+          }
         }
         const path = await opts.resolvePath(targetKey);
         if (action === "restore") {
@@ -386,56 +423,69 @@ var RevertExecutor = class {
    * discipline as auto-revert.
    */
   async applyResolution(opts) {
+    const walSeq = opts.revertSeq !== -1 ? opts.revertSeq : -Date.now();
     await this.writeWal({
       kind: "intent",
       sessionId: opts.sessionId,
-      revertSeq: opts.revertSeq,
+      revertSeq: walSeq,
       plan: { [opts.targetKey]: { action: `resolve:${opts.resolution}`, targetBlobSha: opts.targetBlobSha, expectedDiskSha: opts.expectedDiskSha } },
       ts: Date.now()
     });
-    if (opts.resolution === "keep") {
-      const outcome2 = { status: "kept" };
-      await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome2 }, ts: Date.now() });
-      return outcome2;
-    }
-    const current = await opts.readDisk(opts.targetKey);
-    const currentSha = current === null ? null : sha256Of(current);
-    if (opts.expectedDiskSha !== null && currentSha !== opts.expectedDiskSha) {
-      const outcome2 = { status: "conflict_escalated", reason: "disk changed since the conflict was presented" };
-      await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome2 }, ts: Date.now() });
-      return outcome2;
-    }
-    const path = await opts.resolvePath(opts.targetKey);
-    let outcome;
-    if (opts.resolution === "restore" || opts.resolution === "recreate") {
-      let bytes;
-      try {
-        bytes = await this.opts.blobStore.get(opts.targetBlobSha);
-      } catch {
-        outcome = { status: "conflict_escalated", reason: "pre-agent blob missing from store" };
-        await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
-        return outcome;
+    try {
+      if (opts.resolution === "keep") {
+        const outcome2 = { status: "kept" };
+        await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome2 }, ts: Date.now() });
+        return outcome2;
       }
-      if (bytes === null) {
-        outcome = { status: "conflict_escalated", reason: "pre-agent blob missing from store" };
-        await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
-        return outcome;
+      const current = await opts.readDisk(opts.targetKey);
+      const currentSha = current === null ? null : sha256Of(current);
+      if (opts.expectedDiskSha !== null && currentSha !== opts.expectedDiskSha) {
+        const outcome2 = { status: "conflict_escalated", reason: "disk changed since the conflict was presented" };
+        await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome2 }, ts: Date.now() });
+        return outcome2;
       }
-      await opts.writeDisk(path, bytes);
-      const verify = await opts.readDisk(opts.targetKey);
-      if (verify === null || sha256Of(verify) !== opts.targetBlobSha) {
-        outcome = { status: "conflict_escalated", reason: "post-write verification failed" };
+      if (current !== null) {
+        try {
+          await this.opts.blobStore.put(current);
+        } catch {
+        }
+      }
+      const path = await opts.resolvePath(opts.targetKey);
+      let outcome;
+      if (opts.resolution === "restore" || opts.resolution === "recreate") {
+        let bytes;
+        try {
+          bytes = await this.opts.blobStore.get(opts.targetBlobSha);
+        } catch {
+          outcome = { status: "conflict_escalated", reason: "pre-agent blob missing from store" };
+          await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
+          return outcome;
+        }
+        if (bytes === null) {
+          outcome = { status: "conflict_escalated", reason: "pre-agent blob missing from store" };
+          await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
+          return outcome;
+        }
+        await opts.writeDisk(path, bytes);
+        const verify = await opts.readDisk(opts.targetKey);
+        if (verify === null || sha256Of(verify) !== opts.targetBlobSha) {
+          outcome = { status: "conflict_escalated", reason: "post-write verification failed" };
+        } else {
+          outcome = { status: "restored", toSha: opts.targetBlobSha };
+        }
+      } else if (opts.resolution === "trash") {
+        const dest = await opts.trashFile(path);
+        outcome = { status: "trashed", dest };
       } else {
-        outcome = { status: "restored", toSha: opts.targetBlobSha };
+        outcome = { status: "invalid_resolution" };
       }
-    } else if (opts.resolution === "trash") {
-      const dest = await opts.trashFile(path);
-      outcome = { status: "trashed", dest };
-    } else {
-      outcome = { status: "invalid_resolution" };
+      await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
+      return outcome;
+    } catch (err) {
+      const outcome = { status: "error", reason: String(err) };
+      await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
+      return outcome;
     }
-    await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: opts.revertSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() });
-    return outcome;
   }
   /**
    * Crash recovery: find intents without matching results. Recovery REPLAYS the
@@ -607,11 +657,21 @@ function apply(ctx, config) {
     }
     return e;
   }
-  function stateFor(sessionId) {
-    let s = sessionStates.get(sessionId);
+  function stateFor(session) {
+    let s = sessionStates.get(session.id);
     if (s === void 0) {
-      s = { boundary: null, flight: null };
-      sessionStates.set(sessionId, s);
+      let recoveredBoundary = null;
+      if (session.events !== void 0) {
+        for (let i = session.events.length - 1; i >= 0; i--) {
+          const ev = session.events[i];
+          if (ev?.type === "revert/state") {
+            recoveredBoundary = ev.data.fromSeq;
+            break;
+          }
+        }
+      }
+      s = { boundary: recoveredBoundary, initialized: true, flight: Promise.resolve() };
+      sessionStates.set(session.id, s);
     }
     return s;
   }
@@ -637,17 +697,21 @@ function apply(ctx, config) {
   });
   ctx.on("session/event", (session, event) => {
     if (event.type !== "revert/state") return;
-    const fromSeq = event.data.fromSeq;
-    diag(`revert/state: session=${session.id} fromSeq=${String(fromSeq)} ctor=${session.constructor?.name} hasLog=${"log" in session} hasEvents=${"events" in session}`);
-    const state = stateFor(session.id);
-    state.boundary = fromSeq;
-    if (state.flight !== null) {
-      diag(`revert/state: session=${session.id} \u2014 flight in progress, skipping`);
+    const data = event.data;
+    const fromSeq = data.fromSeq;
+    const cause = data.cause ?? (fromSeq === null ? "restore" : "revert");
+    diag(`revert/state: session=${session.id} fromSeq=${String(fromSeq)} cause=${cause}`);
+    const state = stateFor(session);
+    const oldBoundary = state.boundary;
+    const newBoundary = fromSeq;
+    state.boundary = newBoundary;
+    if (cause === "commit") {
+      diag(`revert/state: commit for ${session.id} \u2014 clearing boundary without file execution`);
       return;
     }
-    state.flight = (async () => {
+    state.flight = state.flight.then(async () => {
       try {
-        await executeFileRevert(ctx, session, fromSeq, state, manifestFor, executorFor, blobStore);
+        await executeFileTransition(ctx, session, oldBoundary, newBoundary, manifestFor, executorFor, blobStore);
       } catch (err) {
         diag(`revert execution FAILED for ${session.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
         try {
@@ -657,17 +721,15 @@ function apply(ctx, config) {
           });
         } catch {
         }
-      } finally {
-        state.flight = null;
       }
-    })();
+    });
   });
   const onAny = ctx.on;
   onAny("file-revert/resolve", async (...args) => {
     diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
     const request = args[0];
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor);
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore);
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
       return { accepted: true, ...outcome };
     } catch (err) {
@@ -693,17 +755,24 @@ function appendIgnorable(session, type, data) {
   const s = session;
   s.append(type, data, { ignorable: true });
 }
-async function executeFileRevert(ctx, session, fromSeq, state, manifestFor, executorFor, blobStore) {
+async function executeFileTransition(ctx, session, oldBoundary, newBoundary, manifestFor, executorFor, _blobStore) {
   const manifest = manifestFor(session.id);
   const executor = executorFor(session.id);
-  const spanStart = fromSeq ?? state.boundary ?? 0;
+  const isRevert = newBoundary !== null && (oldBoundary === null || newBoundary <= oldBoundary);
+  const isRestore = newBoundary === null && oldBoundary !== null || newBoundary !== null && oldBoundary !== null && newBoundary > oldBoundary;
+  if (!isRevert && !isRestore) {
+    diag(`executeFileTransition: no-op transition for ${session.id} (old=${String(oldBoundary)}, new=${String(newBoundary)})`);
+    return;
+  }
+  const mode = isRevert ? "revert" : "restore";
+  const spanStart = isRevert ? newBoundary : oldBoundary;
   const aggregated = manifest.aggregateSpan(spanStart);
-  diag(`executeFileRevert: session=${session.id} fromSeq=${String(fromSeq)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`);
+  diag(`executeFileTransition: session=${session.id} mode=${mode} oldBoundary=${String(oldBoundary)} newBoundary=${String(newBoundary)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`);
   if (aggregated.size === 0) return;
   const activeChildren = await findActiveChildren(ctx, session.id);
   if (activeChildren.length > 0) {
     appendIgnorable(session, "revert/file-result", {
-      revertSeq: fromSeq ?? -1,
+      revertSeq: newBoundary ?? -1,
       outcomes: {
         _guard: { status: "refused", reason: `active subagent fibers: ${activeChildren.join(", ")}` }
       }
@@ -714,7 +783,7 @@ async function executeFileRevert(ctx, session, fromSeq, state, manifestFor, exec
   const plan = /* @__PURE__ */ new Map();
   const conflicts = [];
   for (const [targetKey, entry] of aggregated) {
-    const target = manifest.resolveRestoreTarget(targetKey, fromSeq);
+    const target = manifest.resolveRestoreTarget(targetKey, newBoundary);
     const current = await readDiskBytes(ctx, targetKey);
     const currentSha = current === null ? null : sha256Hex(current);
     const evalResult = evaluateBoundary(entry, target, currentSha);
@@ -732,6 +801,13 @@ async function executeFileRevert(ctx, session, fromSeq, state, manifestFor, exec
         displayPath: entry.finalPost.displayPath,
         state: evalResult.state,
         reason: evalResult.reason ?? "",
+        mode,
+        boundarySeq: newBoundary,
+        spanStartSeq: spanStart,
+        targetBlobSha: evalResult.targetBlobSha,
+        targetAbsent: evalResult.targetAbsent ?? (target.postBlobSha === null && target.preBlobSha === null),
+        spanPreExisted: target.preExisted,
+        sessionCreated: entry.sessionCreated ?? !entry.initialPre.preExisted,
         preSha: entry.initialPre.preBlobSha,
         postSha: entry.finalPost.postBlobSha,
         currentSha
@@ -739,13 +815,13 @@ async function executeFileRevert(ctx, session, fromSeq, state, manifestFor, exec
     }
   }
   appendIgnorable(session, "revert/file-intent", {
-    revertSeq: fromSeq ?? -1,
+    revertSeq: newBoundary ?? -1,
     plan: Object.fromEntries([...plan].map(([key, p]) => [key, { action: p.action, targetBlobSha: p.targetBlobSha, expectedDiskSha: p.expectedDiskSha }]))
   });
   const typedPlan = plan;
   const { outcomes } = await executor.execute({
     sessionId: session.id,
-    revertSeq: fromSeq ?? -1,
+    revertSeq: newBoundary ?? -1,
     plan: typedPlan,
     resolvePath: async (key) => key,
     readDisk: async (key) => readDiskBytes(ctx, key),
@@ -759,14 +835,21 @@ async function executeFileRevert(ctx, session, fromSeq, state, manifestFor, exec
       displayPath: c.displayPath,
       state: c.state,
       reason: c.reason,
+      mode: c.mode,
+      boundarySeq: c.boundarySeq,
+      spanStartSeq: c.spanStartSeq,
+      targetBlobSha: c.targetBlobSha,
+      targetAbsent: c.targetAbsent,
+      spanPreExisted: c.spanPreExisted,
+      sessionCreated: c.sessionCreated,
       preSha: c.preSha,
       postSha: c.postSha,
       currentSha: c.currentSha
     });
   }
-  appendIgnorable(session, "revert/file-result", { revertSeq: fromSeq ?? -1, outcomes });
+  appendIgnorable(session, "revert/file-result", { revertSeq: newBoundary ?? -1, outcomes });
 }
-async function applyConflictResolution(ctx, request, executorFor) {
+async function applyConflictResolution(ctx, request, executorFor, _blobStore) {
   const executor = executorFor(request.sessionId);
   const sessions = ctx.get("sessions");
   const session = sessions?.get?.(request.sessionId);
@@ -776,18 +859,29 @@ async function applyConflictResolution(ctx, request, executorFor) {
   const conflict = conflictEvent.data;
   let resolution = request.resolution;
   let targetBlobSha = null;
-  if (resolution === "restore") {
-    if (conflict.preSha !== null) {
+  if (resolution === "keep") {
+    targetBlobSha = null;
+  } else if (resolution === "restore") {
+    if (conflict.targetAbsent === true) {
+      resolution = "trash";
+      targetBlobSha = null;
+    } else if (conflict.targetBlobSha !== void 0 && conflict.targetBlobSha !== null) {
+      targetBlobSha = conflict.targetBlobSha;
+    } else if (conflict.mode === "restore" && conflict.postSha !== null) {
+      targetBlobSha = conflict.postSha;
+    } else if (conflict.preSha !== null) {
       targetBlobSha = conflict.preSha;
     } else {
       resolution = "trash";
     }
   } else if (resolution === "recreate") {
-    targetBlobSha = conflict.preSha ?? conflict.postSha;
+    targetBlobSha = conflict.targetBlobSha ?? conflict.postSha ?? conflict.preSha;
+  } else if (resolution === "trash") {
+    resolution = "trash";
   }
   const outcome = await executor.applyResolution({
     sessionId: request.sessionId,
-    revertSeq: -1,
+    revertSeq: conflict.boundarySeq ?? -1,
     targetKey: conflict.targetKey,
     resolution,
     targetBlobSha,
@@ -798,7 +892,7 @@ async function applyConflictResolution(ctx, request, executorFor) {
     trashFile: async (path) => executor.trash(path, request.sessionId)
   });
   appendIgnorable(session, "revert/file-result", {
-    revertSeq: -1,
+    revertSeq: conflict.boundarySeq ?? -1,
     outcomes: { [conflict.targetKey]: outcome }
   });
   return { outcome };

@@ -23,6 +23,7 @@ export interface EvalResult {
   action: 'restore' | 'trash' | 'noop' | 'prompt' | 'skip'
   targetBlobSha: string | null
   expectedDiskSha: string | null
+  targetAbsent?: boolean
   reason?: string
 }
 
@@ -61,6 +62,7 @@ export function evaluateBoundary(
       action: 'skip',
       targetBlobSha: null,
       expectedDiskSha: currentSha,
+      targetAbsent,
       reason: `pre-agent snapshot unavailable (${initialPre.preStatus})`,
     }
   }
@@ -72,6 +74,7 @@ export function evaluateBoundary(
       action: 'skip',
       targetBlobSha: targetSha,
       expectedDiskSha: currentSha,
+      targetAbsent,
       reason: `post-agent snapshot unavailable (${finalPost.postStatus})`,
     }
   }
@@ -79,17 +82,19 @@ export function evaluateBoundary(
   if (currentSha === null) {
     // Disk absent.
     if (targetAbsent) {
-      return { state: STATE.ALREADY_ABSENT, action: 'noop', targetBlobSha: null, expectedDiskSha: null }
+      return { state: STATE.ALREADY_ABSENT, action: 'noop', targetBlobSha: null, expectedDiskSha: null, targetAbsent: true }
     }
-    // If the file was created in this span, absence is its initial pre-state.
+    // If the file was created in this session, absence is its initial pre-state.
     // Restoring to a state where the file exists (targetSha) from an absent disk
     // is a clean recreation / restore (cannot clobber user content).
-    if (!initialPre.preExisted) {
+    const isSessionCreated = entry.sessionCreated ?? !initialPre.preExisted
+    if (isSessionCreated) {
       return {
         state: STATE.CLEAN_RESTORE,
         action: 'restore',
         targetBlobSha: targetSha,
         expectedDiskSha: null,
+        targetAbsent: false,
       }
     }
     // Pre-existing file that unexpectedly vanished from disk -> prompt MISSING.
@@ -98,13 +103,14 @@ export function evaluateBoundary(
       action: 'prompt',
       targetBlobSha: targetSha,
       expectedDiskSha: null,
+      targetAbsent: false,
       reason: 'file is missing on disk but the revert boundary expects it to exist',
     }
   }
 
   if (currentSha === targetSha) {
     // Disk already at the boundary state -> no-op.
-    return { state: STATE.ALREADY_CLEAN, action: 'noop', targetBlobSha: null, expectedDiskSha: currentSha }
+    return { state: STATE.ALREADY_CLEAN, action: 'noop', targetBlobSha: null, expectedDiskSha: currentSha, targetAbsent }
   }
 
   // Span-wide known-state scan (Oracle R4 + R2):
@@ -125,6 +131,7 @@ export function evaluateBoundary(
           action: 'skip',
           targetBlobSha: null,
           expectedDiskSha: currentSha,
+          targetAbsent: true,
           reason: 'target is absent but file pre-existed before span',
         }
       }
@@ -135,6 +142,7 @@ export function evaluateBoundary(
         action: 'trash',
         targetBlobSha: null,
         expectedDiskSha: currentSha,
+        targetAbsent: true,
       }
     }
     // Clean restore to the boundary target.
@@ -143,6 +151,7 @@ export function evaluateBoundary(
       action: 'restore',
       targetBlobSha: targetSha,
       expectedDiskSha: currentSha,
+      targetAbsent: false,
     }
   }
 
@@ -152,6 +161,7 @@ export function evaluateBoundary(
     action: 'prompt',
     targetBlobSha: targetSha,
     expectedDiskSha: currentSha,
+    targetAbsent,
     reason: 'current disk content differs from all known agent mutation states in the span',
   }
 }
