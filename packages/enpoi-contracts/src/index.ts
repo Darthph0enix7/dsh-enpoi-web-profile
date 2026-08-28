@@ -71,6 +71,10 @@ export const briefProseUpdatedSchema = z.object({
   openThreads: z.array(z.string()).optional(),
   /** The session seq the keeper's input was based on (I3 comparison). */
   basedOnSeq: z.number().int().nonnegative(),
+  /** Structural-event count (user/message, turn/end, tool/call, tool/result) at basedOnSeq — seq-based freshness (Oracle amendment 4). */
+  basedOnStructuralCount: z.number().int().nonnegative(),
+  /** The structural-distance threshold the keeper used — view() classifies freshness with it. */
+  structuralDistanceK: z.number().int().positive().optional(),
   /** Route used, e.g. "deepseek/deepseek-v4-flash". */
   model: z.string(),
   /** The prose summary text. */
@@ -111,7 +115,17 @@ export interface LivingBriefState {
   filesTouched: string[]
   blockers: Blocker[]
   phase: string
-  prose: { text: string; updatedAt: number; model: string } | null
+  prose: {
+    text: string
+    updatedAt: number
+    model: string
+    /** The session seq the prose was based on (I3 + seq-based freshness). */
+    basedOnSeq: number
+    /** Structural-event count at basedOnSeq — seq-based freshness. */
+    basedOnStructuralCount: number
+    /** The structural-distance threshold used at distillation time. */
+    structuralDistanceK: number
+  } | null
   /** Last brief/steered seq — I3 goal precedence boundary. */
   goalSeq: number
   /** asOfSeq source — the last folded event's seq. */
@@ -120,6 +134,8 @@ export interface LivingBriefState {
   foldErrors: number
   /** Bounded callId → tool-name map (tool/result needs the caller's name). */
   toolNames: Record<string, string>
+  /** Structural-event counter (user/message, turn/end, tool/call, tool/result) — seq-based freshness. */
+  structuralCount: number
 }
 
 export const livingBriefStateSchema = z.object({
@@ -130,11 +146,19 @@ export const livingBriefStateSchema = z.object({
   filesTouched: z.array(z.string()),
   blockers: z.array(blockerSchema),
   phase: z.string(),
-  prose: z.object({ text: z.string(), updatedAt: z.number(), model: z.string() }).nullable(),
+  prose: z.object({
+    text: z.string(),
+    updatedAt: z.number(),
+    model: z.string(),
+    basedOnSeq: z.number().int().nonnegative(),
+    basedOnStructuralCount: z.number().int().nonnegative(),
+    structuralDistanceK: z.number().int().positive(),
+  }).nullable(),
   goalSeq: z.number().int().nonnegative(),
   lastEventSeq: z.number().int().nonnegative(),
   foldErrors: z.number().int().nonnegative(),
   toolNames: z.record(z.string()),
+  structuralCount: z.number().int().nonnegative(),
 }).strict()
 
 /** The client-visible wire payload (doc 33 §4.1). */
@@ -146,7 +170,14 @@ export const livingBriefViewSchema = z.object({
   filesTouched: z.array(z.string()),
   blockers: z.array(blockerSchema),
   phase: z.string(),
-  prose: z.object({ text: z.string(), updatedAt: z.number(), model: z.string() }).nullable(),
+  prose: z.object({
+    text: z.string(),
+    updatedAt: z.number(),
+    model: z.string(),
+    basedOnSeq: z.number().int().nonnegative(),
+    basedOnStructuralCount: z.number().int().nonnegative(),
+    structuralDistanceK: z.number().int().positive(),
+  }).nullable(),
   asOfSeq: z.number().int().nonnegative(),
   freshness: z.union([z.literal('live'), z.literal('cooling'), z.literal('stale')]),
 }).strict()

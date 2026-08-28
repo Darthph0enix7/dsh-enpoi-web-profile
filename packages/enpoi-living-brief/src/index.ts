@@ -32,6 +32,9 @@ export const inject = ['sessionProjections']
 /** Edit tools whose `tool/call` arguments carry a `file_path` (filesTouched). */
 const EDIT_TOOLS = new Set(['write', 'edit', 'str_replace_editor'])
 
+/** Structural event types — the only events that age the brief (Oracle amendment 4). */
+const STRUCTURAL_TYPES = new Set(['user/message', 'turn/end', 'tool/call', 'tool/result'])
+
 /** Bound the callId→name map so a long session cannot grow it unboundedly. */
 const MAX_TOOL_NAMES = 200
 
@@ -56,6 +59,7 @@ export function apply(ctx: Context): void {
         lastEventSeq: 0,
         foldErrors: 0,
         toolNames: {},
+        structuralCount: 0,
       }),
       apply: (state, event) => fold(ctx, state, event),
       wire: {
@@ -76,8 +80,16 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
 
       case 'turn/end': {
         const kind = (event.data as { reason: { kind: string } }).reason.kind
-        return { ...state, phase: kind === 'aborted' ? 'aborted' : 'idle', lastEventSeq: event.seq }
+        return {
+          ...state,
+          phase: kind === 'aborted' ? 'aborted' : 'idle',
+          lastEventSeq: event.seq,
+          structuralCount: state.structuralCount + 1,
+        }
       }
+
+      case 'user/message':
+        return { ...state, lastEventSeq: event.seq, structuralCount: state.structuralCount + 1 }
 
       case 'tool/call': {
         const data = event.data as { callId: string; name: string; arguments: string }
@@ -95,12 +107,20 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
             filesTouched = [...filesTouched, path]
           }
         }
-        return { ...state, toolNames, filesTouched, lastEventSeq: event.seq }
+        return {
+          ...state,
+          toolNames,
+          filesTouched,
+          lastEventSeq: event.seq,
+          structuralCount: state.structuralCount + 1,
+        }
       }
 
       case 'tool/result': {
         const data = event.data as { callId: string; error?: { name: string; code: string } }
-        if (data.error === undefined) return { ...state, lastEventSeq: event.seq }
+        if (data.error === undefined) {
+          return { ...state, lastEventSeq: event.seq, structuralCount: state.structuralCount + 1 }
+        }
         const tool = state.toolNames[data.callId]
         const blocker: Blocker = {
           id: `b-${event.seq}`,
@@ -112,6 +132,7 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
           ...state,
           blockers: [...state.blockers, blocker].slice(-MAX_ENTRIES),
           lastEventSeq: event.seq,
+          structuralCount: state.structuralCount + 1,
         }
       }
 
@@ -121,6 +142,8 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
           decisions?: string[]
           openThreads?: string[]
           basedOnSeq: number
+          basedOnStructuralCount: number
+          structuralDistanceK?: number
           model: string
           text: string
           origin: string
@@ -129,7 +152,14 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
         if (data.origin !== 'context-keeper') return { ...state, lastEventSeq: event.seq }
         const next: LivingBriefState = {
           ...state,
-          prose: { text: data.text, updatedAt: event.time, model: data.model },
+          prose: {
+            text: data.text,
+            updatedAt: event.time,
+            model: data.model,
+            basedOnSeq: data.basedOnSeq,
+            basedOnStructuralCount: data.basedOnStructuralCount,
+            structuralDistanceK: data.structuralDistanceK ?? 24,
+          },
           lastEventSeq: event.seq,
         }
         // I3: goal precedence — prose based on a seq before the last steered
@@ -173,13 +203,15 @@ function extractFilePath(argumentsJson: string): string | undefined {
   }
 }
 
-/** State → wire payload. Freshness is time-dependent, computed at snapshot time. */
+/** State → wire payload. Freshness is STRUCTURAL-SEQ distance (Oracle amendment 4) — wall-clock age is display-only. */
 export function view(state: LivingBriefState): LivingBriefView {
-  const now = Date.now()
-  const ageMs = state.prose === null ? Number.POSITIVE_INFINITY : now - state.prose.updatedAt
   const freshness: LivingBriefView['freshness'] = state.prose === null
     ? 'stale'
-    : ageMs < 30_000 ? 'live' : ageMs < 300_000 ? 'cooling' : 'stale'
+    : state.structuralCount - state.prose.basedOnStructuralCount <= state.prose.structuralDistanceK
+      ? 'live'
+      : state.structuralCount - state.prose.basedOnStructuralCount <= state.prose.structuralDistanceK * 2
+        ? 'cooling'
+        : 'stale'
   return {
     goal: state.goal,
     decisions: state.decisions,

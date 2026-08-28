@@ -25,6 +25,7 @@ function init(): LivingBriefState {
     lastEventSeq: 0,
     foldErrors: 0,
     toolNames: {},
+    structuralCount: 0,
   }
 }
 
@@ -118,7 +119,7 @@ describe('livingBrief fold — blockers', () => {
 })
 
 describe('livingBrief fold — prose (I2 field ownership)', () => {
-  it('keeper prose → prose set + goal/decisions/openThreads', () => {
+  it('keeper prose → prose set + goal/decisions/openThreads + structural metadata', () => {
     const s = fold(ctx, init(), ev({
       type: 'brief/prose-updated',
       data: {
@@ -126,12 +127,17 @@ describe('livingBrief fold — prose (I2 field ownership)', () => {
         decisions: ['Use spawn not fork'],
         openThreads: ['Keeper model choice'],
         basedOnSeq: 5,
+        basedOnStructuralCount: 4,
+        structuralDistanceK: 24,
         model: 'deepseek/deepseek-v4-flash',
         text: '- goal: build orchestrator\n- decided: spawn',
         origin: 'context-keeper',
       },
     }))
     expect(s.prose?.text).toContain('build orchestrator')
+    expect(s.prose?.basedOnSeq).toBe(5)
+    expect(s.prose?.basedOnStructuralCount).toBe(4)
+    expect(s.prose?.structuralDistanceK).toBe(24)
     expect(s.goal).toBe('Build the orchestrator')
     expect(s.decisions).toHaveLength(1)
     expect(s.openThreads).toHaveLength(1)
@@ -140,7 +146,7 @@ describe('livingBrief fold — prose (I2 field ownership)', () => {
   it('non-keeper origin → prose fields ignored (I2)', () => {
     const s = fold(ctx, init(), ev({
       type: 'brief/prose-updated',
-      data: { goal: 'EVIL', basedOnSeq: 0, model: 'x', text: 'x', origin: 'attacker' },
+      data: { goal: 'EVIL', basedOnSeq: 0, basedOnStructuralCount: 0, model: 'x', text: 'x', origin: 'attacker' },
     }))
     expect(s.prose).toBeNull()
     expect(s.goal).toBe('')
@@ -150,7 +156,7 @@ describe('livingBrief fold — prose (I2 field ownership)', () => {
     const base = { ...init(), goalSeq: 10 }
     const s = fold(ctx, base, ev({
       type: 'brief/prose-updated',
-      data: { goal: 'STALE GOAL', basedOnSeq: 5, model: 'm', text: 't', origin: 'context-keeper' },
+      data: { goal: 'STALE GOAL', basedOnSeq: 5, basedOnStructuralCount: 4, model: 'm', text: 't', origin: 'context-keeper' },
     }))
     expect(s.goal).toBe('') // goal untouched
     expect(s.prose?.text).toBe('t') // prose still updated
@@ -160,7 +166,7 @@ describe('livingBrief fold — prose (I2 field ownership)', () => {
     const base = { ...init(), goalSeq: 10 }
     const s = fold(ctx, base, ev({
       type: 'brief/prose-updated',
-      data: { goal: 'FRESH GOAL', basedOnSeq: 12, model: 'm', text: 't', origin: 'context-keeper' },
+      data: { goal: 'FRESH GOAL', basedOnSeq: 12, basedOnStructuralCount: 11, model: 'm', text: 't', origin: 'context-keeper' },
     }))
     expect(s.goal).toBe('FRESH GOAL')
   })
@@ -182,22 +188,53 @@ describe('livingBrief fold — discipline', () => {
   })
 })
 
-describe('livingBrief view', () => {
+describe('livingBrief view — seq-based freshness (Oracle amendment 4)', () => {
   it('freshness: no prose → stale', () => {
     const v = view(init())
     expect(v.freshness).toBe('stale')
     expect(v.asOfSeq).toBe(0)
   })
 
-  it('freshness: recent prose → live', () => {
-    const s = { ...init(), prose: { text: 't', updatedAt: Date.now(), model: 'm' }, lastEventSeq: 7 }
+  it('freshness: structural distance within K → live (silence never invalidates)', () => {
+    const s = {
+      ...init(),
+      prose: { text: 't', updatedAt: Date.now() - 600_000, model: 'm', basedOnSeq: 5, basedOnStructuralCount: 4, structuralDistanceK: 24 },
+      structuralCount: 10, // 6 structural events since the prose — within K
+      lastEventSeq: 7,
+    }
     const v = view(s)
     expect(v.freshness).toBe('live')
     expect(v.asOfSeq).toBe(7)
   })
 
-  it('freshness: old prose → stale', () => {
-    const s = { ...init(), prose: { text: 't', updatedAt: Date.now() - 600_000, model: 'm' } }
+  it('freshness: structural distance beyond 2K → stale (even if wall-clock is young)', () => {
+    const s = {
+      ...init(),
+      prose: { text: 't', updatedAt: Date.now(), model: 'm', basedOnSeq: 5, basedOnStructuralCount: 4, structuralDistanceK: 24 },
+      structuralCount: 60, // 56 structural events since the prose — far beyond 2K
+    }
     expect(view(s).freshness).toBe('stale')
+  })
+
+  it('freshness: distance between K and 2K → cooling', () => {
+    const s = {
+      ...init(),
+      prose: { text: 't', updatedAt: Date.now(), model: 'm', basedOnSeq: 5, basedOnStructuralCount: 4, structuralDistanceK: 24 },
+      structuralCount: 40, // 36 structural events — between K and 2K
+    }
+    expect(view(s).freshness).toBe('cooling')
+  })
+})
+
+describe('livingBrief fold — structuralCount', () => {
+  it('counts only structural events (user/message, turn/end, tool/call, tool/result)', () => {
+    let s = init()
+    s = fold(ctx, s, ev({ type: 'user/message', data: { content: 'hi' } }))
+    s = fold(ctx, s, ev({ type: 'assistant/message', data: { text: 'yo' } }))
+    s = fold(ctx, s, ev({ type: 'turn/end', data: { reason: { kind: 'completed' } } }))
+    s = fold(ctx, s, ev({ type: 'tool/call', data: { callId: 'c1', name: 'read', arguments: '{}' } }))
+    s = fold(ctx, s, ev({ type: 'tool/result', data: { callId: 'c1', message: {} } }))
+    s = fold(ctx, s, ev({ type: 'request/header', data: { header: {}, reason: 'x' } }))
+    expect(s.structuralCount).toBe(4) // user/message + turn/end + tool/call + tool/result
   })
 })

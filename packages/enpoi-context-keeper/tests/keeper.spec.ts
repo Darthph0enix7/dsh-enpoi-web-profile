@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { resolveKeeperRoute, arm, run, type KeeperState } from '../src/index'
+import {
+  resolveKeeperRoute,
+  cleanKeeperProse,
+  splitClaims,
+  createBriefService,
+  apply,
+  type Config,
+} from '../src/index'
 
 /** Minimal session mock satisfying frameInput + append + seq reads. */
 function makeSession(events: Array<{ type: string; seq: number; data: unknown }> = []) {
@@ -11,17 +18,18 @@ function makeSession(events: Array<{ type: string; seq: number; data: unknown }>
   }
 }
 
-/** Minimal ctx mock: settings + llm.stream + logger. */
+/** Minimal ctx mock: settings + llm.stream + logger + on (claims listener). */
 function makeCtx(overrides: {
   personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }>
   stream?: (opts: { provider: string; model: string }) => AsyncGenerator<unknown>
 } = {}) {
   const stream = overrides.stream ?? (async function* () {
     yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet\nCLAIMS: []' }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet\nCLAIMS: []' } }
+    yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet' } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   })
+  const streamSpy = vi.fn(stream)
   return {
     get: (ns: string) => {
       if (ns === 'settings') {
@@ -31,20 +39,38 @@ function makeCtx(overrides: {
       }
       return undefined
     },
-    llm: { stream },
+    llm: { stream: streamSpy },
     logger: { info: vi.fn(), warn: vi.fn() },
+    on: vi.fn(),
+    provide: vi.fn(),
   }
 }
 
-const baseConfig = {
+const baseConfig: Config = {
   provider: 'freellmapi',
   model: 'auto',
   fallbackProvider: 'antigravity',
   fallbackModel: 'gemini-3.7-flash-tiered',
-  debounceMs: 15_000,
   leaseMs: 45_000,
   maxInputEvents: 80,
   maxOutputTokens: 2048,
+  structuralDistanceK: 24,
+  minRefreshMs: 60_000,
+  negativeCacheMs: 120_000,
+  claimsBatchSize: 8,
+  claimsBatchMinutes: 5,
+}
+
+/** A session with N structural events (user/message + turn/end pairs). */
+function sessionWithTurns(n: number) {
+  const events: Array<{ type: string; seq: number; data: unknown }> = []
+  let seq = 1
+  for (let i = 0; i < n; i++) {
+    events.push({ type: 'user/message', seq: seq++, data: { content: `query ${i}`, source: { kind: 'user' } } })
+    events.push({ type: 'assistant/message', seq: seq++, data: { text: `answer ${i}` } })
+    events.push({ type: 'turn/end', seq: seq++, data: { reason: { kind: 'stop' }, turn: i + 1 } })
+  }
+  return makeSession(events)
 }
 
 describe('enpoi-context-keeper route resolution', () => {
@@ -96,78 +122,148 @@ describe('enpoi-context-keeper route resolution', () => {
   })
 })
 
-describe('enpoi-context-keeper state machine (wedge fix)', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-  afterEach(() => {
-    vi.useRealTimers()
+describe('enpoi-context-keeper cleanKeeperProse (zero-filler)', () => {
+  it('strips sections whose only content is negative filler', () => {
+    const text = [
+      '🎯 ACTIVE GOAL: build the thing',
+      '- Ship the revert system',
+      '',
+      '📚 DOCUMENTATION & SPECIFICATIONS INVENTORY:',
+      '- No documentation was created or referenced.',
+      '',
+      '🚫 REJECTED APPROACHES & EDGE CASES:',
+      '- No alternative approaches were debated.',
+    ].join('\n')
+    const cleaned = cleanKeeperProse(text)
+    expect(cleaned).toContain('build the thing')
+    expect(cleaned).not.toContain('DOCUMENTATION')
+    expect(cleaned).not.toContain('REJECTED')
   })
 
-  it('latches a trailing re-run when a turn ends mid-pass and never wedges', async () => {
-    // Deferred gate: the first LLM stream blocks until we release it.
-    let releaseFirst!: () => void
-    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
-    let streamCalls = 0
+  it('keeps sections with genuine content', () => {
+    const text = [
+      '🎯 ACTIVE GOAL: build the thing',
+      '- Ship the revert system',
+      '',
+      '📚 DOCUMENTATION & SPECIFICATIONS INVENTORY:',
+      '- docs/42-revert-system-design.md — the revert plan',
+    ].join('\n')
+    const cleaned = cleanKeeperProse(text)
+    expect(cleaned).toContain('docs/42-revert-system-design.md')
+  })
+
+  it('returns empty for empty input', () => {
+    expect(cleanKeeperProse('')).toBe('')
+    expect(cleanKeeperProse('   ')).toBe('')
+  })
+})
+
+describe('enpoi-context-keeper splitClaims (trust labels)', () => {
+  it('parses claims with source tags', () => {
+    const text = 'CLAIMS: [{"fact":"backup runs at 3am","category":"CONFIG_VALUES","source":"chat"},{"fact":"tunnel id is 9db9e1f7","category":"CONFIG_VALUES","source":"tool"}]'
+    const claims = splitClaims(text)
+    expect(claims).toHaveLength(2)
+    expect(claims[0]!.source).toBe('chat')
+    expect(claims[1]!.source).toBe('tool')
+  })
+
+  it('defaults missing source to chat (conservative)', () => {
+    const claims = splitClaims('CLAIMS: [{"fact":"x","category":"PROJECT"}]')
+    expect(claims[0]!.source).toBe('chat')
+  })
+
+  it('returns [] for no CLAIMS block or malformed JSON', () => {
+    expect(splitClaims('just prose')).toEqual([])
+    expect(splitClaims('CLAIMS: [{"fact":')).toEqual([])
+  })
+})
+
+describe('enpoi-context-keeper BriefService (demand-driven)', () => {
+  it('distills on first call and appends brief/prose-updated with structural metadata', async () => {
+    const ctx = makeCtx()
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    const result = await service.ensureFreshBrief(session as never)
+
+    expect(result.ok).toBe(true)
+    expect(result.reason).toBe('distilled')
+    expect(result.prose).toContain('test goal')
+    expect(session.append).toHaveBeenCalledTimes(1)
+    const [type, payload] = session.append.mock.calls[0] as [string, Record<string, unknown>]
+    expect(type).toBe('brief/prose-updated')
+    expect(payload.origin).toBe('context-keeper')
+    expect(payload.basedOnSeq).toBe(3) // snapshot seq = last event seq
+    expect(payload.basedOnStructuralCount).toBe(2) // user/message + turn/end
+    expect(payload.structuralDistanceK).toBe(24)
+    expect(payload.model).toBe('freellmapi/auto')
+  })
+
+  it('cache-hits when structural distance is within K (silence never invalidates)', async () => {
+    const ctx = makeCtx()
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    await service.ensureFreshBrief(session as never)
+    // No new structural events — the cache must hit even after the anti-thrash floor.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60_000)
+    const result = await service.ensureFreshBrief(session as never)
+
+    expect(result.reason).toBe('cache-hit')
+    expect(session.append).toHaveBeenCalledTimes(1)
+    vi.restoreAllMocks()
+  })
+
+  it('re-distills when structural distance exceeds K (past the anti-thrash floor)', async () => {
+    const ctx = makeCtx()
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    await service.ensureFreshBrief(session as never)
+    // 14 turns later: 28 structural events total, 26 after the cached
+    // basedOnSeq (3) — past K=24. Also past the 60s anti-thrash floor.
+    const grown = sessionWithTurns(14)
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 60_000)
+    const result = await service.ensureFreshBrief(grown as never)
+    vi.restoreAllMocks()
+
+    expect(result.reason).toBe('distilled')
+    expect(grown.append).toHaveBeenCalledTimes(1)
+  })
+
+  it('respects the anti-thrash floor (minRefreshMs)', async () => {
+    const ctx = makeCtx()
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    await service.ensureFreshBrief(session as never)
+    // 30 structural events but only 5s elapsed — the floor wins.
+    const grown = sessionWithTurns(11)
+    const result = await service.ensureFreshBrief(grown as never)
+
+    expect(result.reason).toBe('cache-hit')
+    expect(grown.append).toHaveBeenCalledTimes(0)
+  })
+
+  it('negative-caches failures for negativeCacheMs', async () => {
+    let call = 0
     const stream = async function* () {
-      streamCalls += 1
-      if (streamCalls === 1) {
-        await firstGate
-      }
+      call += 1
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet\nCLAIMS: []' }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet\nCLAIMS: []' } }
-      yield { type: 'finish', reason: { kind: 'stop' } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'upstream down', code: 'UPSTREAM' } } }
     }
     const ctx = makeCtx({ stream })
-    const states = new Map<string, KeeperState>()
-    const session = makeSession([
-      { type: 'user/message', seq: 1, data: { content: 'hello' } },
-      { type: 'assistant/message', seq: 2, data: { text: 'hi' } },
-    ])
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
 
-    // Turn 1 ends → arm → debounce fires → run() starts and blocks on the gate.
-    arm(ctx as never, baseConfig, states, session as never, 1)
-    await vi.advanceTimersByTimeAsync(15_000)
-    expect(states.get('test-session')!.running).toBe(true)
+    const first = await service.ensureFreshBrief(session as never)
+    expect(first.ok).toBe(false)
+    expect(first.reason).toBe('failed')
 
-    // Turn 2 ends while the pass is in flight → arm() re-arms; the new timer
-    // fires, run() sees running=true and latches rerunRequested.
-    arm(ctx as never, baseConfig, states, session as never, 2)
-    await vi.advanceTimersByTimeAsync(15_000)
-    expect(states.get('test-session')!.rerunRequested).toBe(true)
-
-    // Release the first pass. Its finally must schedule the trailing re-run.
-    releaseFirst()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(states.get('test-session')!.running).toBe(false)
-    expect(states.get('test-session')!.timer).not.toBeNull()
-
-    // The trailing pass runs and completes — the keeper is NOT wedged.
-    await vi.advanceTimersByTimeAsync(15_000)
-    expect(streamCalls).toBe(2)
-    expect(states.get('test-session')!.running).toBe(false)
-    expect(states.get('test-session')!.rerunRequested).toBe(false)
-    expect(session.append).toHaveBeenCalledTimes(2)
-  })
-
-  it('records the actually-served route in brief/prose-updated.model', async () => {
-    const ctx = makeCtx({
-      personas: { keeper: { provider: 'deepseek', model: 'deepseek-v4-flash' } },
-    })
-    const states = new Map<string, KeeperState>()
-    const session = makeSession([
-      { type: 'user/message', seq: 1, data: { content: 'hello' } },
-      { type: 'assistant/message', seq: 2, data: { text: 'hi' } },
-    ])
-
-    arm(ctx as never, baseConfig, states, session as never, 1)
-    await vi.advanceTimersByTimeAsync(15_000)
-
-    expect(session.append).toHaveBeenCalledTimes(1)
-    const [type, payload] = session.append.mock.calls[0] as [string, { model: string }]
-    expect(type).toBe('brief/prose-updated')
-    expect(payload.model).toBe('deepseek/deepseek-v4-flash')
+    // Second call within the negative window — no retry, no fallback chain.
+    const second = await service.ensureFreshBrief(session as never)
+    expect(second.reason).toBe('negative-cached')
+    expect(call).toBe(2) // primary + fallback both failed once; no third attempt
   })
 
   it('falls back to the fallback route when the primary fails and records the served route', async () => {
@@ -175,29 +271,172 @@ describe('enpoi-context-keeper state machine (wedge fix)', () => {
     const stream = async function* () {
       call += 1
       if (call === 1) {
-        // Primary route: hard failure mid-stream.
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'finish', reason: { kind: 'error', failure: { message: 'upstream down', code: 'UPSTREAM' } } }
         return
       }
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: fallback goal\n- Fallback bullet\nCLAIMS: []' }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: fallback goal\n- Fallback bullet\nCLAIMS: []' } }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: fallback goal\n- Fallback bullet' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: fallback goal\n- Fallback bullet' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
     const ctx = makeCtx({ stream })
-    const states = new Map<string, KeeperState>()
-    const session = makeSession([
-      { type: 'user/message', seq: 1, data: { content: 'hello' } },
-      { type: 'assistant/message', seq: 2, data: { text: 'hi' } },
-    ])
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
 
-    arm(ctx as never, baseConfig, states, session as never, 1)
-    await vi.advanceTimersByTimeAsync(15_000)
-
-    expect(session.append).toHaveBeenCalledTimes(1)
+    const result = await service.ensureFreshBrief(session as never)
+    expect(result.ok).toBe(true)
+    expect(result.model).toBe('antigravity/gemini-3.7-flash-tiered')
     const [type, payload] = session.append.mock.calls[0] as [string, { model: string }]
     expect(type).toBe('brief/prose-updated')
     expect(payload.model).toBe('antigravity/gemini-3.7-flash-tiered')
+  })
+
+  it('single-flights concurrent calls for the same window', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let streamCalls = 0
+    const stream = async function* () {
+      streamCalls += 1
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    const p1 = service.ensureFreshBrief(session as never)
+    const p2 = service.ensureFreshBrief(session as never)
+    release()
+    const [r1, r2] = await Promise.all([p1, p2])
+
+    expect(streamCalls).toBe(1) // one distillation, two consumers
+    expect(r1.reason).toBe('distilled')
+    expect(r2.reason).toBe('distilled')
+    expect(session.append).toHaveBeenCalledTimes(1)
+  })
+
+  it('supersedes a stale-window pass: exactly 2 distillations, in-flight preserved (Oracle defect 1)', async () => {
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let streamCalls = 0
+    const stream = async function* () {
+      streamCalls += 1
+      if (streamCalls === 1) await firstGate // block the FIRST pass
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: test goal\n- Test goal bullet' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    // Pass A starts (blocked on the gate).
+    const pA = service.ensureFreshBrief(session as never)
+    await new Promise(r => setTimeout(r, 0)) // flush microtasks so A registers
+
+    // A far-future session (structural distance >> K) supersedes A's window.
+    const grown = sessionWithTurns(14)
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 60_000)
+    const pB = service.ensureFreshBrief(grown as never)
+    vi.restoreAllMocks()
+
+    // Release A — its success path must NOT erase B's in-flight registration.
+    releaseFirst()
+    const rA = await pA
+    expect(rA.reason).toBe('distilled')
+
+    // B completes as its own distillation.
+    const rB = await pB
+    expect(rB.reason).toBe('distilled')
+    expect(streamCalls).toBe(2) // exactly two distillations
+    expect(grown.append).toHaveBeenCalledTimes(1)
+  })
+
+  it('isolates a joiner from the originator\'s abort rejection (Oracle defect 2)', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const stream = async function* () {
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    const abortA = new AbortController()
+    const pA = service.ensureFreshBrief(session as never, abortA.signal)
+    await new Promise(r => setTimeout(r, 0)) // flush microtasks so A registers
+
+    // B joins A's in-flight pass with a LIVE signal.
+    const pB = service.ensureFreshBrief(session as never)
+
+    // A's caller cancels — the distillation aborts and A's promise rejects.
+    abortA.abort()
+    release()
+    await expect(pA).rejects.toThrow()
+
+    // B must NOT inherit the abort — it gets a soft failure instead.
+    const rB = await pB
+    expect(rB.ok).toBe(false)
+    expect(rB.reason).toBe('failed')
+  })
+})
+
+describe('enpoi-context-keeper claims batched listener', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('runs a claims pass when the batch size is reached (every 8th turn/end)', async () => {
+    const claimsStream = async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'CLAIMS: [{"fact":"backup runs at 3am","category":"CONFIG_VALUES","source":"chat"}]' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'CLAIMS: [{"fact":"backup runs at 3am","category":"CONFIG_VALUES","source":"chat"}]' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream: claimsStream })
+    apply(ctx as never, baseConfig)
+
+    // Capture the session/event handler registered by apply().
+    const handler = (ctx.on as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'session/event',
+    )?.[1] as (session: unknown, event: { type: string; data: { reason: { kind: string } } }) => void
+    expect(handler).toBeDefined()
+
+    const session = sessionWithTurns(1)
+    // 8 non-aborted turn/ends → batch fires.
+    for (let i = 0; i < 8; i++) {
+      handler(session, { type: 'turn/end', data: { reason: { kind: 'stop' } } })
+    }
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The claims pass ran (LLM stream called) — the intake path is exercised
+    // via the pipeline; here we assert the pass was triggered without errors.
+    expect(ctx.llm.stream).toHaveBeenCalled()
+  })
+
+  it('skips aborted turns', async () => {
+    const ctx = makeCtx()
+    apply(ctx as never, baseConfig)
+    const handler = (ctx.on as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'session/event',
+    )?.[1] as (session: unknown, event: { type: string; data: { reason: { kind: string } } }) => void
+
+    const session = makeSession([])
+    for (let i = 0; i < 8; i++) {
+      handler(session, { type: 'turn/end', data: { reason: { kind: 'aborted' } } })
+    }
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
   })
 })

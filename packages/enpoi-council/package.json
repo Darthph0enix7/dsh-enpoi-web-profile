@@ -5,10 +5,13 @@
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --outfile=lib/index.js"
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:dsh-enpoi-context-keeper --outfile=lib/index.js"
   },
   "dependencies": {
     "dsh-enpoi-contracts": "workspace:*"
+  },
+  "peerDependencies": {
+    "dsh-enpoi-context-keeper": "workspace:*"
   },
   "dsh": {
     "bundle": {

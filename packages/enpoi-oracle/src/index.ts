@@ -22,6 +22,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Session, SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { getBriefService } from 'dsh-enpoi-context-keeper'
 
 export const name = 'enpoi-oracle'
 
@@ -59,6 +60,8 @@ interface OracleFiber {
   consultations: number
   lastParentUserSeq: number
   scorecard: { files: string[]; verdicts: Array<{ approved: boolean; concerns: string[] }> }
+  /** The Living Brief package frozen at call #1 (doc 35 amendment 6). */
+  brief: string | null
 }
 
 function lastHumanUserMessageSeq(events: readonly SessionEvent[]): number {
@@ -106,7 +109,7 @@ function readLivingBrief(ctx: Context, session: Session): string | null {
   }
 }
 
-function buildInitialPackage(
+export function buildInitialPackage(
   brief: string | null,
   args: { request: string; files?: string[] },
   scorecard: OracleFiber['scorecard'],
@@ -288,6 +291,8 @@ export function apply(ctx: Context): void {
 function registerOracleTools(ctx: Context, root: Context): void {
   ctx = root
   const fibers = new Map<string, OracleFiber>()
+  /** Condensed scorecards stashed at rollover (doc 35 2.4) — seed the next fiber. */
+  const rolloverScorecards = new Map<string, OracleFiber['scorecard']>()
   const busy = new Set<string>()
 
   ctx.tools.register({
@@ -370,22 +375,48 @@ function registerOracleTools(ctx: Context, root: Context): void {
 
         // Query-bound (I13): the oracle fiber is persistent within ONE user query / task.
         // When Adam sends a new prompt (query boundary), or the child died, reset for a clean task.
+        // Scorecard rollover (doc 35 amendment 6): the old fiber's scorecard
+        // seeds the fresh one — 10-consultation rollover must not lose history.
+        let rolloverScorecard: OracleFiber['scorecard'] | null = null
         if (fiber !== undefined && (fiber.lastParentUserSeq !== lastUserSeq || fiber.childId === null)) {
+          rolloverScorecard = fiber.scorecard
           fibers.delete(key)
           fiber = undefined
+        } else if (fiber === undefined && rolloverScorecards.has(key)) {
+          // A prior fiber rolled over at 10 consultations — seed with its
+          // condensed scorecard (doc 35 2.4). Consumed ONLY after a
+          // successful spawn (Oracle D2): a transient spawn error must not
+          // erase 10 consultations of verdicts.
+          rolloverScorecard = rolloverScorecards.get(key)!
         }
 
-        const brief = readLivingBrief(ctx, parent.session)
         const fresh = fiber === undefined
 
         if (fresh) {
+          // Demand-driven cognition: materialize the prose brief for this
+          // query's first consultation (Oracle amendment 3 — blocking is
+          // proportionate for a minutes-long tool). Soft-degrading: on
+          // failure the oracle proceeds with the deterministic brief.
+          try {
+            await getBriefService()?.ensureFreshBrief(parent.session, exec.signal)
+          } catch {
+            // Oracle nit: a cancelled caller must not spawn a child on a
+            // dead signal — propagate the abort.
+            if (exec.signal.aborted) throw exec.signal.reason ?? new Error('aborted')
+          }
           fiber = {
             childId: null,
             consultations: 0,
             lastParentUserSeq: lastUserSeq,
-            scorecard: { files: [], verdicts: [] },
+            scorecard: rolloverScorecard ?? { files: [], verdicts: [] },
+            brief: readLivingBrief(ctx, parent.session),
           }
         }
+
+        // Frozen-at-call-#1 semantics (doc 35 amendment 6): delta calls use
+        // the brief captured at the query's first consultation, never a
+        // newer distillation.
+        const brief = fiber.brief
 
         if (args.background === true) {
           bg = new AbortController()
@@ -430,6 +461,11 @@ function registerOracleTools(ctx: Context, root: Context): void {
             fiber.childId = started.childId
             applyPersonaModel(ctx, started.childId, 'oracle')
             fibers.set(key, fiber)
+            // Oracle D2: consume the rollover entry only after the spawn
+            // registered — a failed spawn retries from the same entry.
+            if (rolloverScorecard !== null && rolloverScorecards.has(key)) {
+              rolloverScorecards.delete(key)
+            }
           } catch (err) {
             fibers.delete(key)
             throw err
@@ -451,7 +487,12 @@ function registerOracleTools(ctx: Context, root: Context): void {
               fiber.consultations += 1
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns })
               if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files)
-              if (fiber.consultations >= 10) fibers.delete(key)
+              if (fiber.consultations >= 10) {
+                // Scorecard rollover (doc 35 2.4): dispose at 10 consultations —
+                // the condensed scorecard seeds the next fiber.
+                rolloverScorecards.set(key, fiber.scorecard)
+                fibers.delete(key)
+              }
               const agent = ctx.get('agents')?.get(parent.session.id)
               if (agent !== undefined) {
                 agent.inject(createUserMessage({
@@ -498,8 +539,10 @@ function registerOracleTools(ctx: Context, root: Context): void {
         fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns })
         if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files)
 
-        // Scorecard rollover (doc 35 2.4): dispose at 10 consultations.
+        // Scorecard rollover (doc 35 2.4): dispose at 10 consultations —
+        // the condensed scorecard seeds the next fiber.
         if (fiber.consultations >= 10) {
+          rolloverScorecards.set(key, fiber.scorecard)
           fibers.delete(key)
         }
 

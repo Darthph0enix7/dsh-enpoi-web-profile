@@ -1,9 +1,9 @@
-# dsh-enpoi-context-keeper bundle patch — mounts the silent background prose
-# worker into the Enpoi Harness web profile.
+# dsh-enpoi-context-keeper bundle patch — demand-driven cognition service.
 #
-# The keeper watches turn/end milestones, debounces, and summarizes the recent
-# turn with a flash-tier model, appending the result as a `brief/prose-updated`
-# event that the livingBrief projection folds (doc 31 §2, doc 34 K1-K4).
+# The prose Living Brief is materialized ON DEMAND via ensureFreshBrief(),
+# consumed exclusively by the Oracle (call #1) and Council (roundtable/chorus
+# start). Memory claims are batched (every N turn/ends or T minutes).
+# The 30s-debounce push model is retired (Oracle amendment 7).
 - insert:
     - id: enpoi-context-keeper
       name: 'dsh-enpoi-context-keeper'
@@ -14,5 +14,15 @@
         model: auto
         fallbackProvider: antigravity
         fallbackModel: gemini-3.7-flash-tiered
-        debounceMs: 30000
         leaseMs: 45000
+        maxInputEvents: 80
+        maxOutputTokens: 2048
+        # Structural-event distance that triggers a re-distillation.
+        structuralDistanceK: 24
+        # Anti-thrash floor: reuse a distillation younger than this.
+        minRefreshMs: 60000
+        # Failure negative-cache window.
+        negativeCacheMs: 120000
+        # Claims batch: one pass per 8 non-aborted turn/ends or 5 minutes.
+        claimsBatchSize: 8
+        claimsBatchMinutes: 5

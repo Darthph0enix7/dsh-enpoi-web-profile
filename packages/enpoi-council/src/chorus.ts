@@ -9,6 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { getBriefService } from 'dsh-enpoi-context-keeper'
 import {
   VISIONARY_SYSTEM,
   EXPERIENCER_SYSTEM,
@@ -91,6 +92,17 @@ export async function runChorus(
     Experiencer: 'flagship',
     Integrator: 'flash',
     Curator: 'flagship',
+  }
+
+  // Demand-driven cognition (Oracle amendment 6): materialize the prose brief
+  // BEFORE the lens fibers spawn — the frozen brief package and model pinning
+  // stay atomic. Soft-degrading on failure.
+  try {
+    await getBriefService()?.ensureFreshBrief(parent.session, signal)
+  } catch {
+    // Oracle nit: a cancelled caller must not spawn lens fibers on a dead
+    // signal — propagate the abort.
+    if (signal.aborted) throw signal.reason ?? new Error('aborted')
   }
 
   const briefText = getLivingBriefText(ctx, parent)

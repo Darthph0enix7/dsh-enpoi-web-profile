@@ -9,6 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { getBriefService } from 'dsh-enpoi-context-keeper'
 import {
   SKEPTIC_SYSTEM,
   ARCHITECT_SYSTEM,
@@ -137,6 +138,19 @@ export async function runRoundtable(
     Architect: 'flagship',
     Pragmatist: 'flash',
     Critic: 'flagship',
+  }
+
+  // Demand-driven cognition (Oracle amendment 6): the prose brief must be
+  // materialized BEFORE the debater fibers spawn and council/started is
+  // emitted — the frozen brief package and model pinning stay atomic.
+  // Soft-degrading: on failure the council proceeds with the deterministic
+  // brief + query.
+  try {
+    await getBriefService()?.ensureFreshBrief(parent.session, signal)
+  } catch {
+    // Oracle nit: a cancelled caller must not spawn debaters on a dead
+    // signal — propagate the abort.
+    if (signal.aborted) throw signal.reason ?? new Error('aborted')
   }
 
   const { text: briefText, goalSeq: initialGoalSeq } = getLivingBriefContext(ctx, parent)

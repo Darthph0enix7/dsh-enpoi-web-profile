@@ -1,5 +1,6 @@
 // packages/enpoi-oracle/src/index.ts
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { getBriefService } from "dsh-enpoi-context-keeper";
 var name = "enpoi-oracle";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var ORACLE_PERSONA = [
@@ -217,6 +218,7 @@ function apply(ctx) {
 function registerOracleTools(ctx, root) {
   ctx = root;
   const fibers = /* @__PURE__ */ new Map();
+  const rolloverScorecards = /* @__PURE__ */ new Map();
   const busy = /* @__PURE__ */ new Set();
   ctx.tools.register({
     name: "oracle_review",
@@ -292,20 +294,30 @@ function registerOracleTools(ctx, root) {
       try {
         const lastUserSeq = lastHumanUserMessageSeq(parent.session.events);
         let fiber = fibers.get(key);
+        let rolloverScorecard = null;
         if (fiber !== void 0 && (fiber.lastParentUserSeq !== lastUserSeq || fiber.childId === null)) {
+          rolloverScorecard = fiber.scorecard;
           fibers.delete(key);
           fiber = void 0;
+        } else if (fiber === void 0 && rolloverScorecards.has(key)) {
+          rolloverScorecard = rolloverScorecards.get(key);
         }
-        const brief = readLivingBrief(ctx, parent.session);
         const fresh = fiber === void 0;
         if (fresh) {
+          try {
+            await getBriefService()?.ensureFreshBrief(parent.session, exec.signal);
+          } catch {
+            if (exec.signal.aborted) throw exec.signal.reason ?? new Error("aborted");
+          }
           fiber = {
             childId: null,
             consultations: 0,
             lastParentUserSeq: lastUserSeq,
-            scorecard: { files: [], verdicts: [] }
+            scorecard: rolloverScorecard ?? { files: [], verdicts: [] },
+            brief: readLivingBrief(ctx, parent.session)
           };
         }
+        const brief = fiber.brief;
         if (args.background === true) {
           bg = new AbortController();
           stopWatch = ctx.on("session/event", (s, e) => {
@@ -345,6 +357,9 @@ function registerOracleTools(ctx, root) {
             fiber.childId = started.childId;
             applyPersonaModel(ctx, started.childId, "oracle");
             fibers.set(key, fiber);
+            if (rolloverScorecard !== null && rolloverScorecards.has(key)) {
+              rolloverScorecards.delete(key);
+            }
           } catch (err) {
             fibers.delete(key);
             throw err;
@@ -365,7 +380,10 @@ function registerOracleTools(ctx, root) {
               fiber.consultations += 1;
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
               if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
-              if (fiber.consultations >= 10) fibers.delete(key);
+              if (fiber.consultations >= 10) {
+                rolloverScorecards.set(key, fiber.scorecard);
+                fibers.delete(key);
+              }
               const agent = ctx.get("agents")?.get(parent.session.id);
               if (agent !== void 0) {
                 agent.inject(createUserMessage({
@@ -413,6 +431,7 @@ ${t}`
         fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns });
         if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
         if (fiber.consultations >= 10) {
+          rolloverScorecards.set(key, fiber.scorecard);
           fibers.delete(key);
         }
         return {
@@ -433,6 +452,7 @@ ${t}`
 }
 export {
   apply,
+  buildInitialPackage,
   inject,
   name,
   resolvePersonaModel
