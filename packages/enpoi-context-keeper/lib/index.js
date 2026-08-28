@@ -336,6 +336,27 @@ function countStructuralUpTo(session, toSeq) {
   }
   return count;
 }
+function resolveKeeperParams(ctx, config) {
+  try {
+    const settings = ctx.get("settings");
+    const p = settings?.get?.("enpoi-orchestration")?.parameters?.keeper;
+    if (p === void 0 || typeof p !== "object") return config;
+    const clamp = (v, fallback, min, max) => typeof v === "number" && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback;
+    return {
+      ...config,
+      leaseMs: clamp(p.leaseMs, config.leaseMs ?? 45e3, 15e3, 12e4),
+      maxInputEvents: clamp(p.maxInputEvents, config.maxInputEvents ?? 80, 20, 200),
+      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, 4096),
+      structuralDistanceK: clamp(p.structuralDistanceK, config.structuralDistanceK ?? 24, 4, 200),
+      minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 6e4, 5e3, 3e5),
+      negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 12e4, 5e3, 6e5),
+      claimsBatchSize: clamp(p.claimsBatchSize, config.claimsBatchSize ?? 8, 1, 50),
+      claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60)
+    };
+  } catch {
+    return config;
+  }
+}
 function resolveKeeperRoute(ctx, config) {
   const fallbackProvider = config.fallbackProvider ?? "antigravity";
   const fallbackModel = config.fallbackModel ?? "gemini-3.7-flash-tiered";
@@ -388,23 +409,24 @@ var BriefService = class {
    */
   async ensureFreshBrief(session, signal) {
     const key = session.id;
+    const cfg = resolveKeeperParams(this.ctx, this.config);
     const entry = this.cache.get(key);
     const now = Date.now();
     if (entry !== void 0 && entry.negativeUntil > now) {
       return { ok: false, prose: null, reason: "negative-cached" };
     }
-    if (entry !== void 0 && entry.prose.length > 0 && now - entry.updatedAt < (this.config.minRefreshMs ?? 6e4)) {
+    if (entry !== void 0 && entry.prose.length > 0 && now - entry.updatedAt < (cfg.minRefreshMs ?? 6e4)) {
       return { ok: true, prose: entry.prose, model: entry.model, reason: "cache-hit" };
     }
     if (entry !== void 0 && entry.prose.length > 0) {
       const distance = countStructuralAfter(session, entry.basedOnSeq);
-      if (distance <= (this.config.structuralDistanceK ?? 24)) {
+      if (distance <= (cfg.structuralDistanceK ?? 24)) {
         return { ok: true, prose: entry.prose, model: entry.model, reason: "cache-hit" };
       }
     }
     if (entry !== void 0 && entry.inFlight !== null) {
       const inFlightDistance = countStructuralAfter(session, entry.inFlightSnapshotSeq);
-      if (inFlightDistance <= (this.config.structuralDistanceK ?? 24)) {
+      if (inFlightDistance <= (cfg.structuralDistanceK ?? 24)) {
         try {
           return await entry.inFlight;
         } catch (error) {
@@ -414,7 +436,7 @@ var BriefService = class {
       }
     }
     const snapshotSeq = session.events.at(-1)?.seq ?? session.seq;
-    const promise = this.distill(session, signal, snapshotSeq);
+    const promise = this.distill(session, signal, snapshotSeq, cfg);
     this.cache.set(key, {
       ...entry ?? emptyEntry(),
       inFlight: promise,
@@ -430,20 +452,20 @@ var BriefService = class {
     }
   }
   /** One distillation pass: lease-bound LLM call, then append + cache. */
-  async distill(session, signal, snapshotSeq) {
+  async distill(session, signal, snapshotSeq, cfg) {
     const lease = new AbortController();
-    const leaseTimer = setTimeout(() => lease.abort(), this.config.leaseMs ?? 45e3);
+    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
     const combined = signal !== void 0 ? AbortSignal.any([signal, lease.signal]) : lease.signal;
     try {
-      const input = frameInput(session, this.config.maxInputEvents ?? 80);
+      const input = frameInput(session, cfg.maxInputEvents ?? 80);
       if (input.length === 0) {
         diag(`ensureFreshBrief: session=${session.id} \u2014 empty input, skipping`);
         return { ok: false, prose: null, reason: "failed" };
       }
-      const route = resolveKeeperRoute(this.ctx, this.config);
+      const route = resolveKeeperRoute(this.ctx, cfg);
       const snapshotStructural = countStructuralUpTo(session, snapshotSeq);
       diag(`ensureFreshBrief: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`);
-      const result = await summarize(this.ctx, this.config, session, input, combined, route, PROSE_PROMPT, false);
+      const result = await summarize(this.ctx, cfg, session, input, combined, route, PROSE_PROMPT, false);
       const prose = cleanKeeperProse(result.text);
       if (prose.length === 0) {
         diag(`ensureFreshBrief: session=${session.id} \u2014 empty or cleaned-empty prose, skipping`);
@@ -452,7 +474,7 @@ var BriefService = class {
       session.append("brief/prose-updated", {
         basedOnSeq: snapshotSeq,
         basedOnStructuralCount: snapshotStructural,
-        structuralDistanceK: this.config.structuralDistanceK ?? 24,
+        structuralDistanceK: cfg.structuralDistanceK ?? 24,
         model: result.route,
         text: prose,
         origin: "context-keeper"
@@ -474,9 +496,9 @@ var BriefService = class {
       const entry = this.cache.get(session.id);
       this.cache.set(session.id, {
         ...entry ?? emptyEntry(),
-        negativeUntil: Date.now() + (this.config.negativeCacheMs ?? 12e4)
+        negativeUntil: Date.now() + (cfg.negativeCacheMs ?? 12e4)
       });
-      diag(`ensureFreshBrief: session=${session.id} \u2014 FAILED ${String(error)} (negative-cached ${this.config.negativeCacheMs ?? 12e4}ms)`);
+      diag(`ensureFreshBrief: session=${session.id} \u2014 FAILED ${String(error)} (negative-cached ${cfg.negativeCacheMs ?? 12e4}ms)`);
       return { ok: false, prose: null, reason: "failed" };
     } finally {
       clearTimeout(leaseTimer);
@@ -532,14 +554,15 @@ function apply(ctx, config) {
 async function runClaimsPass(ctx, config, session, running) {
   if (running.has(session.id)) return;
   running.add(session.id);
+  const cfg = resolveKeeperParams(ctx, config);
   const lease = new AbortController();
-  const leaseTimer = setTimeout(() => lease.abort(), config.leaseMs ?? 45e3);
+  const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
   try {
-    const input = frameInput(session, config.maxInputEvents ?? 80);
+    const input = frameInput(session, cfg.maxInputEvents ?? 80);
     if (input.length === 0) return;
-    const route = resolveKeeperRoute(ctx, config);
+    const route = resolveKeeperRoute(ctx, cfg);
     diag(`claims: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`);
-    const result = await summarize(ctx, config, session, input, lease.signal, route, CLAIMS_PROMPT, true);
+    const result = await summarize(ctx, cfg, session, input, lease.signal, route, CLAIMS_PROMPT, true);
     const claims = splitClaims(result.text);
     if (claims.length === 0) {
       diag(`claims: session=${session.id} \u2014 no claims extracted`);
@@ -830,6 +853,7 @@ export {
   getBriefService,
   inject,
   name,
+  resolveKeeperParams,
   resolveKeeperRoute,
   splitClaims
 };

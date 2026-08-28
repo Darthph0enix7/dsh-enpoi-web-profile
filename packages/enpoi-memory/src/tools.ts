@@ -6,7 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { DatabaseSync } from 'node:sqlite'
 import { CATEGORIES } from './db'
 import { makePipeline, type Pipeline } from './pipeline'
-import { searchMemory } from './retriever'
+import { getMemoryParams, searchMemory } from './retriever'
 
 export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pipeline): void {
   ctx.tools.register({
@@ -70,7 +70,9 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
     },
     isConcurrencySafe: () => true,
     async execute(args) {
-      const hits = searchMemory(db, String(args.query ?? ''), Math.min(Number(args.limit ?? 8) || 8, 10))
+      // Doc 38: retriever top-K resolved fresh per call (hot-swap).
+      const params = getMemoryParams(ctx)
+      const hits = searchMemory(db, String(args.query ?? ''), Math.min(Number(args.limit ?? params.retrieverTopK) || params.retrieverTopK, params.retrieverTopK))
       if (hits.length === 0) return { facts: [], note: 'No matching memory.' }
       return {
         facts: hits.map(h => ({ id: h.id, category: h.category, state: h.state, trust: h.source_trust, fact: h.fact })),

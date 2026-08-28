@@ -1055,6 +1055,42 @@ import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 // packages/enpoi-council/src/roundtable.ts
 import { getBriefService } from "dsh-enpoi-context-keeper";
 
+// packages/enpoi-council/src/params.ts
+var COUNCIL_PARAM_DEFAULTS = {
+  maxDebateTokens: 18e4,
+  defaultMaxRounds: 5,
+  defaultHideLimit: true,
+  quorumFraction: 2 / 3,
+  debaterTimeoutMs: 9e4,
+  debaterRetryCount: 1,
+  consensusThreshold: 0.8,
+  plateauDeltaThreshold: 0.05
+};
+function getCouncilParams(ctx) {
+  const d = COUNCIL_PARAM_DEFAULTS;
+  try {
+    const settings = ctx.get("settings");
+    const p = settings?.get?.("enpoi-orchestration")?.parameters?.council;
+    if (p === void 0 || typeof p !== "object") return d;
+    return {
+      maxDebateTokens: num(p.maxDebateTokens, d.maxDebateTokens, 2e4, 5e5),
+      defaultMaxRounds: num(p.defaultMaxRounds, d.defaultMaxRounds, 1, 12),
+      defaultHideLimit: typeof p.defaultHideLimit === "boolean" ? p.defaultHideLimit : d.defaultHideLimit,
+      quorumFraction: num(p.quorumFraction, d.quorumFraction, 0.5, 1),
+      debaterTimeoutMs: num(p.debaterTimeoutMs, d.debaterTimeoutMs, 1e4, 18e4),
+      debaterRetryCount: num(p.debaterRetryCount, d.debaterRetryCount, 0, 3),
+      consensusThreshold: num(p.consensusThreshold, d.consensusThreshold, 0.5, 1),
+      plateauDeltaThreshold: num(p.plateauDeltaThreshold, d.plateauDeltaThreshold, 0.01, 0.2)
+    };
+  } catch {
+    return d;
+  }
+}
+function num(value, fallback, min, max) {
+  if (typeof value !== "number" || Number.isNaN(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
 // packages/enpoi-council/src/prompts.ts
 var SKEPTIC_SYSTEM = `You are the **Skeptic** in a multi-agent dialectic debate (Roundtable).
 
@@ -1374,7 +1410,6 @@ function councilDiag(msg) {
   } catch {
   }
 }
-var MAX_DEBATE_TOKENS = 18e4;
 function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
@@ -1561,13 +1596,14 @@ async function waitForFiberTurn(ctx, childId, signal, timeoutMs = 9e4) {
     signal.removeEventListener("abort", onAbort);
   }
 }
-async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1, systemPromptMap, signal) {
+async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1, systemPromptMap, signal, params) {
   const activeFibers = fibers.filter((f) => !f.isOffline);
   const tasks = activeFibers.map(async (fiber) => {
     const prompt = promptBuilder(fiber);
     let attempt = 0;
     let lastError = null;
-    while (attempt < 2) {
+    const maxAttempts = 1 + Math.max(0, Math.min(3, params.debaterRetryCount));
+    while (attempt < maxAttempts) {
       attempt++;
       try {
         if (isRound1) {
@@ -1581,7 +1617,7 @@ async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1
           await followupDebaterFiber(ctx, parent, fiber, prompt, signal);
         }
         councilDiag(`waiting for turn on ${fiber.persona} (${fiber.childId})...`);
-        const text = await waitForFiberTurn(ctx, fiber.childId, signal);
+        const text = await waitForFiberTurn(ctx, fiber.childId, signal, params.debaterTimeoutMs);
         councilDiag(`turn complete on ${fiber.persona} (${fiber.childId}) -> text len ${text.length}`);
         const tokens = estimateTokens(text);
         fiber.totalTokens += tokens;
@@ -1597,7 +1633,7 @@ async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1
         lastError = err instanceof Error ? err : new Error(String(err));
         councilDiag(`ERROR on ${fiber.persona} attempt ${attempt}: ${lastError.stack || lastError.message}`);
         if (signal.aborted) throw lastError;
-        if (attempt >= 2) break;
+        if (attempt >= maxAttempts) break;
         await new Promise((r) => setTimeout(r, 500));
       }
     }
@@ -1629,9 +1665,9 @@ async function executeParallelRound(ctx, parent, fibers, promptBuilder, isRound1
       });
     }
   }
-  if (onlineCount < 2 && fibers.length >= 3) {
+  if (fibers.length >= 3 && onlineCount / fibers.length < params.quorumFraction) {
     const errorDetails = responses.filter((r) => r.error).map((r) => `${r.persona}: ${r.error}`).join("; ");
-    throw new Error(`Council failed 2/3 quorum: only ${onlineCount}/${fibers.length} debaters responded online. Errors: ${errorDetails}`);
+    throw new Error(`Council failed quorum: only ${onlineCount}/${fibers.length} debaters responded online (required ${(params.quorumFraction * 100).toFixed(0)}%). Errors: ${errorDetails}`);
   }
   return responses;
 }
@@ -1732,7 +1768,7 @@ function calculateJaccardSimilarity(setA, setB) {
   const union = setA.size + setB.size - intersection;
   return union === 0 ? 1 : intersection / union;
 }
-function evaluateStopping(state, criticOutput, currentClaims) {
+function evaluateStopping(state, criticOutput, currentClaims, thresholds = { consensusThreshold: 0.8, plateauDeltaThreshold: 0.05 }) {
   const round = state.round;
   if (state.cumulativeTokens >= state.maxTokens) {
     return {
@@ -1766,22 +1802,22 @@ function evaluateStopping(state, criticOutput, currentClaims) {
     heuristicFallback = true;
     consensusRatio = jaccardSim;
   }
-  if (consensusRatio >= 0.8 && round >= 2) {
+  if (consensusRatio >= thresholds.consensusThreshold && round >= 2) {
     return {
       shouldStop: true,
-      reason: `Consensus reached (consensus ratio: ${consensusRatio.toFixed(2)} >= 0.80).`,
+      reason: `Consensus reached (consensus ratio: ${consensusRatio.toFixed(2)} >= ${thresholds.consensusThreshold.toFixed(2)}).`,
       stopCode: "CONSENSUS_REACHED",
       heuristicFallback,
       consensusRatio,
       delta
     };
   }
-  if (round >= 3 && delta < 0.05) {
+  if (round >= 3 && delta < thresholds.plateauDeltaThreshold) {
     const prevDelta = state.history.length >= 2 ? 1 - calculateJaccardSimilarity(state.history[state.history.length - 2].claims, prevClaims) : 1;
     if (prevDelta < 0.25 || delta < 0.02) {
       return {
         shouldStop: true,
-        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)} < 0.05).`,
+        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)} < ${thresholds.plateauDeltaThreshold.toFixed(2)}).`,
         stopCode: "PLATEAU_DETECTED",
         heuristicFallback,
         consensusRatio,
@@ -1856,8 +1892,9 @@ ${lb.decisions.map((d) => `\u2022 ${d.text}`).join("\n")}` : "";
 }
 async function runRoundtable(ctx, parent, args, signal) {
   const startedAt = Date.now();
-  const maxRounds = args.maxRounds ?? 5;
-  const hideLimit = args.hideLimit ?? true;
+  const params = getCouncilParams(ctx);
+  const maxRounds = args.maxRounds ?? params.defaultMaxRounds;
+  const hideLimit = args.hideLimit ?? params.defaultHideLimit;
   const modelsUsed = {
     Skeptic: "flagship",
     Architect: "flagship",
@@ -1881,7 +1918,7 @@ async function runRoundtable(ctx, parent, args, signal) {
     maxRounds,
     hideLimit,
     cumulativeTokens: 0,
-    maxTokens: MAX_DEBATE_TOKENS,
+    maxTokens: params.maxDebateTokens,
     history: []
   };
   const roundsTranscript = [];
@@ -1908,7 +1945,8 @@ async function runRoundtable(ctx, parent, args, signal) {
         },
         isRound1,
         DEBATER_SYSTEMS,
-        signal
+        signal,
+        { quorumFraction: params.quorumFraction, debaterRetryCount: params.debaterRetryCount, debaterTimeoutMs: params.debaterTimeoutMs }
       );
       if (signal.aborted) throw new Error("roundtable debate cancelled by user");
       for (const r of responses) {
@@ -1929,7 +1967,7 @@ ${r.text}`).join("\n\n");
           signal
         });
       }
-      const criticText = await waitForFiberTurn(ctx, criticFiber.childId, signal);
+      const criticText = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs);
       stoppingState.cumulativeTokens += estimateTokens(criticText);
       criticScore = parseCriticScore(criticText);
       if (criticScore?.runningBrief) {
@@ -1940,7 +1978,7 @@ ${r.text}`).join("\n\n");
         responses,
         critic: criticScore
       });
-      const decision = evaluateStopping(stoppingState, criticScore, currentClaims);
+      const decision = evaluateStopping(stoppingState, criticScore, currentClaims, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold });
       stoppingState.history.push({
         round,
         claims: currentClaims,
@@ -1963,7 +2001,7 @@ ${d.text}`).join("\n\n")).join("\n\n---\n\n");
         source: { kind: "user" },
         signal
       });
-      finalSynthesis = await waitForFiberTurn(ctx, criticFiber.childId, signal);
+      finalSynthesis = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs);
       stoppingState.cumulativeTokens += estimateTokens(finalSynthesis);
     } else {
       finalSynthesis = `## Council Decision
@@ -2024,8 +2062,9 @@ function getLivingBriefText(ctx, parent) {
 }
 async function runChorus(ctx, parent, args, signal) {
   const startedAt = Date.now();
-  const maxRounds = args.maxRounds ?? 4;
-  const hideLimit = args.hideLimit ?? true;
+  const params = getCouncilParams(ctx);
+  const maxRounds = args.maxRounds ?? params.defaultMaxRounds;
+  const hideLimit = args.hideLimit ?? params.defaultHideLimit;
   const modelsUsed = {
     Visionary: "flagship",
     Experiencer: "flagship",
@@ -2049,7 +2088,7 @@ async function runChorus(ctx, parent, args, signal) {
     maxRounds,
     hideLimit,
     cumulativeTokens: 0,
-    maxTokens: MAX_DEBATE_TOKENS,
+    maxTokens: params.maxDebateTokens,
     history: []
   };
   const roundsTranscript = [];
@@ -2075,7 +2114,8 @@ async function runChorus(ctx, parent, args, signal) {
         },
         isRound1,
         CHORUS_SYSTEMS,
-        signal
+        signal,
+        { quorumFraction: params.quorumFraction, debaterRetryCount: params.debaterRetryCount, debaterTimeoutMs: params.debaterTimeoutMs }
       );
       if (signal.aborted) throw new Error("chorus brainstorm cancelled by user");
       for (const r of responses) {
@@ -2102,7 +2142,7 @@ Provide:
           signal
         });
       }
-      const curatorText = await waitForFiberTurn(ctx, curatorFiber.childId, signal);
+      const curatorText = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs);
       stoppingState.cumulativeTokens += estimateTokens(curatorText);
       lastCuratorBrief = curatorText;
       const gemMatches = curatorText.matchAll(/•\s*GEM:\s*([^\n]+)/gi);
@@ -2115,7 +2155,7 @@ Provide:
         responses,
         curatorBrief: curatorText
       });
-      const decision = evaluateStopping(stoppingState, null, currentIdeaTokens);
+      const decision = evaluateStopping(stoppingState, null, currentIdeaTokens, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold });
       stoppingState.history.push({
         round,
         claims: currentIdeaTokens,
@@ -2136,7 +2176,7 @@ ${d.text}`).join("\n\n")).join("\n\n---\n\n");
         source: { kind: "user" },
         signal
       });
-      finalHarvest = await waitForFiberTurn(ctx, curatorFiber.childId, signal);
+      finalHarvest = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs);
       stoppingState.cumulativeTokens += estimateTokens(finalHarvest);
     } else {
       finalHarvest = `## Chorus Harvest

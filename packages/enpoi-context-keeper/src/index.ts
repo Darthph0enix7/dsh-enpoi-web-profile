@@ -176,6 +176,35 @@ interface ResolvedRoute {
 }
 
 /**
+ * Resolve the keeper's runtime parameters (doc 38): the
+ * `enpoi-orchestration.parameters.keeper` settings namespace overrides the
+ * plugin Config per wake — hot-swap, no restart. Values are clamped to the
+ * doc-38 ranges.
+ */
+export function resolveKeeperParams(ctx: Context, config: Config): Config {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { keeper?: Partial<Config> } } } | undefined
+    const p = settings?.get?.('enpoi-orchestration')?.parameters?.keeper
+    if (p === undefined || typeof p !== 'object') return config
+    const clamp = (v: unknown, fallback: number, min: number, max: number): number =>
+      typeof v === 'number' && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback
+    return {
+      ...config,
+      leaseMs: clamp(p.leaseMs, config.leaseMs ?? 45_000, 15_000, 120_000),
+      maxInputEvents: clamp(p.maxInputEvents, config.maxInputEvents ?? 80, 20, 200),
+      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, 4096),
+      structuralDistanceK: clamp(p.structuralDistanceK, config.structuralDistanceK ?? 24, 4, 200),
+      minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 60_000, 5_000, 300_000),
+      negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 120_000, 5_000, 600_000),
+      claimsBatchSize: clamp(p.claimsBatchSize, config.claimsBatchSize ?? 8, 1, 50),
+      claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60),
+    }
+  } catch {
+    return config
+  }
+}
+
+/**
  * Resolve the keeper's model route for this wake.
  *
  * Precedence (Oracle amendment): `enpoi-orchestration.personas.keeper` (operator
@@ -268,6 +297,8 @@ export class BriefService {
    */
   async ensureFreshBrief(session: Session, signal?: AbortSignal): Promise<BriefResult> {
     const key = session.id
+    // Doc 38: runtime parameters resolved fresh per call (hot-swap).
+    const cfg = resolveKeeperParams(this.ctx, this.config)
     const entry = this.cache.get(key)
     const now = Date.now()
 
@@ -277,14 +308,14 @@ export class BriefService {
     }
 
     // 2. Anti-thrash floor: a distillation younger than minRefreshMs is reused.
-    if (entry !== undefined && entry.prose.length > 0 && now - entry.updatedAt < (this.config.minRefreshMs ?? 60_000)) {
+    if (entry !== undefined && entry.prose.length > 0 && now - entry.updatedAt < (cfg.minRefreshMs ?? 60_000)) {
       return { ok: true, prose: entry.prose, model: entry.model, reason: 'cache-hit' }
     }
 
     // 3. Structural freshness: silence never invalidates prose.
     if (entry !== undefined && entry.prose.length > 0) {
       const distance = countStructuralAfter(session, entry.basedOnSeq)
-      if (distance <= (this.config.structuralDistanceK ?? 24)) {
+      if (distance <= (cfg.structuralDistanceK ?? 24)) {
         return { ok: true, prose: entry.prose, model: entry.model, reason: 'cache-hit' }
       }
     }
@@ -292,7 +323,7 @@ export class BriefService {
     // 4. Single-flight: join an in-flight pass whose window is still fresh.
     if (entry !== undefined && entry.inFlight !== null) {
       const inFlightDistance = countStructuralAfter(session, entry.inFlightSnapshotSeq)
-      if (inFlightDistance <= (this.config.structuralDistanceK ?? 24)) {
+      if (inFlightDistance <= (cfg.structuralDistanceK ?? 24)) {
         try {
           return await entry.inFlight
         } catch (error) {
@@ -307,7 +338,7 @@ export class BriefService {
 
     // 5. Distill (snapshot the seq BEFORE the async call — I3 causal ordering).
     const snapshotSeq = session.events.at(-1)?.seq ?? session.seq
-    const promise = this.distill(session, signal, snapshotSeq)
+    const promise = this.distill(session, signal, snapshotSeq, cfg)
     this.cache.set(key, {
       ...(entry ?? emptyEntry()),
       inFlight: promise,
@@ -324,20 +355,20 @@ export class BriefService {
   }
 
   /** One distillation pass: lease-bound LLM call, then append + cache. */
-  private async distill(session: Session, signal: AbortSignal | undefined, snapshotSeq: number): Promise<BriefResult> {
+  private async distill(session: Session, signal: AbortSignal | undefined, snapshotSeq: number, cfg: Config): Promise<BriefResult> {
     const lease = new AbortController()
-    const leaseTimer = setTimeout(() => lease.abort(), this.config.leaseMs ?? 45_000)
+    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
     const combined = signal !== undefined ? AbortSignal.any([signal, lease.signal]) : lease.signal
     try {
-      const input = frameInput(session, this.config.maxInputEvents ?? 80)
+      const input = frameInput(session, cfg.maxInputEvents ?? 80)
       if (input.length === 0) {
         diag(`ensureFreshBrief: session=${session.id} — empty input, skipping`)
         return { ok: false, prose: null, reason: 'failed' }
       }
-      const route = resolveKeeperRoute(this.ctx, this.config)
+      const route = resolveKeeperRoute(this.ctx, cfg)
       const snapshotStructural = countStructuralUpTo(session, snapshotSeq)
       diag(`ensureFreshBrief: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`)
-      const result = await summarize(this.ctx, this.config, session, input, combined, route, PROSE_PROMPT, false)
+      const result = await summarize(this.ctx, cfg, session, input, combined, route, PROSE_PROMPT, false)
       const prose = cleanKeeperProse(result.text)
       if (prose.length === 0) {
         diag(`ensureFreshBrief: session=${session.id} — empty or cleaned-empty prose, skipping`)
@@ -347,7 +378,7 @@ export class BriefService {
       session.append('brief/prose-updated', {
         basedOnSeq: snapshotSeq,
         basedOnStructuralCount: snapshotStructural,
-        structuralDistanceK: this.config.structuralDistanceK ?? 24,
+        structuralDistanceK: cfg.structuralDistanceK ?? 24,
         model: result.route,
         text: prose,
         origin: 'context-keeper',
@@ -372,9 +403,9 @@ export class BriefService {
       const entry = this.cache.get(session.id)
       this.cache.set(session.id, {
         ...(entry ?? emptyEntry()),
-        negativeUntil: Date.now() + (this.config.negativeCacheMs ?? 120_000),
+        negativeUntil: Date.now() + (cfg.negativeCacheMs ?? 120_000),
       })
-      diag(`ensureFreshBrief: session=${session.id} — FAILED ${String(error)} (negative-cached ${this.config.negativeCacheMs ?? 120_000}ms)`)
+      diag(`ensureFreshBrief: session=${session.id} — FAILED ${String(error)} (negative-cached ${cfg.negativeCacheMs ?? 120_000}ms)`)
       return { ok: false, prose: null, reason: 'failed' }
     } finally {
       clearTimeout(leaseTimer)
@@ -453,14 +484,16 @@ async function runClaimsPass(
 ): Promise<void> {
   if (running.has(session.id)) return // single-flight — the next batch catches it
   running.add(session.id)
+  // Doc 38: runtime parameters resolved fresh per pass (hot-swap).
+  const cfg = resolveKeeperParams(ctx, config)
   const lease = new AbortController()
-  const leaseTimer = setTimeout(() => lease.abort(), config.leaseMs ?? 45_000)
+  const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
   try {
-    const input = frameInput(session, config.maxInputEvents ?? 80)
+    const input = frameInput(session, cfg.maxInputEvents ?? 80)
     if (input.length === 0) return
-    const route = resolveKeeperRoute(ctx, config)
+    const route = resolveKeeperRoute(ctx, cfg)
     diag(`claims: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`)
-    const result = await summarize(ctx, config, session, input, lease.signal, route, CLAIMS_PROMPT, true)
+    const result = await summarize(ctx, cfg, session, input, lease.signal, route, CLAIMS_PROMPT, true)
     const claims = splitClaims(result.text)
     if (claims.length === 0) {
       diag(`claims: session=${session.id} — no claims extracted`)

@@ -99,6 +99,15 @@ function buildDelta(brief, args) {
   }
   return lines.join("\n");
 }
+function resolveOracleTimeoutMs(ctx) {
+  try {
+    const settings = ctx.get("settings");
+    const v = settings?.get?.("enpoi-orchestration")?.parameters?.oracle?.timeoutMs;
+    if (typeof v === "number" && !Number.isNaN(v)) return Math.min(3e5, Math.max(3e4, v));
+  } catch {
+  }
+  return 12e4;
+}
 function resolvePersonaModel(ctx, persona) {
   try {
     const settings = ctx.get("settings");
@@ -375,7 +384,7 @@ function registerOracleTools(ctx, root) {
           const childId = fiber.childId;
           void (async () => {
             try {
-              const t = await waitForChildTurn(ctx, childId, bg.signal);
+              const t = await waitForChildTurn(ctx, childId, bg.signal, resolveOracleTimeoutMs(ctx));
               const v = parseVerdict(t);
               fiber.consultations += 1;
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
@@ -413,7 +422,7 @@ ${t}`
         }
         let verdictText = "";
         try {
-          verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal);
+          verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal, resolveOracleTimeoutMs(ctx));
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           fibers.delete(key);
@@ -455,5 +464,6 @@ export {
   buildInitialPackage,
   inject,
   name,
+  resolveOracleTimeoutMs,
   resolvePersonaModel
 };

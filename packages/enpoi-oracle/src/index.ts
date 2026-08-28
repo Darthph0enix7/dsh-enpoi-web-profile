@@ -155,6 +155,18 @@ export interface PersonaModelConfig {
   reasoningEffort?: string
 }
 
+/** Doc 38: oracle consultation timeout — resolved fresh per call (hot-swap). */
+export function resolveOracleTimeoutMs(ctx: Context): number {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { oracle?: { timeoutMs?: number } } } } | undefined
+    const v = settings?.get?.('enpoi-orchestration')?.parameters?.oracle?.timeoutMs
+    if (typeof v === 'number' && !Number.isNaN(v)) return Math.min(300_000, Math.max(30_000, v))
+  } catch {
+    // settings unavailable — default
+  }
+  return 120_000
+}
+
 export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
   try {
     const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
@@ -482,7 +494,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
           const childId = fiber.childId!
           void (async () => {
             try {
-              const t = await waitForChildTurn(ctx, childId, bg.signal)
+              const t = await waitForChildTurn(ctx, childId, bg.signal, resolveOracleTimeoutMs(ctx))
               const v = parseVerdict(t)
               fiber.consultations += 1
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns })
@@ -520,7 +532,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
 
         let verdictText = ''
         try {
-          verdictText = await waitForChildTurn(ctx, fiber.childId!, bg?.signal ?? exec.signal)
+          verdictText = await waitForChildTurn(ctx, fiber.childId!, bg?.signal ?? exec.signal, resolveOracleTimeoutMs(ctx))
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : String(err)
           fibers.delete(key)

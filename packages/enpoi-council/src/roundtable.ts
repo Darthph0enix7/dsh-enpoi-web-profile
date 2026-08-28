@@ -10,6 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { getBriefService } from 'dsh-enpoi-context-keeper'
+import { getCouncilParams } from './params'
 import {
   SKEPTIC_SYSTEM,
   ARCHITECT_SYSTEM,
@@ -25,7 +26,6 @@ import {
   type DebaterResponse,
   executeParallelRound,
   disposeCouncilFibers,
-  MAX_DEBATE_TOKENS,
   startDebaterFiber,
   waitForFiberTurn,
   estimateTokens,
@@ -129,8 +129,10 @@ export async function runRoundtable(
   signal: AbortSignal,
 ): Promise<RoundtableResult> {
   const startedAt = Date.now()
-  const maxRounds = args.maxRounds ?? 5
-  const hideLimit = args.hideLimit ?? true
+  // Doc 38: runtime parameters resolved fresh per debate (hot-swap).
+  const params = getCouncilParams(ctx)
+  const maxRounds = args.maxRounds ?? params.defaultMaxRounds
+  const hideLimit = args.hideLimit ?? params.defaultHideLimit
 
   // Invariant I12: Pin models at start
   const modelsUsed: Record<string, string> = {
@@ -168,7 +170,7 @@ export async function runRoundtable(
     maxRounds,
     hideLimit,
     cumulativeTokens: 0,
-    maxTokens: MAX_DEBATE_TOKENS,
+    maxTokens: params.maxDebateTokens,
     history: [],
   }
 
@@ -210,6 +212,7 @@ export async function runRoundtable(
         isRound1,
         DEBATER_SYSTEMS,
         signal,
+        { quorumFraction: params.quorumFraction, debaterRetryCount: params.debaterRetryCount, debaterTimeoutMs: params.debaterTimeoutMs },
       )
 
       if (signal.aborted) throw new Error('roundtable debate cancelled by user')
@@ -242,7 +245,7 @@ export async function runRoundtable(
         })
       }
 
-      const criticText = await waitForFiberTurn(ctx, criticFiber.childId, signal)
+      const criticText = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs)
       stoppingState.cumulativeTokens += estimateTokens(criticText)
       criticScore = parseCriticScore(criticText)
       if (criticScore?.runningBrief) {
@@ -256,7 +259,7 @@ export async function runRoundtable(
       })
 
       // 3. Evaluate Stopping Rules (Deterministic Jaccard delta + Consensus)
-      const decision = evaluateStopping(stoppingState, criticScore, currentClaims)
+      const decision = evaluateStopping(stoppingState, criticScore, currentClaims, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold })
       stoppingState.history.push({
         round,
         claims: currentClaims,
@@ -290,7 +293,7 @@ export async function runRoundtable(
         source: { kind: 'user' },
         signal,
       })
-      finalSynthesis = await waitForFiberTurn(ctx, criticFiber.childId, signal)
+      finalSynthesis = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs)
       stoppingState.cumulativeTokens += estimateTokens(finalSynthesis)
     } else {
       finalSynthesis = `## Council Decision\n\nDebate completed after ${stoppingState.round} rounds.\n\n${allRoundsText}`
