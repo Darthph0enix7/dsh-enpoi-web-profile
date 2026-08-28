@@ -423,7 +423,7 @@ var RevertExecutor = class {
    * discipline as auto-revert.
    */
   async applyResolution(opts) {
-    const walSeq = opts.revertSeq !== -1 ? opts.revertSeq : -Date.now();
+    const walSeq = -Date.now();
     await this.writeWal({
       kind: "intent",
       sessionId: opts.sessionId,
@@ -439,7 +439,7 @@ var RevertExecutor = class {
       }
       const current = await opts.readDisk(opts.targetKey);
       const currentSha = current === null ? null : sha256Of(current);
-      if (opts.expectedDiskSha !== null && currentSha !== opts.expectedDiskSha) {
+      if (currentSha !== opts.expectedDiskSha) {
         const outcome2 = { status: "conflict_escalated", reason: "disk changed since the conflict was presented" };
         await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome2 }, ts: Date.now() });
         return outcome2;
@@ -447,7 +447,10 @@ var RevertExecutor = class {
       if (current !== null) {
         try {
           await this.opts.blobStore.put(current);
-        } catch {
+        } catch (err) {
+          const outcome2 = { status: "conflict_escalated", reason: `pre-clobber backup failed: ${String(err)}` };
+          await this.writeWal({ kind: "result", sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome2 }, ts: Date.now() });
+          return outcome2;
         }
       }
       const path = await opts.resolvePath(opts.targetKey);
@@ -709,6 +712,10 @@ function apply(ctx, config) {
       diag(`revert/state: commit for ${session.id} \u2014 clearing boundary without file execution`);
       return;
     }
+    if (cause === "restore" && newBoundary !== null && newBoundary === oldBoundary) {
+      diag(`revert/state: equal-seq restore no-op for ${session.id} (boundary=${String(newBoundary)})`);
+      return;
+    }
     state.flight = state.flight.then(async () => {
       try {
         await executeFileTransition(ctx, session, oldBoundary, newBoundary, manifestFor, executorFor, blobStore);
@@ -729,7 +736,7 @@ function apply(ctx, config) {
     diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
     const request = args[0];
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore);
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, sessionStates);
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
       return { accepted: true, ...outcome };
     } catch (err) {
@@ -786,7 +793,17 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
     const target = manifest.resolveRestoreTarget(targetKey, newBoundary);
     const current = await readDiskBytes(ctx, targetKey);
     const currentSha = current === null ? null : sha256Hex(current);
-    const evalResult = evaluateBoundary(entry, target, currentSha);
+    let evalResult = evaluateBoundary(entry, target, currentSha);
+    if (target.isInterleaved && evalResult.action !== "prompt" && evalResult.action !== "skip") {
+      evalResult = {
+        state: STATE.UNAVAILABLE,
+        action: "skip",
+        targetBlobSha: evalResult.targetBlobSha,
+        expectedDiskSha: currentSha,
+        targetAbsent: evalResult.targetAbsent,
+        reason: "interleaved user edits make the boundary state unreliable"
+      };
+    }
     plan.set(targetKey, {
       entry,
       state: evalResult.state,
@@ -849,7 +866,7 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
   }
   appendIgnorable(session, "revert/file-result", { revertSeq: newBoundary ?? -1, outcomes });
 }
-async function applyConflictResolution(ctx, request, executorFor, _blobStore) {
+async function applyConflictResolution(ctx, request, executorFor, _blobStore, sessionStates) {
   const executor = executorFor(request.sessionId);
   const sessions = ctx.get("sessions");
   const session = sessions?.get?.(request.sessionId);
@@ -857,6 +874,11 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore) {
   const conflictEvent = [...session.events].reverse().find((e) => e.type === "revert/file-conflict" && e.data.conflictId === request.conflictId);
   if (conflictEvent === void 0) throw new Error(`conflict ${request.conflictId} not found`);
   const conflict = conflictEvent.data;
+  const state = sessionStates.get(request.sessionId);
+  if (state !== void 0 && state.boundary !== (conflict.boundarySeq ?? null)) {
+    diag(`file-revert/resolve: stale conflict ${request.conflictId} for ${request.sessionId} (card boundary=${String(conflict.boundarySeq ?? null)}, current=${String(state.boundary)}) \u2014 refusing`);
+    throw new Error("conflict is stale: the session boundary moved since this card was shown");
+  }
   let resolution = request.resolution;
   let targetBlobSha = null;
   if (resolution === "keep") {

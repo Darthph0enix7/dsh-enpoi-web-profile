@@ -719,3 +719,63 @@ describe('matrix: 3-turn combination with creation, edit, text-only turn, and co
     expect(await readFile(join(env.work, 'test_file.txt'), 'utf8')).toBe('V2: edited')
   })
 })
+
+describe('Oracle B-fixes: applyResolution hardening', () => {
+  it('strict TOCTOU: file reappearing after MISSING conflict escalates, never overwrites', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    // File absent at conflict time (MISSING card, expectedDiskSha = null)
+    await rm(join(env.work, 'a.txt'))
+    // User recreates the file with precious content before resolving
+    await writeFile(join(env.work, 'a.txt'), 'user recreated precious content')
+    const outcome = await env.executor.applyResolution({
+      sessionId: 's1', revertSeq: -1, targetKey: 'a.txt',
+      resolution: 'restore', targetBlobSha: env.manifest.records[0].preBlobSha, expectedDiskSha: null,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(outcome.status).toBe('conflict_escalated')
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user recreated precious content')
+  })
+
+  it('pre-clobber backup failure escalates instead of destroying the only copy', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    const manualSha = sha256Of(Buffer.from('user manual edit'))
+    // Sabotage the blob store: put() throws
+    const brokenBlobs = {
+      put: async () => { throw new Error('disk full') },
+      get: async (sha: string) => env.blobs.get(sha),
+    }
+    const brokenExecutor = new RevertExecutor({ blobStore: brokenBlobs as unknown as BlobStore, trashRoot: join(env.root, 'trash2'), walFile: join(env.root, 'wal2.jsonl') })
+    await brokenExecutor.init()
+    const outcome = await brokenExecutor.applyResolution({
+      sessionId: 's1', revertSeq: -1, targetKey: 'a.txt',
+      resolution: 'restore', targetBlobSha: env.manifest.records[0].preBlobSha, expectedDiskSha: manualSha,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(outcome.status).toBe('conflict_escalated')
+    expect(outcome.reason).toContain('pre-clobber backup failed')
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+  })
+
+  it('unique WAL seq per resolution: resolution result never seals an interrupted batch intent', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    const manualSha = sha256Of(Buffer.from('user manual edit'))
+    // Interrupted batch: intent written, never sealed (revertSeq = 10)
+    await env.executor.writeWal({
+      kind: 'intent', sessionId: 's1', revertSeq: 10,
+      plan: { 'a.txt': { action: 'restore', targetBlobSha: env.manifest.records[0].preBlobSha, expectedDiskSha: manualSha } },
+      ts: Date.now(),
+    })
+    // Resolution completes with its own unique seq
+    const outcome = await env.executor.applyResolution({
+      sessionId: 's1', revertSeq: 10, targetKey: 'a.txt',
+      resolution: 'restore', targetBlobSha: env.manifest.records[0].preBlobSha, expectedDiskSha: manualSha,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(outcome.status).toBe('restored')
+    // The batch intent (seq 10) must still be unsealed
+    const unsealed = await env.executor.findUnsealedIntents()
+    expect(unsealed.some(i => i.revertSeq === 10)).toBe(true)
+  })
+})

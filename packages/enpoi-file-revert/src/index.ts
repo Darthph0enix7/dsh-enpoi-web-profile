@@ -160,6 +160,13 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
       return
     }
 
+    // Equal-seq restore (restore to the current boundary) is a no-op — honor
+    // the cause instead of misclassifying it as a revert (Oracle B-class).
+    if (cause === 'restore' && newBoundary !== null && newBoundary === oldBoundary) {
+      diag(`revert/state: equal-seq restore no-op for ${session.id} (boundary=${String(newBoundary)})`)
+      return
+    }
+
     // Queue transition on flight chain so rapid clicks execute strictly in order.
     state.flight = state.flight.then(async () => {
       try {
@@ -188,7 +195,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
       resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     }
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore)
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, sessionStates)
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`)
       return { accepted: true as const, ...outcome }
     } catch (err) {
@@ -291,7 +298,20 @@ async function executeFileTransition(
     const target = manifest.resolveRestoreTarget(targetKey, newBoundary)
     const current = await readDiskBytes(ctx, targetKey)
     const currentSha = current === null ? null : sha256Hex(current)
-    const evalResult = evaluateBoundary(entry, target, currentSha)
+    let evalResult = evaluateBoundary(entry, target, currentSha)
+    // Interleaved-chain degrade (Oracle E-class): a mid-span restore inside an
+    // interleaved region has an unreliable boundary post-state — surface a
+    // conflict card instead of auto-transitioning on a guessed target.
+    if (target.isInterleaved && evalResult.action !== 'prompt' && evalResult.action !== 'skip') {
+      evalResult = {
+        state: STATE.UNAVAILABLE,
+        action: 'skip',
+        targetBlobSha: evalResult.targetBlobSha,
+        expectedDiskSha: currentSha,
+        targetAbsent: evalResult.targetAbsent,
+        reason: 'interleaved user edits make the boundary state unreliable',
+      }
+    }
     plan.set(targetKey, {
       entry,
       state: evalResult.state,
@@ -370,6 +390,7 @@ async function applyConflictResolution(
   request: { sessionId: string; conflictId: string; resolution: 'keep' | 'restore' | 'recreate' | 'trash' },
   executorFor: (id: string) => RevertExecutor,
   _blobStore: BlobStore,
+  sessionStates: Map<string, SessionRevertState>,
 ): Promise<{ outcome?: unknown }> {
   const executor = executorFor(request.sessionId)
   const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
@@ -395,6 +416,16 @@ async function applyConflictResolution(
       currentSha: string | null
     }
   }).data
+
+  // Stale-card gate (Oracle E-class): a card from an earlier boundary must not
+  // be resolvable after the session moved on (e.g. restore-all then resolving
+  // an old revert card would write stale content). Only the card matching the
+  // CURRENT folded boundary is actionable.
+  const state = sessionStates.get(request.sessionId)
+  if (state !== undefined && state.boundary !== (conflict.boundarySeq ?? null)) {
+    diag(`file-revert/resolve: stale conflict ${request.conflictId} for ${request.sessionId} (card boundary=${String(conflict.boundarySeq ?? null)}, current=${String(state.boundary)}) — refusing`)
+    throw new Error('conflict is stale: the session boundary moved since this card was shown')
+  }
 
   // Resolution semantics (Oracle-certified):
   // - keep: leave disk untouched.

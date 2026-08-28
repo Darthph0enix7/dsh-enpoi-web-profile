@@ -195,7 +195,10 @@ export class RevertExecutor {
     writeDisk: (path: string, bytes: Buffer) => Promise<void>
     trashFile: (path: string) => Promise<string>
   }): Promise<{ status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }> {
-    const walSeq = opts.revertSeq !== -1 ? opts.revertSeq : -Date.now()
+    // Unique WAL seq per resolution: reusing the batch revertSeq would let a
+    // resolution result falsely seal an interrupted batch intent in
+    // findUnsealedIntents (Oracle B3).
+    const walSeq = -Date.now()
     await this.writeWal({
       kind: 'intent',
       sessionId: opts.sessionId,
@@ -213,17 +216,28 @@ export class RevertExecutor {
 
       const current = await opts.readDisk(opts.targetKey)
       const currentSha = current === null ? null : sha256Of(current)
-      if (opts.expectedDiskSha !== null && currentSha !== opts.expectedDiskSha) {
+      // Strict TOCTOU (Oracle B1): expectedDiskSha === null means the file was
+      // absent at conflict time — if it reappeared with user content, never
+      // silently overwrite or trash it.
+      if (currentSha !== opts.expectedDiskSha) {
         const outcome = { status: 'conflict_escalated', reason: 'disk changed since the conflict was presented' }
         await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
         return outcome
       }
 
-      // Pre-clobber backup (Zero Data Loss): stage current content to blob store before write/trash
+      // Pre-clobber backup (Zero Data Loss): stage current content to blob store
+      // before write/trash. In the resolution path the current content is by
+      // definition unknown (that is why it is a conflict) — it may be the only
+      // copy in existence, so a failed backup MUST escalate, never proceed
+      // (Oracle B2).
       if (current !== null) {
         try {
           await this.opts.blobStore.put(current)
-        } catch { /* best-effort backup */ }
+        } catch (err) {
+          const outcome = { status: 'conflict_escalated', reason: `pre-clobber backup failed: ${String(err)}` }
+          await this.writeWal({ kind: 'result', sessionId: opts.sessionId, revertSeq: walSeq, outcomes: { [opts.targetKey]: outcome }, ts: Date.now() })
+          return outcome
+        }
       }
 
       const path = await opts.resolvePath(opts.targetKey)
