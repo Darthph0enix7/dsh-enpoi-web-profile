@@ -70,10 +70,18 @@ var MutationManifest = class {
         const line = lines[i];
         if (line.length === 0) continue;
         try {
-          this.records.push(JSON.parse(line));
+          const record = JSON.parse(line);
+          if (record.preBlobSha === null && record.postBlobSha === null) continue;
+          this.records.push(record);
         } catch {
           if (i !== lines.length - 1) throw new Error(`corrupt manifest line ${i + 1}`);
         }
+      }
+      const lastPost = /* @__PURE__ */ new Map();
+      for (const record of this.records) {
+        const prior = lastPost.get(record.targetKey);
+        record.isInterleaved = prior !== void 0 && prior !== record.preBlobSha;
+        lastPost.set(record.targetKey, record.postBlobSha);
       }
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
@@ -141,14 +149,19 @@ var MutationManifest = class {
         return { preExisted: false, preStatus: "ok", preBlobSha: null, postBlobSha: null, isInterleaved: false, sessionCreated };
       }
       const earliest = spanRecs.reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
-      const latest2 = spanRecs.reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
+      const userRecs = spanRecs.filter((r) => r.source !== "plugin-revert");
+      const latest2 = (userRecs.length > 0 ? userRecs : spanRecs).reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
+      const latestIdx = spanRecs.indexOf(latest2);
+      const successor2 = spanRecs[latestIdx + 1];
+      const targetInterleaved2 = latest2.isInterleaved || successor2 !== void 0 && successor2.isInterleaved;
       return {
         preExisted: earliest.preExisted,
         preStatus: earliest.preStatus,
         preBlobSha: earliest.preBlobSha,
         postBlobSha: latest2.postBlobSha,
-        isInterleaved: spanRecs.some((r) => r.isInterleaved),
-        sessionCreated
+        isInterleaved: targetInterleaved2,
+        sessionCreated,
+        targetSource: latest2.source
       };
     }
     const recs = this.upTo(restoreSeq).filter((r) => r.targetKey === targetKey);
@@ -169,14 +182,16 @@ var MutationManifest = class {
     }
     const earliestSpan = this.records.filter((r) => r.targetKey === targetKey).reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
     const latest = recs.reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
-    const chainInterleaved = recs.some((r) => r.isInterleaved) || this.records.some((r) => r.targetKey === targetKey && r.toolSeq > restoreSeq && r.isInterleaved);
+    const successor = this.records.filter((r) => r.targetKey === targetKey && r.toolSeq > restoreSeq).sort((a, b) => a.toolSeq - b.toolSeq)[0];
+    const targetInterleaved = latest.isInterleaved || successor !== void 0 && successor.isInterleaved;
     return {
       preExisted: earliestSpan.preExisted,
       preStatus: earliestSpan.preStatus,
       preBlobSha: earliestSpan.preBlobSha,
       postBlobSha: latest.postBlobSha,
-      isInterleaved: chainInterleaved,
-      sessionCreated
+      isInterleaved: targetInterleaved,
+      sessionCreated,
+      targetSource: latest.source
     };
   }
   /** All SHAs referenced by live records (for reachability GC). */
@@ -251,7 +266,7 @@ function evaluateBoundary(entry, target, currentSha) {
   if (currentSha === targetSha) {
     return { state: STATE.ALREADY_CLEAN, action: "noop", targetBlobSha: null, expectedDiskSha: currentSha, targetAbsent };
   }
-  const isKnownSpanState = entry.records.some((r) => r.postBlobSha !== null && r.postBlobSha === currentSha) || entry.records.some((r) => !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha);
+  const isKnownSpanState = entry.records.some((r) => r.source !== "user-kept" && r.postBlobSha !== null && r.postBlobSha === currentSha) || entry.records.some((r) => r.source !== "user-kept" && !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha);
   if (isKnownSpanState) {
     if (targetAbsent) {
       if (target.preExisted) {
@@ -408,7 +423,7 @@ var RevertExecutor = class {
           outcomes[targetKey] = { status: "restored", fromSha: p.expectedDiskSha, toSha: p.targetBlobSha };
         } else if (action === "trash") {
           const dest = await opts.trashFile(path);
-          outcomes[targetKey] = { status: "trashed", dest };
+          outcomes[targetKey] = { status: "trashed", dest, fromSha: p.expectedDiskSha, toSha: null };
         }
       }
     } catch (err) {
@@ -483,7 +498,7 @@ var RevertExecutor = class {
         }
       } else if (opts.resolution === "trash") {
         const dest = await opts.trashFile(path);
-        outcome = { status: "trashed", dest };
+        outcome = { status: "trashed", dest, fromSha: opts.expectedDiskSha, toSha: null };
       } else {
         outcome = { status: "invalid_resolution" };
       }
@@ -741,7 +756,7 @@ function apply(ctx, config) {
     diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
     const request = args[0];
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor);
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor, manifestFor);
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
       return { accepted: true, ...outcome };
     } catch (err) {
@@ -749,7 +764,7 @@ function apply(ctx, config) {
       return { accepted: false, reason: String(err) };
     }
   });
-  void recoverUnsealedIntents(ctx, executorFor);
+  void recoverUnsealedIntents(ctx, executorFor, manifestFor);
   const timer = ctx.get("timer");
   if (timer?.setInterval !== void 0) {
     timer.setInterval(() => {
@@ -798,7 +813,7 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
     const current = await readDiskBytes(ctx, targetKey);
     const currentSha = current === null ? null : sha256Hex(current);
     let evalResult = evaluateBoundary(entry, target, currentSha);
-    if (target.isInterleaved && evalResult.action !== "prompt" && evalResult.action !== "skip") {
+    if (mode === "restore" && target.targetSource !== "user-kept" && target.isInterleaved && evalResult.action !== "prompt" && evalResult.action !== "skip") {
       evalResult = {
         state: STATE.UNAVAILABLE,
         action: "skip",
@@ -869,8 +884,36 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
     });
   }
   appendIgnorable(session, "revert/file-result", { revertSeq: newBoundary ?? -1, outcomes });
+  await recordOutcomes(manifestFor(session.id), session.id, outcomes);
 }
-async function applyConflictResolution(ctx, request, executorFor, _blobStore, stateFor) {
+async function recordOutcomes(manifest, sessionId, outcomes) {
+  for (const [targetKey, outcome] of Object.entries(outcomes)) {
+    if (outcome.status === "no_op" || outcome.status === "kept" || outcome.status === "saved_beside") continue;
+    const fromSha = outcome.fromSha ?? null;
+    const toSha = outcome.toSha ?? null;
+    try {
+      await manifest.append({
+        sessionId,
+        toolSeq: Number.MAX_SAFE_INTEGER - 1,
+        callId: `revert-${Date.now()}`,
+        targetKey,
+        displayPath: targetKey,
+        operation: "update",
+        preExisted: true,
+        preStatus: "ok",
+        preBlobSha: fromSha,
+        postStatus: "ok",
+        postBlobSha: toSha,
+        isInterleaved: false,
+        timestamp: Date.now(),
+        source: "plugin-revert"
+      });
+    } catch (err) {
+      diag(`recordOutcomes: failed to record ${targetKey}: ${String(err)}`);
+    }
+  }
+}
+async function applyConflictResolution(ctx, request, executorFor, _blobStore, stateFor, manifestFor) {
   const executor = executorFor(request.sessionId);
   const sessions = ctx.get("sessions");
   const session = sessions?.get?.(request.sessionId);
@@ -935,13 +978,39 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, st
     writeDisk: async (path, bytes) => executor.atomicWrite(path, bytes),
     trashFile: async (path) => executor.trash(path, request.sessionId)
   });
+  if (resolution === "keep" && conflict.currentSha !== null) {
+    try {
+      const manifest = manifestFor(request.sessionId);
+      await manifest.append({
+        sessionId: request.sessionId,
+        toolSeq: Number.MAX_SAFE_INTEGER - 1,
+        callId: `keep-${request.conflictId}`,
+        targetKey: conflict.targetKey,
+        displayPath: conflict.targetKey,
+        operation: "update",
+        preExisted: true,
+        preStatus: "ok",
+        preBlobSha: conflict.currentSha,
+        postStatus: "ok",
+        postBlobSha: conflict.currentSha,
+        isInterleaved: false,
+        timestamp: Date.now(),
+        source: "user-kept"
+      });
+    } catch (err) {
+      diag(`keep: failed to record kept state for ${conflict.targetKey}: ${String(err)}`);
+    }
+  }
   appendIgnorable(session, "revert/file-result", {
     revertSeq: conflict.boundarySeq ?? -1,
     outcomes: { [conflict.targetKey]: outcome }
   });
+  if (resolution !== "keep") {
+    await recordOutcomes(manifestFor(request.sessionId), request.sessionId, { [conflict.targetKey]: outcome });
+  }
   return { outcome };
 }
-async function recoverUnsealedIntents(ctx, executorFor) {
+async function recoverUnsealedIntents(ctx, executorFor, manifestFor) {
   try {
     const { readdir: readdir2 } = await import("node:fs/promises");
     const sessions = await readdir2(FILE_HISTORY_ROOT, { withFileTypes: true });
@@ -957,7 +1026,7 @@ async function recoverUnsealedIntents(ctx, executorFor) {
             return [key, { action: rec.action, targetBlobSha: rec.targetBlobSha, expectedDiskSha: rec.expectedDiskSha }];
           })
         );
-        await executor.execute({
+        const { outcomes } = await executor.execute({
           sessionId: entry.name,
           revertSeq: intent.revertSeq,
           plan,
@@ -966,6 +1035,7 @@ async function recoverUnsealedIntents(ctx, executorFor) {
           writeDisk: async (path, bytes) => executor.atomicWrite(path, bytes),
           trashFile: async (path) => executor.trash(path, entry.name)
         });
+        await recordOutcomes(manifestFor(entry.name), entry.name, outcomes);
       }
     }
   } catch (err) {

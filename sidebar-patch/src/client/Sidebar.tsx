@@ -210,6 +210,23 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   const sessionId = snapshot.sessionId
   const summaryCwd = sessionId === undefined ? undefined : sessionList.byId[sessionId]?.cwd
 
+  // Revert WAL events (enpoi-file-revert): disk may have changed without an fsOp call.
+  // Bump fsChangedTick so EditorHost auto-reloads and TreePanel refreshes.
+  useEffect(() => {
+    if (sessionId === undefined) return
+    const on = (ctx as unknown as { on?: (event: string, handler: (session: unknown, ev: unknown) => void) => () => void }).on
+    if (typeof on !== 'function') return
+    const off = on.call(ctx, 'session/event', (session: unknown, ev: unknown) => {
+      const sid = (session as { id?: string })?.id
+      if (sid !== undefined && sid !== sessionId) return
+      const type = (ev as { type?: string })?.type ?? ''
+      if (type.startsWith('revert/')) {
+        setFsChangedTick(tick => tick + 1)
+      }
+    })
+    return () => { try { (off as unknown as () => void)?.() } catch {} }
+  }, [ctx, sessionId])
+
   // In-harness file open from chat/file mentions: when headless server has no
   // native opener, chat dispatches 'dsh-open-file' — open in the Files editor
   // even if the panel is collapsed or another tab is active.

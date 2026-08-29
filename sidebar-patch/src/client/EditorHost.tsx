@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createElement } from 'react'
 import clsx from 'clsx'
-import { IconCheckOutline16, IconChevronLeftOutline14, IconChevronRightOutline14, IconFolderOpen16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCheckOutline16, IconChevronLeftOutline14, IconChevronRightOutline14, IconFolderOpen16, IconRefreshOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { IconWrap16 } from './TextEditor.tsx'
 import type { Context } from '../context-types.ts'
 import { api, mediaUrl, type SessionScope } from './api.ts'
@@ -222,6 +222,8 @@ export function EditorHost(props: {
   // its state and registers its commands (both null/absent for viewers
   // without a toolbar — image, pdf, binary download).
   const [toolbar, setToolbar] = useState<EditorToolbarState | null>(null)
+  const toolbarRef = useRef<EditorToolbarState | null>(null)
+  toolbarRef.current = toolbar
   const controlsRef = useRef<EditorToolbarControls | null>(null)
   const onToolbarState = useCallback((next: EditorToolbarState) => {
     setToolbar(prev => prev !== null && JSON.stringify(prev) === JSON.stringify(next) ? prev : next)
@@ -229,6 +231,19 @@ export function EditorHost(props: {
   const onToolbarControls = useCallback((controls: EditorToolbarControls | null) => {
     controlsRef.current = controls
   }, [])
+  /** Local refresh tick: header button + external fsChangedTick both force a reload. */
+  const [refreshTick, setRefreshTick] = useState(0)
+  // Mirror external fsChangedTick into local refresh (always reload on revert/fs ops).
+  // Dirty guard: when the editor has unsaved changes, don't auto-clobber — the
+  // TextEditor's poll shows a banner instead (non-data-losing). The tick is still
+  // consumed so a later save+refresh will pick up the latest.
+  const lastFsTickRef = useRef(fsChangedTick ?? 0)
+  useEffect(() => {
+    if (fsChangedTick === undefined || fsChangedTick === lastFsTickRef.current) return
+    lastFsTickRef.current = fsChangedTick
+    if (toolbarRef.current?.dirty === true) return
+    setRefreshTick(tick => tick + 1)
+  }, [fsChangedTick])
 
   // The docked panel's drag-resize: pointer capture on the handle itself
   // (no window listeners — the captured pointer keeps tracking even off the
@@ -324,7 +339,7 @@ export function EditorHost(props: {
     }
     apply(planFirstMatch(ctx.betterSidebar?.matchFileViewer(path), mediaUrlOf))
     return () => { cancelled = true; controller.abort() }
-  }, [scope.sessionId, scope.cwd, path, ctx, showEmpty])
+  }, [scope.sessionId, scope.cwd, path, ctx, showEmpty, refreshTick])
 
   const treeOpen = treeOpenOf(tab)
   /** Persist the panel flag on the tab (survives reloads with the layout). */
@@ -382,6 +397,15 @@ export function EditorHost(props: {
           <IconChevronRightOutline14 />
         </button>
         <EditorPathInput key={path} path={path} cwd={scope.cwd} onOpen={openFile} />
+        <button
+          type="button"
+          className={css.iconButton}
+          aria-label={t('refresh')}
+          title={t('refresh')}
+          onClick={() => { setRefreshTick(tick => tick + 1) }}
+        >
+          <IconRefreshOutline16 size={14} />
+        </button>
         {toolbar?.modes === true && (
           <div className={css.editorModeToggle}>
             <button
@@ -445,6 +469,7 @@ export function EditorHost(props: {
           {!showEmpty && load.status === 'error' && <div className={css.editorError}>{load.message}</div>}
           {!showEmpty && load.status === 'binary' && <BinaryDownload scope={scope} path={path} />}
           {!showEmpty && load.status === 'ready' && createElement(load.viewer.component, {
+            key: `${path}:${refreshTick}`,
             ctx, store, scope, path, title,
             viewerId: load.viewer.id,
             content: load.content,
@@ -455,7 +480,10 @@ export function EditorHost(props: {
             toolbar: 'host',
             onToolbarState,
             onToolbarControls,
-          })}
+            // Force reload signal for non-data-losing refresh (TextEditor poll handles dirty guard).
+            refreshTick,
+            fsChangedTick,
+          } as unknown as Record<string, unknown>)}
         </div>
         {treeOpen && (
           <div className={css.editorTreeDock} style={{ width: treeWidth }}>
