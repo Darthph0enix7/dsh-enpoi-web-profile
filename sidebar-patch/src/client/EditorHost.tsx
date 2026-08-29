@@ -192,19 +192,6 @@ export function EditorHost(props: {
     }
   }
 
-  // In-harness file open from chat/file mentions: headless server has no xdg-open,
-  // so chat dispatches 'dsh-open-file' — open in this tab's preview instead.
-  useEffect(() => {
-    const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<{ path?: string; sessionId?: string }>).detail
-      if (!detail?.path) return
-      if (detail.sessionId && detail.sessionId !== scope.sessionId) return
-      openFile(detail.path)
-    }
-    window.addEventListener('dsh-open-file', handler as EventListener)
-    return () => { window.removeEventListener('dsh-open-file', handler as EventListener) }
-  }, [scope.sessionId, inPlace, tab.id])
-
   /** The context menu's explicit "new tab" escape (per-path dedupe). */
   const openFileNewTab = (absolute: string): void => {
     openSidebarFile(ctx, store, scope.sessionId, absolute)

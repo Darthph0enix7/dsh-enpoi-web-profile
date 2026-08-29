@@ -53,6 +53,7 @@ import { detectNewDirectSubagent } from './subagent-detect.ts'
 import { detectNewJob } from './subagent-jobs.ts'
 import { t } from './locales.ts'
 import { api, type SessionScope } from './api.ts'
+import { openSidebarFile } from './intercept.tsx'
 import css from './sidebar.module.css'
 
 /** Width of the vertical activity rail the right panel floats next to. */
@@ -138,6 +139,26 @@ function buildNewTabOptions(state: SidebarState, ctx: Context, scope: SessionSco
 
 export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   const { ctx, store } = props
+
+  // In-harness file open from chat/file mentions: when headless server has no
+  // native opener, chat dispatches 'dsh-open-file' — open in the Files editor
+  // even if the panel is collapsed or another tab is active.
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ path?: string; sessionId?: string }>).detail
+      if (!detail?.path) return
+      // Use the event's sessionId or the current session.
+      const targetSession = detail.sessionId ?? sessionId
+      if (targetSession === undefined) return
+      // Ensure the right panel is open and Files is visible.
+      store.reduce(s => s.panelOpen ? s : togglePanel(s))
+      // Activate Files tab so the editor is visible even if another tab was active.
+      ctx.betterSidebar?.openTab({ type: 'editor', title: t('files') || 'Files' })
+      try { openSidebarFile(ctx, store, targetSession, detail.path) } catch {}
+    }
+    window.addEventListener('dsh-open-file', handler as EventListener)
+    return () => { window.removeEventListener('dsh-open-file', handler as EventListener) }
+  }, [ctx, store, sessionId])
 
   // Copy freshness: re-render the whole tree when the DSH locale switches.
   // The module-level t() reads the active locale at call time, so a root
