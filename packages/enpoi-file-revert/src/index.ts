@@ -205,7 +205,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
   })
 
   // ── 4. Crash recovery + GC on boot ────────────────────────────────────────
-  void recoverUnsealedIntents(ctx, executorFor)
+  void recoverUnsealedIntents(ctx, executorFor, manifestFor)
 
   const timer = ctx.get('timer') as { setInterval?: (fn: () => void, ms: number) => unknown } | undefined
   if (timer?.setInterval !== undefined) {
@@ -299,10 +299,14 @@ async function executeFileTransition(
     const current = await readDiskBytes(ctx, targetKey)
     const currentSha = current === null ? null : sha256Hex(current)
     let evalResult = evaluateBoundary(entry, target, currentSha)
-    // Interleaved-chain degrade (Oracle E-class): a mid-span restore inside an
+    // Interleaved-chain degrade (Oracle E-class): a mid-span RESTORE inside an
     // interleaved region has an unreliable boundary post-state — surface a
     // conflict card instead of auto-transitioning on a guessed target.
-    if (target.isInterleaved && evalResult.action !== 'prompt' && evalResult.action !== 'skip') {
+    // Reverts (backward) target the well-defined initial pre-state, so they
+    // are never degraded: the plugin's own restore writes used to be
+    // unrecorded, which falsely flagged clean revert chains as interleaved
+    // ("Snapshot unavailable" on a revert with no manual edits).
+    if (mode === 'restore' && target.isInterleaved && evalResult.action !== 'prompt' && evalResult.action !== 'skip') {
       evalResult = {
         state: STATE.UNAVAILABLE,
         action: 'skip',
@@ -381,6 +385,49 @@ async function executeFileTransition(
 
   // Seal with the terminal marker.
   appendIgnorable(session, 'revert/file-result', { revertSeq: newBoundary ?? -1, outcomes })
+
+  // Record every executed disk transition in the manifest so the mutation
+  // chain stays consistent: the plugin's own restore/trash writes are NOT
+  // agent edit/write tool calls, so without a record the next agent edit's
+  // pre-state mismatches the manifest's last post-state and gets flagged
+  // isInterleaved — which later degrades clean reverts into spurious
+  // "Snapshot unavailable" conflicts (backward-compat for existing sessions).
+  await recordOutcomes(manifestFor(session.id), session.id, outcomes)
+}
+
+/** Append manifest records mirroring executed revert outcomes (restore/trash/
+ *  recreate/no-op) so the disk-state chain stays consistent across the
+ *  plugin's own writes. toolSeq is the highest possible so restore-all
+ *  resolves the latest outcome as its target. */
+async function recordOutcomes(
+  manifest: MutationManifest,
+  sessionId: string,
+  outcomes: Record<string, { status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }>,
+): Promise<void> {
+  for (const [targetKey, outcome] of Object.entries(outcomes)) {
+    if (outcome.status === 'no_op' || outcome.status === 'kept' || outcome.status === 'saved_beside') continue
+    const fromSha = outcome.fromSha ?? null
+    const toSha = outcome.toSha ?? null
+    try {
+      await manifest.append({
+        sessionId,
+        toolSeq: Number.MAX_SAFE_INTEGER - 1,
+        callId: `revert-${Date.now()}`,
+        targetKey,
+        displayPath: targetKey,
+        operation: 'update',
+        preExisted: true,
+        preStatus: 'ok',
+        preBlobSha: fromSha,
+        postStatus: 'ok',
+        postBlobSha: toSha,
+        isInterleaved: false,
+        timestamp: Date.now(),
+      })
+    } catch (err) {
+      diag(`recordOutcomes: failed to record ${targetKey}: ${String(err)}`)
+    }
+  }
 }
 
 // ── Conflict resolution ──────────────────────────────────────────────────────
@@ -531,6 +578,11 @@ async function applyConflictResolution(
     revertSeq: conflict.boundarySeq ?? -1,
     outcomes: { [conflict.targetKey]: outcome },
   })
+  // Record the executed disk transition (restore/recreate/trash) so the
+  // mutation chain stays consistent (see recordOutcomes).
+  if (resolution !== 'keep') {
+    await recordOutcomes(manifestFor(request.sessionId), request.sessionId, { [conflict.targetKey]: outcome })
+  }
   return { outcome }
 }
 
@@ -539,6 +591,7 @@ async function applyConflictResolution(
 async function recoverUnsealedIntents(
   ctx: Context,
   executorFor: (id: string) => RevertExecutor,
+  manifestFor: (id: string) => MutationManifest,
 ): Promise<void> {
   try {
     const { readdir } = await import('node:fs/promises')
@@ -555,7 +608,7 @@ async function recoverUnsealedIntents(
           return [key, { action: rec.action, targetBlobSha: rec.targetBlobSha, expectedDiskSha: rec.expectedDiskSha }]
         }),
       )
-        await executor.execute({
+        const { outcomes } = await executor.execute({
           sessionId: entry.name,
           revertSeq: intent.revertSeq,
           plan,
@@ -564,6 +617,7 @@ async function recoverUnsealedIntents(
           writeDisk: async (path: string, bytes: Buffer) => executor.atomicWrite(path, bytes),
           trashFile: async (path: string) => executor.trash(path, entry.name),
         })
+        await recordOutcomes(manifestFor(entry.name), entry.name, outcomes)
       }
     }
   } catch (err) {

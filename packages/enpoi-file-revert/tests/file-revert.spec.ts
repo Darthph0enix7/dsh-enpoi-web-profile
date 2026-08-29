@@ -826,4 +826,29 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     // Pre-agent snapshot written beside
     expect(await readFile(besidePath, 'utf8')).toBe('original')
   })
+
+  it('revert-then-edit chain: plugin restore recorded in manifest so next agent edit is NOT interleaved', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User reverts turn 2 → plugin restores disk to 'v1' (the boundary state)
+    await writeFile(join(env.work, 'a.txt'), 'v1')
+    // recordOutcomes mirrors the restore: pre=v2, post=v1
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('v2')),
+      postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+    })
+    // Turn 3: agent edits 'v1' → 'v3'. Without the restore record this would be
+    // flagged interleaved (prior post=v2 ≠ pre=v1). With it, the chain matches.
+    await simulateMutation({ seq: 30, callId: 'c3', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v3') })
+    await writeFile(join(env.work, 'a.txt'), 'v3')
+    // Revert turn 3 → clean restore to 'v1', NOT a spurious conflict.
+    const { plan } = await buildRevertPlan(env.manifest, 30, readDisk)
+    const entry = plan.get('a.txt')!
+    expect(entry.state).toBe(STATE.CLEAN_RESTORE)
+    expect(entry.action).toBe('restore')
+  })
 })
