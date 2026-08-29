@@ -297,14 +297,22 @@ export function EditorHost(props: {
           })
           return
         case 'fetchFsRead':
-          api.fsRead(scope, path).then((result) => {
+          api.fsRead(scope, path).then((result: unknown) => {
             if (cancelled) return
+            // Guard the file API shape: new engine may return {code} instead of {content},
+            // empty reads may be undefined, and binary detection must not throw reading 'code'.
+            const r = result as { kind?: string; content?: string; code?: string; truncated?: boolean; head?: string } | undefined
+            if (r === undefined || r === null || typeof r.kind !== 'string') {
+              setLoad({ status: 'error', message: 'empty file response' })
+              return
+            }
+            const content = r.kind === 'text' ? (r.content ?? (r as { code?: string }).code ?? '') : ((r as { code?: string }).code ?? '')
             // Binary reads carry the head bytes for the detect re-match.
             const outcome = planFsReadOutcome(action.viewer, {
-              binary: result.kind === 'binary',
-              content: result.kind === 'text' ? result.content : '',
-              truncated: result.truncated,
-              head: result.kind === 'binary' ? result.head : undefined,
+              binary: r.kind === 'binary',
+              content,
+              truncated: r.truncated ?? false,
+              head: r.kind === 'binary' ? r.head : undefined,
             }, (head) => ctx.betterSidebar?.matchFileViewer(path, head), mediaUrlOf)
             apply(outcome)
           }).catch((error: unknown) => {

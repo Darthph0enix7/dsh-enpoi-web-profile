@@ -277,16 +277,18 @@ export function TextEditor(props: FileViewerProps) {
         const info = await api.fsStat(scope, path)
         if (cancelled) return
         if (lastStat !== null && (info.mtimeMs !== lastStat.mtimeMs || info.size !== lastStat.size)) {
-          const fresh = await api.fsRead(scope, path)
-          if (cancelled || fresh.kind !== 'text') return
+          const fresh: unknown = await api.fsRead(scope, path)
+          const r = fresh as { kind?: string; content?: string; code?: string } | undefined
+          if (cancelled || r?.kind !== 'text') return
+          const freshContent = r?.content ?? (r as { code?: string })?.code ?? ''
           // Keystroke-loss guard (Oracle B2): the user may have typed during
           // the stat/read awaits — never swap over a now-dirty document.
           if (dirtyRef.current) return
-          if (fresh.content !== contentRef.current) {
+          if (freshContent !== contentRef.current) {
             // External change: swap the document in place (preserve undo).
             const view = viewRef.current
             if (view !== null) {
-              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: fresh.content } })
+              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: freshContent } })
               setDraft(null)
               setDirty(false)
             }
