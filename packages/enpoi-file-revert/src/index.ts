@@ -423,6 +423,7 @@ async function recordOutcomes(
         postBlobSha: toSha,
         isInterleaved: false,
         timestamp: Date.now(),
+        source: 'plugin-revert',
       })
     } catch (err) {
       diag(`recordOutcomes: failed to record ${targetKey}: ${String(err)}`)
@@ -567,6 +568,7 @@ async function applyConflictResolution(
         postBlobSha: conflict.currentSha,
         isInterleaved: false,
         timestamp: Date.now(),
+        source: 'user-kept',
       })
     } catch (err) {
       diag(`keep: failed to record kept state for ${conflict.targetKey}: ${String(err)}`)

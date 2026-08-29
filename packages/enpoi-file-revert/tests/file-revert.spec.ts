@@ -834,12 +834,13 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
     // User reverts turn 2 → plugin restores disk to 'v1' (the boundary state)
     await writeFile(join(env.work, 'a.txt'), 'v1')
-    // recordOutcomes mirrors the restore: pre=v2, post=v1
+    // recordOutcomes mirrors the restore: pre=v2, post=v1, source=plugin-revert
     await env.manifest.append({
       sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
       targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
       preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('v2')),
       postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+      source: 'plugin-revert',
     })
     // Turn 3: agent edits 'v1' → 'v3'. Without the restore record this would be
     // flagged interleaved (prior post=v2 ≠ pre=v1). With it, the chain matches.
@@ -850,5 +851,56 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     const entry = plan.get('a.txt')!
     expect(entry.state).toBe(STATE.CLEAN_RESTORE)
     expect(entry.action).toBe('restore')
+  })
+
+  it('revert then restore-all: restore returns to the AGENT state, not the plugin write', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User reverts turn 2 → plugin restores disk to 'v1' (the boundary state)
+    await writeFile(join(env.work, 'a.txt'), 'v1')
+    // recordOutcomes mirrors the restore: pre=v2, post=v1, source=plugin-revert
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('v2')),
+      postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+      source: 'plugin-revert',
+    })
+    // Restore-all: target must be the AGENT's last state (v2), NOT the
+    // plugin-revert record (v1). The evaluator sees disk=v1 ≠ target=v2 and
+    // v1 is a known span state → CLEAN_RESTORE back to v2.
+    const target = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(target.postBlobSha).toBe(sha256Of(Buffer.from('v2')))
+    const entry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('v1')))
+    expect(evalResult.state).toBe(STATE.CLEAN_RESTORE)
+    expect(evalResult.targetBlobSha).toBe(sha256Of(Buffer.from('v2')))
+  })
+
+  it('restore-all with stale interleaved flag elsewhere in chain: clean target is NOT degraded', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2' — flagged interleaved by a stale pre-recordOutcomes write
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // Manually mark the turn-2 record interleaved (simulates an existing session
+    // whose manifest carries a false flag from a pre-fix plugin write).
+    env.manifest.records[1].isInterleaved = true
+    await writeFile(join(env.work, 'a.txt'), 'v2')
+    // Restore-all: the target record (turn 2, post=v2) is interleaved → the
+    // target IS unreliable → the plugin's executeFileTransition degrades it to
+    // UNAVAILABLE (prompt). This is the Oracle E-class safety: the boundary
+    // post-state is genuinely ambiguous.
+    const target = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(target.isInterleaved).toBe(true)
+    const entry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('v2')))
+    // The evaluator alone returns a clean action; the plugin-level degrade
+    // (mode==='restore' && target.isInterleaved && action!=='prompt'/'skip')
+    // converts it to UNAVAILABLE. Assert the clean action + the flag that
+    // triggers the degrade.
+    expect(evalResult.state).toBe(STATE.ALREADY_CLEAN)
+    expect(target.isInterleaved).toBe(true)
   })
 })

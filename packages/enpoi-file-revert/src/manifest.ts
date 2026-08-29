@@ -21,6 +21,13 @@ export interface FileMutationRecord {
   postBlobSha: string | null
   isInterleaved: boolean
   timestamp: number
+  /** Who authored this disk state: 'agent' (edit/write tool), 'user-kept'
+   *  (operator chose Keep My Version), or 'plugin-revert' (the plugin's own
+   *  restore/trash/recreate write). Plugin-revert records keep the mutation
+   *  chain consistent (no false interleaved flags) but are excluded from the
+   *  restore-all target — restoring must return to the agent's/user's state,
+   *  not the plugin's intermediate write. */
+  source?: 'agent' | 'user-kept' | 'plugin-revert'
 }
 
 export interface SpanEntry {
@@ -131,19 +138,31 @@ export class MutationManifest {
   } {
     const sessionCreated = this.isSessionCreated(targetKey)
     if (restoreSeq === null) {
-      // Restore-all: target = final post-state of the whole span.
+      // Restore-all: target = final post-state of the whole span, EXCLUDING
+      // the plugin's own revert writes (source 'plugin-revert') — restoring
+      // must return to the agent's/user's state, not the plugin's
+      // intermediate write. A user-kept record IS the user's chosen state and
+      // stays the target (restore-all after Keep no-ops).
       const spanRecs = this.records.filter(r => r.targetKey === targetKey)
       if (spanRecs.length === 0) {
         return { preExisted: false, preStatus: 'ok', preBlobSha: null, postBlobSha: null, isInterleaved: false, sessionCreated }
       }
       const earliest = spanRecs.reduce((a, b) => (b.toolSeq < a.toolSeq ? b : a))
-      const latest = spanRecs.reduce((a, b) => (b.toolSeq > a.toolSeq ? b : a))
+      const userRecs = spanRecs.filter(r => r.source !== 'plugin-revert')
+      const latest = (userRecs.length > 0 ? userRecs : spanRecs).reduce((a, b) => (b.toolSeq > a.toolSeq ? b : a))
+      // The target record (latest non-plugin) and its immediate successor
+      // define reliability — a stale interleaved flag elsewhere must not
+      // degrade a clean restore-all target.
+      const latestIdx = spanRecs.indexOf(latest)
+      const successor = spanRecs[latestIdx + 1]
+      const targetInterleaved = latest.isInterleaved
+        || (successor !== undefined && successor.isInterleaved)
       return {
         preExisted: earliest.preExisted,
         preStatus: earliest.preStatus,
         preBlobSha: earliest.preBlobSha,
         postBlobSha: latest.postBlobSha,
-        isInterleaved: spanRecs.some(r => r.isInterleaved),
+        isInterleaved: targetInterleaved,
         sessionCreated,
       }
     }
@@ -166,15 +185,21 @@ export class MutationManifest {
     const earliestSpan = this.records.filter(r => r.targetKey === targetKey).reduce((a, b) => (b.toolSeq < a.toolSeq ? b : a))
     const latest = recs.reduce((a, b) => (b.toolSeq > a.toolSeq ? b : a))
     // Interleaving guard: refuse mid-span restore points inside the interleaved
-    // region — both the boundary record and its successor are unreliable.
-    const chainInterleaved = recs.some(r => r.isInterleaved)
-      || this.records.some(r => r.targetKey === targetKey && r.toolSeq > restoreSeq && r.isInterleaved)
+    // region — the TARGET record (whose postBlobSha defines the boundary state)
+    // and its immediate successor are unreliable. A stale interleaved flag
+    // elsewhere in the chain (e.g. from a pre-recordOutcomes plugin write) must
+    // not degrade a clean target.
+    const successor = this.records
+      .filter(r => r.targetKey === targetKey && r.toolSeq > restoreSeq)
+      .sort((a, b) => a.toolSeq - b.toolSeq)[0]
+    const targetInterleaved = latest.isInterleaved
+      || (successor !== undefined && successor.isInterleaved)
     return {
       preExisted: earliestSpan.preExisted,
       preStatus: earliestSpan.preStatus,
       preBlobSha: earliestSpan.preBlobSha,
       postBlobSha: latest.postBlobSha,
-      isInterleaved: chainInterleaved,
+      isInterleaved: targetInterleaved,
       sessionCreated,
     }
   }
