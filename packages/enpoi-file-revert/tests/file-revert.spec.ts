@@ -903,4 +903,30 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     expect(evalResult.state).toBe(STATE.ALREADY_CLEAN)
     expect(target.isInterleaved).toBe(true)
   })
+
+  it('manifest init heals null/null records and recomputes stale interleaved flags', async () => {
+    // Write a manifest with a null/null record (pre-fix trash outcome) that
+    // corrupts the chain, plus a stale interleaved flag on a later record.
+    const v1 = sha256Of(Buffer.from('v1'))
+    const v2 = sha256Of(Buffer.from('v2'))
+    const lines = [
+      JSON.stringify({ sessionId: 's1', toolSeq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'create', preExisted: false, preStatus: 'ok', preBlobSha: null, postStatus: 'ok', postBlobSha: v1, isInterleaved: false, timestamp: 1 }),
+      JSON.stringify({ sessionId: 's1', toolSeq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update', preExisted: true, preStatus: 'ok', preBlobSha: v1, postStatus: 'ok', postBlobSha: v2, isInterleaved: false, timestamp: 2 }),
+      // Corrupt null/null record (pre-fix trash outcome)
+      JSON.stringify({ sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-x', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update', preExisted: true, preStatus: 'ok', preBlobSha: null, postStatus: 'ok', postBlobSha: null, isInterleaved: true, timestamp: 3, source: 'plugin-revert' }),
+      // Later agent edit whose pre (v2) matches the pre-null chain — its stale
+      // interleaved flag (computed against the null record) must be recomputed
+      // to false.
+      JSON.stringify({ sessionId: 's1', toolSeq: 30, callId: 'c3', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update', preExisted: true, preStatus: 'ok', preBlobSha: v2, postStatus: 'ok', postBlobSha: v1, isInterleaved: true, timestamp: 4 }),
+    ]
+    await writeFile(join(env.root, 'manifest.jsonl'), lines.join('\n') + '\n')
+    const healed = new MutationManifest(join(env.root, 'manifest.jsonl'))
+    await healed.ready // constructor already runs init()
+    expect(healed.records.length).toBe(3) // null/null dropped
+    expect(healed.records[2].isInterleaved).toBe(false) // recomputed clean
+    // Restore-all target = the latest record (post=v1), not interleaved.
+    const target = healed.resolveRestoreTarget('a.txt', null)
+    expect(target.isInterleaved).toBe(false)
+    expect(target.postBlobSha).toBe(v1)
+  })
 })

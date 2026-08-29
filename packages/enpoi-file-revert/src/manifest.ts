@@ -56,12 +56,28 @@ export class MutationManifest {
         const line = lines[i]
         if (line.length === 0) continue
         try {
-          this.records.push(JSON.parse(line) as FileMutationRecord)
+          const record = JSON.parse(line) as FileMutationRecord
+          // Heal corrupt null/null records (pre-fix trash outcomes wrote
+          // pre=null, post=null, which corrupted the chain and flagged every
+          // later record interleaved). A null/null record represents no state.
+          if (record.preBlobSha === null && record.postBlobSha === null) continue
+          this.records.push(record)
         } catch {
           // Torn trailing line from a crash mid-append: drop it.
           // Corruption anywhere else hard-fails.
           if (i !== lines.length - 1) throw new Error(`corrupt manifest line ${i + 1}`)
         }
+      }
+      // Recompute isInterleaved flags: they were computed against the dropped
+      // null records (or pre-recordOutcomes plugin writes), so stale flags
+      // would degrade clean targets. The chain itself is the truth: a record
+      // is interleaved iff its pre-state differs from the prior record's
+      // post-state for the same targetKey.
+      const lastPost = new Map<string, string | null>()
+      for (const record of this.records) {
+        const prior = lastPost.get(record.targetKey)
+        record.isInterleaved = prior !== undefined && prior !== record.preBlobSha
+        lastPost.set(record.targetKey, record.postBlobSha)
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
