@@ -195,7 +195,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
       resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     }
     try {
-      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor)
+      const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor, manifestFor)
       diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`)
       return { accepted: true as const, ...outcome }
     } catch (err) {
@@ -391,6 +391,7 @@ async function applyConflictResolution(
   executorFor: (id: string) => RevertExecutor,
   _blobStore: BlobStore,
   stateFor: (session: Session) => SessionRevertState,
+  manifestFor: (id: string) => MutationManifest,
 ): Promise<{ outcome?: unknown }> {
   const executor = executorFor(request.sessionId)
   const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
@@ -494,6 +495,36 @@ async function applyConflictResolution(
     writeDisk: async (path: string, bytes: Buffer) => executor.atomicWrite(path, bytes),
     trashFile: async (path: string) => executor.trash(path, request.sessionId),
   })
+
+  // Keep: record the kept disk state as a known mutation so a later restore
+  // (or another revert) does not re-flag the same manual edit as a conflict.
+  // The record is a no-op transition (pre === post === current disk) that the
+  // evaluator's isKnownSpanState scan recognizes. Its toolSeq is the highest
+  // possible so restore-all resolves the kept state as the target — a
+  // subsequent restore sees currentSha === targetSha and no-ops instead of
+  // overwriting the user's kept version.
+  if (resolution === 'keep' && conflict.currentSha !== null) {
+    try {
+      const manifest = manifestFor(request.sessionId)
+      await manifest.append({
+        sessionId: request.sessionId,
+        toolSeq: Number.MAX_SAFE_INTEGER - 1,
+        callId: `keep-${request.conflictId}`,
+        targetKey: conflict.targetKey,
+        displayPath: conflict.targetKey,
+        operation: 'update',
+        preExisted: true,
+        preStatus: 'ok',
+        preBlobSha: conflict.currentSha,
+        postStatus: 'ok',
+        postBlobSha: conflict.currentSha,
+        isInterleaved: false,
+        timestamp: Date.now(),
+      })
+    } catch (err) {
+      diag(`keep: failed to record kept state for ${conflict.targetKey}: ${String(err)}`)
+    }
+  }
 
   // Mirror the resolution into the session log so the client can close the modal.
   appendIgnorable(session, 'revert/file-result', {

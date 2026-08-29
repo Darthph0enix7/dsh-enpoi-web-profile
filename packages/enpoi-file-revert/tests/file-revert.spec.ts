@@ -589,6 +589,30 @@ describe('applyResolution', () => {
     expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
   })
 
+  it('keep then restore-all: kept state becomes the target — restore no-ops, no conflict reappears', async () => {
+    await writeFile(join(env.work, 'a.txt'), 'original')
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    const manualSha = sha256Of(Buffer.from('user manual edit'))
+
+    // Keep: record the kept state as a known mutation with the highest toolSeq
+    // (mirrors applyConflictResolution's keep branch).
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'keep-c1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: manualSha,
+      postStatus: 'ok', postBlobSha: manualSha, isInterleaved: false, timestamp: Date.now(),
+    })
+
+    // Restore-all: the kept record is the latest → target = kept state →
+    // currentSha === targetSha → ALREADY_CLEAN (no-op), no conflict.
+    const target = env.manifest.resolveRestoreTarget('a.txt', null)
+    const entry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('user manual edit')))
+    expect(evalResult.state).toBe(STATE.ALREADY_CLEAN)
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+  })
+
   it('recreate: missing file recreated from pre-agent snapshot', async () => {
     await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
     await rm(join(env.work, 'a.txt'))
