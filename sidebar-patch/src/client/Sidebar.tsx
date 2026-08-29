@@ -140,26 +140,6 @@ function buildNewTabOptions(state: SidebarState, ctx: Context, scope: SessionSco
 export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   const { ctx, store } = props
 
-  // In-harness file open from chat/file mentions: when headless server has no
-  // native opener, chat dispatches 'dsh-open-file' — open in the Files editor
-  // even if the panel is collapsed or another tab is active.
-  useEffect(() => {
-    const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<{ path?: string; sessionId?: string }>).detail
-      if (!detail?.path) return
-      // Use the event's sessionId or the current session.
-      const targetSession = detail.sessionId ?? sessionId
-      if (targetSession === undefined) return
-      // Ensure the right panel is open and Files is visible.
-      store.reduce(s => s.panelOpen ? s : togglePanel(s))
-      // Activate Files tab so the editor is visible even if another tab was active.
-      ctx.betterSidebar?.openTab({ type: 'editor', title: t('files') || 'Files' })
-      try { openSidebarFile(ctx, store, targetSession, detail.path) } catch {}
-    }
-    window.addEventListener('dsh-open-file', handler as EventListener)
-    return () => { window.removeEventListener('dsh-open-file', handler as EventListener) }
-  }, [ctx, store, sessionId])
-
   // Copy freshness: re-render the whole tree when the DSH locale switches.
   // The module-level t() reads the active locale at call time, so a root
   // re-render alone re-localizes every panel (no memo barriers below).
@@ -229,6 +209,23 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   const state = snapshot.state
   const sessionId = snapshot.sessionId
   const summaryCwd = sessionId === undefined ? undefined : sessionList.byId[sessionId]?.cwd
+
+  // In-harness file open from chat/file mentions: when headless server has no
+  // native opener, chat dispatches 'dsh-open-file' — open in the Files editor
+  // even if the panel is collapsed or another tab is active.
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ path?: string; sessionId?: string }>).detail
+      if (!detail?.path) return
+      const targetSession = detail.sessionId ?? sessionId
+      if (targetSession === undefined) return
+      store.reduce(s => s.panelOpen ? s : togglePanel(s))
+      ctx.betterSidebar?.openTab({ type: 'editor', title: t('files') || 'Files' })
+      try { openSidebarFile(ctx, store, targetSession, detail.path) } catch {}
+    }
+    window.addEventListener('dsh-open-file', handler as EventListener)
+    return () => { window.removeEventListener('dsh-open-file', handler as EventListener) }
+  }, [ctx, store, sessionId])
 
   // The collapsed toggle cluster reclaims the top-right corner, so the DSH
   // session header's right-aligned utilities (the "Session log" download
