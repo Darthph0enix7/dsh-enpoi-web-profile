@@ -41,8 +41,6 @@ var FsOpsError = class extends Error {
     this.code = code;
     this.status = status;
   }
-  code;
-  status;
 };
 function requireString(payload, key) {
   const record = payload;

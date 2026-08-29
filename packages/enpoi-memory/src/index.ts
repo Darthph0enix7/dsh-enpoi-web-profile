@@ -12,6 +12,10 @@ import { makePipeline } from './pipeline'
 import { buildMemoryBlock } from './retriever'
 import { registerMemoryTools } from './tools'
 
+/** Shared DB/pipeline access for sibling plugins (keeper, dispatcher, CLI). */
+export { openMemoryDb } from './db'
+export { makePipeline } from './pipeline'
+
 const LOG_DIR = join(process.env.HOME ?? '', '.dsh', 'logs')
 function diag(line: string): void {
   try {

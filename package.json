@@ -21,7 +21,8 @@
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "esbuild": "^0.25.0"
   },
   "dsh": {
     "profile": {
@@ -42,5 +43,10 @@
         "dsh-enpoi-fs-ops"
       ]
     }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

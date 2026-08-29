@@ -12,12 +12,13 @@
   },
   "dependencies": {
     "dsh-enpoi-contracts": "workspace:*",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "dsh-enpoi-memory": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-timeout": "^0.1.0-rc.8"
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-timeout": "workspace:*"
   },
   "dsh": {
     "bundle": {

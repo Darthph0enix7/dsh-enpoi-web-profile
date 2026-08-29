@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/cosmokit/lib/index.cjs
+// ../../node_modules/cosmokit/lib/index.cjs
 var require_lib = __commonJS({
-  "node_modules/cosmokit/lib/index.cjs"(exports, module) {
+  "../../node_modules/cosmokit/lib/index.cjs"(exports, module) {
     "use strict";
     var __defProp2 = Object.defineProperty;
     var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
@@ -397,9 +397,9 @@ var require_lib = __commonJS({
   }
 });
 
-// node_modules/schemastery/lib/index.cjs
+// ../../node_modules/schemastery/lib/index.cjs
 var require_lib2 = __commonJS({
-  "node_modules/schemastery/lib/index.cjs"(exports, module) {
+  "../../node_modules/schemastery/lib/index.cjs"(exports, module) {
     "use strict";
     var __defProp2 = Object.defineProperty;
     var __name = (target, value) => __defProp2(target, "name", { value, configurable: true });
@@ -1048,14 +1048,14 @@ var require_lib2 = __commonJS({
   }
 });
 
-// packages/enpoi-council/src/index.ts
+// src/index.ts
 var import_schemastery = __toESM(require_lib2(), 1);
 import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 
-// packages/enpoi-council/src/roundtable.ts
+// src/roundtable.ts
 import { getBriefService } from "dsh-enpoi-context-keeper";
 
-// packages/enpoi-council/src/params.ts
+// src/params.ts
 var COUNCIL_PARAM_DEFAULTS = {
   maxDebateTokens: 18e4,
   defaultMaxRounds: 5,
@@ -1091,7 +1091,7 @@ function num(value, fallback, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-// packages/enpoi-council/src/prompts.ts
+// src/prompts.ts
 var SKEPTIC_SYSTEM = `You are the **Skeptic** in a multi-agent dialectic debate (Roundtable).
 
 ## Your Epistemic Stance
@@ -1397,7 +1397,7 @@ Do not compress or lose valuable ideas. Structure your response in rich, product
 `;
 }
 
-// packages/enpoi-council/src/engine.ts
+// src/engine.ts
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -1685,7 +1685,7 @@ async function disposeCouncilFibers(ctx, fibers) {
   }
 }
 
-// packages/enpoi-council/src/stopping.ts
+// src/stopping.ts
 var STOP_WORDS = /* @__PURE__ */ new Set([
   "the",
   "is",
@@ -1835,7 +1835,7 @@ function evaluateStopping(state, criticOutput, currentClaims, thresholds = { con
   };
 }
 
-// packages/enpoi-council/src/roundtable.ts
+// src/roundtable.ts
 var DEBATER_SYSTEMS = {
   Skeptic: SKEPTIC_SYSTEM,
   Architect: ARCHITECT_SYSTEM,
@@ -2039,7 +2039,7 @@ ${allRoundsText}`;
   }
 }
 
-// packages/enpoi-council/src/chorus.ts
+// src/chorus.ts
 import { getBriefService as getBriefService2 } from "dsh-enpoi-context-keeper";
 var CHORUS_SYSTEMS = {
   Visionary: VISIONARY_SYSTEM,
@@ -2207,7 +2207,7 @@ ${allRoundsText}`;
   }
 }
 
-// packages/enpoi-council/src/tools.ts
+// src/tools.ts
 function registerCouncilTools(ctx, root) {
   ctx = root;
   const busyCouncils = /* @__PURE__ */ new Set();
@@ -2354,7 +2354,7 @@ function registerCouncilTools(ctx, root) {
   });
 }
 
-// packages/enpoi-council/src/index.ts
+// src/index.ts
 var name = "enpoi-council";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var ORCH_NS = settingsNamespace("enpoi-orchestration");

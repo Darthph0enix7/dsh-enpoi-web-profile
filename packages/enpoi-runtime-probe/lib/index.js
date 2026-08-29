@@ -1,4 +1,4 @@
-// enpoi-runtime-probe/src/index.ts
+// packages/enpoi-runtime-probe/src/index.ts
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 var name = "enpoi-runtime-probe";

@@ -226,10 +226,10 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
 
 /** Append a custom (plugin-merged) session event with the ignorable envelope. */
 function appendIgnorable(session: Session, type: string, data: unknown): void {
-  const s = session as unknown as {
-    append: (t: string, d: unknown, opts: { ignorable: true }) => void
-  }
-  s.append(type, data, { ignorable: true })
+  // The merged engine dropped the per-event `ignorable` flag: log-only event
+  // types (revert/file-*) are registered in the core SessionEventMap, so a
+  // plain append is surface-ineligible by type.
+  session.append(type as never, data as never)
 }
 
 async function executeFileTransition(

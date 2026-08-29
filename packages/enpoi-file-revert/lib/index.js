@@ -16,7 +16,6 @@ var BlobStore = class {
   constructor(rootDir) {
     this.rootDir = rootDir;
   }
-  rootDir;
   async init() {
     await mkdir(this.rootDir, { recursive: true });
   }
@@ -61,7 +60,6 @@ var MutationManifest = class {
     this.filePath = filePath;
     this.ready = this.init();
   }
-  filePath;
   records = [];
   ready;
   async init() {
@@ -301,7 +299,6 @@ var RevertExecutor = class {
     this.opts = opts;
     this.ready = this.init();
   }
-  opts;
   wal = [];
   ready;
   async init() {
@@ -767,8 +764,7 @@ function apply(ctx, config) {
   });
 }
 function appendIgnorable(session, type, data) {
-  const s = session;
-  s.append(type, data, { ignorable: true });
+  session.append(type, data);
 }
 async function executeFileTransition(ctx, session, oldBoundary, newBoundary, manifestFor, executorFor, _blobStore) {
   const manifest = manifestFor(session.id);

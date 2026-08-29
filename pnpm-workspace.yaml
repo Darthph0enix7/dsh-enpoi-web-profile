@@ -7,5 +7,6 @@ autoInstallPeers: false
 allowBuilds:
   cloudflared: true
   cpu-features: true
+  esbuild: true
   node-pty: true
   ssh2: true

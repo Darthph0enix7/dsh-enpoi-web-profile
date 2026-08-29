@@ -405,5 +405,7 @@ function apply(ctx) {
 export {
   apply,
   inject,
-  name
+  makePipeline,
+  name,
+  openMemoryDb
 };

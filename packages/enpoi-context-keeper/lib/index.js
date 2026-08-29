@@ -1,4 +1,4 @@
-var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : /* @__PURE__ */ Symbol.for("Symbol." + name2);
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
@@ -49,10 +49,12 @@ import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
 
-// packages/enpoi-memory/src/db.ts
+// packages/enpoi-memory/lib/index.js
+import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 var CATEGORIES = ["RULES", "ARCHITECTURE", "CONSTRAINTS", "CONFIG_VALUES", "NAMING", "PROJECT"];
 var KEEPER_ALLOWED = /* @__PURE__ */ new Set(["ARCHITECTURE", "CONFIG_VALUES", "PROJECT"]);
 function memoryDbPath() {
@@ -98,9 +100,6 @@ function openMemoryDb() {
   db.exec(SCHEMA);
   return db;
 }
-
-// packages/enpoi-memory/src/pipeline.ts
-import { createHash } from "node:crypto";
 var FACT_CAP = 400;
 function claimHash(fact, category) {
   return createHash("sha256").update(`${fact}::${category}`).digest("hex").slice(0, 12);
@@ -244,18 +243,19 @@ function makePipeline(db) {
   }
   return { intake, graduate, confirm, rescind, reconcileBoot, list, get, stateOf };
 }
+var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 
 // packages/enpoi-context-keeper/src/index.ts
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 import Schema from "schemastery";
 var name = "enpoi-context-keeper";
 var inject = ["llm"];
 function diag(line) {
   try {
     const home = process.env.DSH_HOME ?? process.env.HOME ?? "/tmp";
-    const dir = join2(home.endsWith(".dsh") ? home : join2(home, ".dsh"), "logs");
+    const dir = join3(home.endsWith(".dsh") ? home : join3(home, ".dsh"), "logs");
     mkdirSync(dir, { recursive: true });
-    appendFileSync(join2(dir, "enpoi-keeper.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+    appendFileSync(join3(dir, "enpoi-keeper.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
   }
@@ -398,6 +398,8 @@ var BriefService = class {
     this.ctx = ctx;
     this.config = config;
   }
+  ctx;
+  config;
   cache = /* @__PURE__ */ new Map();
   /**
    * Materialize (or reuse) the session's prose brief.
