@@ -89,3 +89,31 @@ Headless Playwright probes (chromium binary at
 post-release monotonic check), `probe-behavior.mjs` (activity rail +
 terminal strip), `probe-bottom.mjs` / `probe-bottom2.mjs` (bottom panel
 toggle/squeeze/drag with right panel open/closed).
+
+## Fresh install on a new device
+
+1. **Harness fork** (our engine + UI + orchestration core):
+   ```bash
+   git clone -b local/serverlocal https://github.com/Darthph0enix7/deepseek-harness ~/deepseek-harness
+   cd ~/deepseek-harness && pnpm install && pnpm run build:lib && pnpm run build:web
+   ```
+2. **Profile** (our plugins + sidebar patches — this repo):
+   ```bash
+   git clone https://github.com/Darthph0enix7/dsh-enpoi-web-profile ~/dotfiles/dsh-dotfiles
+   mkdir -p ~/.dsh/profiles/web
+   cp -r ~/dotfiles/dsh-dotfiles/{packages,sidebar-patch,cordis.patch.yml,cordis.yml,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,vitest.config.ts,rebuild-sidebar.sh} ~/.dsh/profiles/web/
+   cd ~/.dsh/profiles/web && pnpm install && bash rebuild-sidebar.sh
+   ```
+3. **Fresh settings** (no providers, no personal config):
+   ```bash
+   cp ~/dotfiles/dsh-dotfiles/fresh-settings.yaml ~/.dsh/settings.yaml
+   ```
+4. **Presets + skills** (our agent personas + skills):
+   ```bash
+   cp -r ~/dotfiles/dsh-dotfiles/presets ~/.dsh/.agent-presets
+   cp -r ~/dotfiles/dsh-dotfiles/skills ~/.dsh/skills
+   ```
+5. **ds CLI**: `cp ~/dotfiles/dsh-dotfiles/fish/ds.fish ~/.config/fish/functions/`
+6. Configure your own providers in Settings → Models, then `ds sync` to create your device patch.
+
+**Personal bits never shared**: `settings.yaml` (providers/personas), `device-patches/`, `fresh-settings.yaml` is the only settings file meant for public use.

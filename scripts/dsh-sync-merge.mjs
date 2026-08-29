@@ -353,12 +353,6 @@ function cmdExtract(localPath, baselinePath, syncLocalPath, outPath) {
   console.log(`extracted: ${outPath}`)
 }
 
-function cmdDevicePresets(syncLocalPath) {
-  const syncLocal = readYaml(syncLocalPath)
-  const list = Array.isArray(syncLocal?.devicePresets) ? syncLocal.devicePresets : []
-  for (const name of list) console.log(String(name))
-}
-
 // ── main ────────────────────────────────────────────────────────────────────
 
 const [cmd, ...args] = process.argv.slice(2)
@@ -374,10 +368,6 @@ switch (cmd) {
   case 'extract':
     if (args.length !== 4) { console.error('usage: extract <local> <baseline> <sync-local> <out>'); process.exit(1) }
     cmdExtract(...args)
-    break
-  case 'device-presets':
-    if (args.length !== 1) { console.error('usage: device-presets <sync-local>'); process.exit(1) }
-    cmdDevicePresets(args[0])
     break
   default:
     console.error('unknown command: ' + cmd)
