@@ -151,6 +151,9 @@ export class MutationManifest {
     postBlobSha: string | null
     isInterleaved: boolean
     sessionCreated: boolean
+    /** The source of the record that defines the target state ('agent',
+     *  'user-kept', 'plugin-revert', or undefined for legacy records). */
+    targetSource?: string
   } {
     const sessionCreated = this.isSessionCreated(targetKey)
     if (restoreSeq === null) {
@@ -180,6 +183,7 @@ export class MutationManifest {
         postBlobSha: latest.postBlobSha,
         isInterleaved: targetInterleaved,
         sessionCreated,
+        targetSource: latest.source,
       }
     }
     const recs = this.upTo(restoreSeq).filter(r => r.targetKey === targetKey)
@@ -217,6 +221,7 @@ export class MutationManifest {
       postBlobSha: latest.postBlobSha,
       isInterleaved: targetInterleaved,
       sessionCreated,
+      targetSource: latest.source,
     }
   }
 

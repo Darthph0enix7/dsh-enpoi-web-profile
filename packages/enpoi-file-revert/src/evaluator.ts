@@ -117,9 +117,12 @@ export function evaluateBoundary(
   // Disk content is safe to transition if it matches ANY agent-authored post-state
   // in the span, or ANY non-interleaved pre-state in the span.
   // Interleaved pre-states are excluded (R2) because they could be user-authored.
+  // user-kept records are excluded from BOTH checks: the kept state is the
+  // operator's chosen version — a later revert over it must prompt (conflict),
+  // never auto-restore over the user's manual edits.
   const isKnownSpanState =
-    entry.records.some(r => r.postBlobSha !== null && r.postBlobSha === currentSha) ||
-    entry.records.some(r => !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha)
+    entry.records.some(r => r.source !== 'user-kept' && r.postBlobSha !== null && r.postBlobSha === currentSha) ||
+    entry.records.some(r => r.source !== 'user-kept' && !r.isInterleaved && r.preBlobSha !== null && r.preBlobSha === currentSha)
 
   if (isKnownSpanState) {
     if (targetAbsent) {

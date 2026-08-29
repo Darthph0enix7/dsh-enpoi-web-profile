@@ -306,7 +306,9 @@ async function executeFileTransition(
     // are never degraded: the plugin's own restore writes used to be
     // unrecorded, which falsely flagged clean revert chains as interleaved
     // ("Snapshot unavailable" on a revert with no manual edits).
-    if (mode === 'restore' && target.isInterleaved && evalResult.action !== 'prompt' && evalResult.action !== 'skip') {
+    // A user-kept target is the operator's explicit choice — reliable by
+    // definition — so restore-all after Keep no-ops instead of degrading.
+    if (mode === 'restore' && target.targetSource !== 'user-kept' && target.isInterleaved && evalResult.action !== 'prompt' && evalResult.action !== 'skip') {
       evalResult = {
         state: STATE.UNAVAILABLE,
         action: 'skip',

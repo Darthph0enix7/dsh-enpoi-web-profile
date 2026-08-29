@@ -929,4 +929,99 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     expect(target.isInterleaved).toBe(false)
     expect(target.postBlobSha).toBe(v1)
   })
+
+  it('permutation: manual edit → revert → Keep → restore-all → revert again must PROMPT (never auto-restore over kept state)', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User manually edits to 'U'
+    const uSha = sha256Of(Buffer.from('user manual edit'))
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    // Revert turn 2 → conflict (U unknown)
+    const { plan } = await buildRevertPlan(env.manifest, 20, readDisk)
+    expect(plan.get('a.txt')!.state).toBe(STATE.CONFLICT)
+    // Keep: record the kept state (source user-kept)
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'keep-c1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: uSha,
+      postStatus: 'ok', postBlobSha: uSha, isInterleaved: false, timestamp: Date.now(),
+      source: 'user-kept',
+    })
+    // Restore-all: target = the kept state (user-kept) → ALREADY_CLEAN no-op,
+    // NOT degraded to UNAVAILABLE.
+    const restoreTarget = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(restoreTarget.targetSource).toBe('user-kept')
+    expect(restoreTarget.postBlobSha).toBe(uSha)
+    const spanEntry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const restoreEval = evaluateBoundary(spanEntry, restoreTarget, uSha)
+    expect(restoreEval.state).toBe(STATE.ALREADY_CLEAN)
+    // Revert again (turn 2): the kept state U must NOT be a known span state —
+    // the evaluator must return CONFLICT (prompt), never auto-restore over U.
+    const { plan: plan2 } = await buildRevertPlan(env.manifest, 20, readDisk)
+    expect(plan2.get('a.txt')!.state).toBe(STATE.CONFLICT)
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+  })
+
+  it('permutation: manual edit → revert → Force Revert → restore-all → revert stays clean (user chose overwrite)', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User manually edits to 'U'
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    // Force Revert (restore): overwrite U with the boundary state v1
+    const { plan } = await buildRevertPlan(env.manifest, 20, readDisk)
+    const conflict = plan.get('a.txt')!
+    await env.executor.applyResolution({
+      sessionId: 's1', revertSeq: 20, targetKey: 'a.txt',
+      resolution: 'restore', targetBlobSha: conflict.targetBlobSha, expectedDiskSha: conflict.expectedDiskSha,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('v1')
+    // recordOutcomes mirrors the restore (source plugin-revert)
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('user manual edit')),
+      postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+      source: 'plugin-revert',
+    })
+    // Restore-all: target = the agent's last state (v2) → disk v1 is known →
+    // CLEAN_RESTORE back to v2.
+    const restoreTarget = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(restoreTarget.postBlobSha).toBe(sha256Of(Buffer.from('v2')))
+    // Revert again: the disk (v1 after Force Revert) is either already at the
+    // target (ALREADY_CLEAN) or a known agent state (CLEAN_RESTORE) — never a
+    // conflict, because the user explicitly chose to overwrite their edit.
+    const { plan: plan2 } = await buildRevertPlan(env.manifest, 20, readDisk)
+    const state2 = plan2.get('a.txt')!.state
+    expect([STATE.ALREADY_CLEAN, STATE.CLEAN_RESTORE]).toContain(state2)
+  })
+
+  it('permutation: manual edit → revert → Save Beside → restore-all → revert must PROMPT (user file untouched)', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User manually edits to 'U'
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    // Save Beside: user file stays at U, snapshot written beside
+    const besidePath = join(env.work, 'a.txt.pre-revert.1234')
+    const { plan } = await buildRevertPlan(env.manifest, 20, readDisk)
+    const conflict = plan.get('a.txt')!
+    await env.executor.applyResolution({
+      sessionId: 's1', targetKey: 'a.txt',
+      resolution: 'recreate', targetBlobSha: conflict.targetBlobSha, expectedDiskSha: conflict.expectedDiskSha,
+      beside: true,
+      resolvePath: async (key: string) => (key === 'a.txt' ? besidePath : key),
+      readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+    // Revert again: disk U is unknown (no record for it) → CONFLICT prompt.
+    const { plan: plan2 } = await buildRevertPlan(env.manifest, 20, readDisk)
+    expect(plan2.get('a.txt')!.state).toBe(STATE.CONFLICT)
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+  })
 })
