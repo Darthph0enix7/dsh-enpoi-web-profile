@@ -22,7 +22,7 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import type { CapabilitiesState } from './types'
-import { KNOWN_CAPABILITIES } from './types'
+import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
 import { evaluateToolCall, formatCapabilitiesSnapshot } from './enforcement'
 
@@ -56,6 +56,28 @@ export function apply(ctx: Context): void {
     return undefined
   })
   ctx.effect(() => disposeGuard, 'enpoi-capabilities: tool guard')
+
+  // 1b. Invariant B1b: Disabled tools are STRIPPED from the model-facing tool
+  // schema entirely (zero token cost, no instruction-following risk). The
+  // system-prompt/assemble waterfall carries the assembled tool list; we
+  // filter out every disabled tool (minus the I15 protected set) so the model
+  // never sees the schema, never attempts the call, and never wastes tokens.
+  // The B1 guard stays as the execution-time backstop for in-flight turns.
+  const disposeAssemble = ctx.on('system-prompt/assemble', (async (_assembly: unknown, _context: unknown, next: () => Promise<unknown>) => {
+    const assembled = (await next()) as { tools?: Array<{ name: string }> }
+    if (!Array.isArray(assembled.tools) || assembled.tools.length === 0) return assembled
+    const state = initialCapabilitiesState(getGlobalDefaults())
+    const disabled = new Set(
+      Object.entries(state.tools)
+        .filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id))
+        .map(([id]) => id),
+    )
+    if (disabled.size === 0) return assembled
+    const kept = assembled.tools.filter(tool => !disabled.has(tool.name))
+    if (kept.length === assembled.tools.length) return assembled
+    return { ...assembled, tools: kept }
+  }) as (...args: unknown[]) => unknown)
+  ctx.effect(() => disposeAssemble, 'enpoi-capabilities: tool schema strip')
 
   // 2. Invariant B3: Dynamic runtime-context snapshot line via native systemPrompt.context seam
   const sysPrompt = ctx.get('systemPrompt') as {

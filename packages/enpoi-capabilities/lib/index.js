@@ -140,6 +140,19 @@ function apply(ctx) {
     return void 0;
   });
   ctx.effect(() => disposeGuard, "enpoi-capabilities: tool guard");
+  const disposeAssemble = ctx.on("system-prompt/assemble", (async (_assembly, _context, next) => {
+    const assembled = await next();
+    if (!Array.isArray(assembled.tools) || assembled.tools.length === 0) return assembled;
+    const state = initialCapabilitiesState(getGlobalDefaults());
+    const disabled = new Set(
+      Object.entries(state.tools).filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id)).map(([id]) => id)
+    );
+    if (disabled.size === 0) return assembled;
+    const kept = assembled.tools.filter((tool) => !disabled.has(tool.name));
+    if (kept.length === assembled.tools.length) return assembled;
+    return { ...assembled, tools: kept };
+  }));
+  ctx.effect(() => disposeAssemble, "enpoi-capabilities: tool schema strip");
   const sysPrompt = ctx.get("systemPrompt");
   if (sysPrompt) {
     const disposeContext = sysPrompt.context({
