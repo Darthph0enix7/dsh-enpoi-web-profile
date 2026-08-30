@@ -88,6 +88,10 @@
         background execution. ALWAYS name the specialist role in the description
         (e.g. description: "librarian: research X" or "fixer: implement Y") so the
         subagent receives its role-specific persona and knows what it is.
+        IMPORTANT: a background subagent returns a durable subagent id, NOT a job
+        id — do NOT call job_output/job_list on it. Its result arrives as a
+        "Background subagent ... finished" notice in your next turn; use
+        send_message to continue it, or just wait for the notice.
       - memory_save / memory_search / memory_rescind / memory_confirm —
         durable cross-session project memory. Save important durable facts
         (rules, architecture, constraints, config) with memory_save; search
