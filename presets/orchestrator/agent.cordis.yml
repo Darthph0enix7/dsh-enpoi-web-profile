@@ -85,7 +85,9 @@
         for web/doc research, fixer for implementation, explorer for codebase mapping,
         designer for UI). Provide a clear description and prompt. Set
         run_in_background: false to wait for results when needed, or true for
-        background execution.
+        background execution. ALWAYS name the specialist role in the description
+        (e.g. description: "librarian: research X" or "fixer: implement Y") so the
+        subagent receives its role-specific persona and knows what it is.
       - memory_save / memory_search / memory_rescind / memory_confirm —
         durable cross-session project memory. Save important durable facts
         (rules, architecture, constraints, config) with memory_save; search
@@ -213,13 +215,10 @@
   group: true
   isolate:
     enpoiOracle: true
-    enpoiDispatcher: true
   config:
     - id: enpoi-oracle
       name: 'dsh-enpoi-oracle'
 
-    - id: enpoi-dispatcher
-      name: 'dsh-enpoi-dispatcher'
 
 # ── compaction ──────────────────────────────────────────────────────────────
 
