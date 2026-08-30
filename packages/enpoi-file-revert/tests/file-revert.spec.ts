@@ -589,6 +589,30 @@ describe('applyResolution', () => {
     expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
   })
 
+  it('keep then restore-all: kept state becomes the target — restore no-ops, no conflict reappears', async () => {
+    await writeFile(join(env.work, 'a.txt'), 'original')
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    const manualSha = sha256Of(Buffer.from('user manual edit'))
+
+    // Keep: record the kept state as a known mutation with the highest toolSeq
+    // (mirrors applyConflictResolution's keep branch).
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'keep-c1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: manualSha,
+      postStatus: 'ok', postBlobSha: manualSha, isInterleaved: false, timestamp: Date.now(),
+    })
+
+    // Restore-all: the kept record is the latest → target = kept state →
+    // currentSha === targetSha → ALREADY_CLEAN (no-op), no conflict.
+    const target = env.manifest.resolveRestoreTarget('a.txt', null)
+    const entry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('user manual edit')))
+    expect(evalResult.state).toBe(STATE.ALREADY_CLEAN)
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+  })
+
   it('recreate: missing file recreated from pre-agent snapshot', async () => {
     await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })
     await rm(join(env.work, 'a.txt'))
@@ -801,5 +825,203 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
     // Pre-agent snapshot written beside
     expect(await readFile(besidePath, 'utf8')).toBe('original')
+  })
+
+  it('revert-then-edit chain: plugin restore recorded in manifest so next agent edit is NOT interleaved', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User reverts turn 2 → plugin restores disk to 'v1' (the boundary state)
+    await writeFile(join(env.work, 'a.txt'), 'v1')
+    // recordOutcomes mirrors the restore: pre=v2, post=v1, source=plugin-revert
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('v2')),
+      postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+      source: 'plugin-revert',
+    })
+    // Turn 3: agent edits 'v1' → 'v3'. Without the restore record this would be
+    // flagged interleaved (prior post=v2 ≠ pre=v1). With it, the chain matches.
+    await simulateMutation({ seq: 30, callId: 'c3', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v3') })
+    await writeFile(join(env.work, 'a.txt'), 'v3')
+    // Revert turn 3 → clean restore to 'v1', NOT a spurious conflict.
+    const { plan } = await buildRevertPlan(env.manifest, 30, readDisk)
+    const entry = plan.get('a.txt')!
+    expect(entry.state).toBe(STATE.CLEAN_RESTORE)
+    expect(entry.action).toBe('restore')
+  })
+
+  it('revert then restore-all: restore returns to the AGENT state, not the plugin write', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User reverts turn 2 → plugin restores disk to 'v1' (the boundary state)
+    await writeFile(join(env.work, 'a.txt'), 'v1')
+    // recordOutcomes mirrors the restore: pre=v2, post=v1, source=plugin-revert
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('v2')),
+      postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+      source: 'plugin-revert',
+    })
+    // Restore-all: target must be the AGENT's last state (v2), NOT the
+    // plugin-revert record (v1). The evaluator sees disk=v1 ≠ target=v2 and
+    // v1 is a known span state → CLEAN_RESTORE back to v2.
+    const target = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(target.postBlobSha).toBe(sha256Of(Buffer.from('v2')))
+    const entry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('v1')))
+    expect(evalResult.state).toBe(STATE.CLEAN_RESTORE)
+    expect(evalResult.targetBlobSha).toBe(sha256Of(Buffer.from('v2')))
+  })
+
+  it('restore-all with stale interleaved flag elsewhere in chain: clean target is NOT degraded', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2' — flagged interleaved by a stale pre-recordOutcomes write
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // Manually mark the turn-2 record interleaved (simulates an existing session
+    // whose manifest carries a false flag from a pre-fix plugin write).
+    env.manifest.records[1].isInterleaved = true
+    await writeFile(join(env.work, 'a.txt'), 'v2')
+    // Restore-all: the target record (turn 2, post=v2) is interleaved → the
+    // target IS unreliable → the plugin's executeFileTransition degrades it to
+    // UNAVAILABLE (prompt). This is the Oracle E-class safety: the boundary
+    // post-state is genuinely ambiguous.
+    const target = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(target.isInterleaved).toBe(true)
+    const entry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('v2')))
+    // The evaluator alone returns a clean action; the plugin-level degrade
+    // (mode==='restore' && target.isInterleaved && action!=='prompt'/'skip')
+    // converts it to UNAVAILABLE. Assert the clean action + the flag that
+    // triggers the degrade.
+    expect(evalResult.state).toBe(STATE.ALREADY_CLEAN)
+    expect(target.isInterleaved).toBe(true)
+  })
+
+  it('manifest init heals null/null records and recomputes stale interleaved flags', async () => {
+    // Write a manifest with a null/null record (pre-fix trash outcome) that
+    // corrupts the chain, plus a stale interleaved flag on a later record.
+    const v1 = sha256Of(Buffer.from('v1'))
+    const v2 = sha256Of(Buffer.from('v2'))
+    const lines = [
+      JSON.stringify({ sessionId: 's1', toolSeq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'create', preExisted: false, preStatus: 'ok', preBlobSha: null, postStatus: 'ok', postBlobSha: v1, isInterleaved: false, timestamp: 1 }),
+      JSON.stringify({ sessionId: 's1', toolSeq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update', preExisted: true, preStatus: 'ok', preBlobSha: v1, postStatus: 'ok', postBlobSha: v2, isInterleaved: false, timestamp: 2 }),
+      // Corrupt null/null record (pre-fix trash outcome)
+      JSON.stringify({ sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-x', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update', preExisted: true, preStatus: 'ok', preBlobSha: null, postStatus: 'ok', postBlobSha: null, isInterleaved: true, timestamp: 3, source: 'plugin-revert' }),
+      // Later agent edit whose pre (v2) matches the pre-null chain — its stale
+      // interleaved flag (computed against the null record) must be recomputed
+      // to false.
+      JSON.stringify({ sessionId: 's1', toolSeq: 30, callId: 'c3', targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update', preExisted: true, preStatus: 'ok', preBlobSha: v2, postStatus: 'ok', postBlobSha: v1, isInterleaved: true, timestamp: 4 }),
+    ]
+    await writeFile(join(env.root, 'manifest.jsonl'), lines.join('\n') + '\n')
+    const healed = new MutationManifest(join(env.root, 'manifest.jsonl'))
+    await healed.ready // constructor already runs init()
+    expect(healed.records.length).toBe(3) // null/null dropped
+    expect(healed.records[2].isInterleaved).toBe(false) // recomputed clean
+    // Restore-all target = the latest record (post=v1), not interleaved.
+    const target = healed.resolveRestoreTarget('a.txt', null)
+    expect(target.isInterleaved).toBe(false)
+    expect(target.postBlobSha).toBe(v1)
+  })
+
+  it('permutation: manual edit → revert → Keep → restore-all → revert again must PROMPT (never auto-restore over kept state)', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User manually edits to 'U'
+    const uSha = sha256Of(Buffer.from('user manual edit'))
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    // Revert turn 2 → conflict (U unknown)
+    const { plan } = await buildRevertPlan(env.manifest, 20, readDisk)
+    expect(plan.get('a.txt')!.state).toBe(STATE.CONFLICT)
+    // Keep: record the kept state (source user-kept)
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'keep-c1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: uSha,
+      postStatus: 'ok', postBlobSha: uSha, isInterleaved: false, timestamp: Date.now(),
+      source: 'user-kept',
+    })
+    // Restore-all: target = the kept state (user-kept) → ALREADY_CLEAN no-op,
+    // NOT degraded to UNAVAILABLE.
+    const restoreTarget = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(restoreTarget.targetSource).toBe('user-kept')
+    expect(restoreTarget.postBlobSha).toBe(uSha)
+    const spanEntry = env.manifest.aggregateSpan(10).get('a.txt')!
+    const restoreEval = evaluateBoundary(spanEntry, restoreTarget, uSha)
+    expect(restoreEval.state).toBe(STATE.ALREADY_CLEAN)
+    // Revert again (turn 2): the kept state U must NOT be a known span state —
+    // the evaluator must return CONFLICT (prompt), never auto-restore over U.
+    const { plan: plan2 } = await buildRevertPlan(env.manifest, 20, readDisk)
+    expect(plan2.get('a.txt')!.state).toBe(STATE.CONFLICT)
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+  })
+
+  it('permutation: manual edit → revert → Force Revert → restore-all → revert stays clean (user chose overwrite)', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User manually edits to 'U'
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    // Force Revert (restore): overwrite U with the boundary state v1
+    const { plan } = await buildRevertPlan(env.manifest, 20, readDisk)
+    const conflict = plan.get('a.txt')!
+    await env.executor.applyResolution({
+      sessionId: 's1', revertSeq: 20, targetKey: 'a.txt',
+      resolution: 'restore', targetBlobSha: conflict.targetBlobSha, expectedDiskSha: conflict.expectedDiskSha,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('v1')
+    // recordOutcomes mirrors the restore (source plugin-revert)
+    await env.manifest.append({
+      sessionId: 's1', toolSeq: Number.MAX_SAFE_INTEGER - 1, callId: 'revert-1',
+      targetKey: 'a.txt', displayPath: 'a.txt', operation: 'update',
+      preExisted: true, preStatus: 'ok', preBlobSha: sha256Of(Buffer.from('user manual edit')),
+      postStatus: 'ok', postBlobSha: sha256Of(Buffer.from('v1')), isInterleaved: false, timestamp: Date.now(),
+      source: 'plugin-revert',
+    })
+    // Restore-all: target = the agent's last state (v2) → disk v1 is known →
+    // CLEAN_RESTORE back to v2.
+    const restoreTarget = env.manifest.resolveRestoreTarget('a.txt', null)
+    expect(restoreTarget.postBlobSha).toBe(sha256Of(Buffer.from('v2')))
+    // Revert again: the disk (v1 after Force Revert) is either already at the
+    // target (ALREADY_CLEAN) or a known agent state (CLEAN_RESTORE) — never a
+    // conflict, because the user explicitly chose to overwrite their edit.
+    const { plan: plan2 } = await buildRevertPlan(env.manifest, 20, readDisk)
+    const state2 = plan2.get('a.txt')!.state
+    expect([STATE.ALREADY_CLEAN, STATE.CLEAN_RESTORE]).toContain(state2)
+  })
+
+  it('permutation: manual edit → revert → Save Beside → restore-all → revert must PROMPT (user file untouched)', async () => {
+    // Turn 1: agent creates a.txt with 'v1'
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: null, postBytes: Buffer.from('v1') })
+    // Turn 2: agent edits to 'v2'
+    await simulateMutation({ seq: 20, callId: 'c2', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('v1'), postBytes: Buffer.from('v2') })
+    // User manually edits to 'U'
+    await writeFile(join(env.work, 'a.txt'), 'user manual edit')
+    // Save Beside: user file stays at U, snapshot written beside
+    const besidePath = join(env.work, 'a.txt.pre-revert.1234')
+    const { plan } = await buildRevertPlan(env.manifest, 20, readDisk)
+    const conflict = plan.get('a.txt')!
+    await env.executor.applyResolution({
+      sessionId: 's1', targetKey: 'a.txt',
+      resolution: 'recreate', targetBlobSha: conflict.targetBlobSha, expectedDiskSha: conflict.expectedDiskSha,
+      beside: true,
+      resolvePath: async (key: string) => (key === 'a.txt' ? besidePath : key),
+      readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
+    // Revert again: disk U is unknown (no record for it) → CONFLICT prompt.
+    const { plan: plan2 } = await buildRevertPlan(env.manifest, 20, readDisk)
+    expect(plan2.get('a.txt')!.state).toBe(STATE.CONFLICT)
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('user manual edit')
   })
 })

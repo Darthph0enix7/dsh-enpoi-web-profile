@@ -1,4 +1,4 @@
-// packages/enpoi-provider-sync/src/index.ts
+// src/index.ts
 import { readFileSync, existsSync } from "node:fs";
 import Schema from "schemastery";
 import { settingsNamespace } from "@deepseek-ai/dsh-settings";
@@ -58,7 +58,7 @@ function resolveFromModelsDev(route, modelId) {
   const db = loadModelsDev();
   const cleanId = modelId.toLowerCase().trim();
   const SUFFIXES = ["-thinking", "-tiered", "-preview", "-exp", "-high", "-low", "-medium", "-agent", "-latest", "-image"];
-  const candidates = [cleanId];
+  const candidates = [modelId, cleanId];
   let base = cleanId;
   for (const suffix of SUFFIXES) {
     if (base.endsWith(suffix)) {
@@ -196,8 +196,8 @@ function enrichModel(route, model, fallback) {
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens;
   const prefixContext = fallback?.matched === "prefix" ? fallback.contextWindow : void 0;
   const prefixMax = fallback?.matched === "prefix" ? fallback.maxTokens : void 0;
-  const contextWindow = model.contextWindow ?? prefixContext ?? devContext ?? cat?.contextWindow ?? fallback?.contextWindow ?? 262144;
-  const maxTokens = prefixMax ?? devMax ?? cat?.maxTokens ?? fallback?.maxTokens ?? 32768;
+  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262144;
+  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32768;
   const inputModalities = detectModalities(model.id, mDev, cat);
   const isReasoning = isReasoningModel(model.id, mDev, cat);
   let reasoningEfforts;

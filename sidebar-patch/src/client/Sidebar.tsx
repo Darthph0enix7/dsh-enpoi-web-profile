@@ -53,6 +53,7 @@ import { detectNewDirectSubagent } from './subagent-detect.ts'
 import { detectNewJob } from './subagent-jobs.ts'
 import { t } from './locales.ts'
 import { api, type SessionScope } from './api.ts'
+import { openSidebarFile } from './intercept.tsx'
 import css from './sidebar.module.css'
 
 /** Width of the vertical activity rail the right panel floats next to. */
@@ -208,6 +209,40 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   const state = snapshot.state
   const sessionId = snapshot.sessionId
   const summaryCwd = sessionId === undefined ? undefined : sessionList.byId[sessionId]?.cwd
+
+  // Revert WAL events (enpoi-file-revert): disk may have changed without an fsOp call.
+  // Bump fsChangedTick so EditorHost auto-reloads and TreePanel refreshes.
+  useEffect(() => {
+    if (sessionId === undefined) return
+    const on = (ctx as unknown as { on?: (event: string, handler: (session: unknown, ev: unknown) => void) => () => void }).on
+    if (typeof on !== 'function') return
+    const off = on.call(ctx, 'session/event', (session: unknown, ev: unknown) => {
+      const sid = (session as { id?: string })?.id
+      if (sid !== undefined && sid !== sessionId) return
+      const type = (ev as { type?: string })?.type ?? ''
+      if (type.startsWith('revert/')) {
+        setFsChangedTick(tick => tick + 1)
+      }
+    })
+    return () => { try { (off as unknown as () => void)?.() } catch {} }
+  }, [ctx, sessionId])
+
+  // In-harness file open from chat/file mentions: when headless server has no
+  // native opener, chat dispatches 'dsh-open-file' — open in the Files editor
+  // even if the panel is collapsed or another tab is active.
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ path?: string; sessionId?: string }>).detail
+      if (!detail?.path) return
+      const targetSession = detail.sessionId ?? sessionId
+      if (targetSession === undefined) return
+      store.reduce(s => s.panelOpen ? s : togglePanel(s))
+      ctx.betterSidebar?.openTab({ type: 'editor', title: t('files') || 'Files' })
+      try { openSidebarFile(ctx, store, targetSession, detail.path) } catch {}
+    }
+    window.addEventListener('dsh-open-file', handler as EventListener)
+    return () => { window.removeEventListener('dsh-open-file', handler as EventListener) }
+  }, [ctx, store, sessionId])
 
   // The collapsed toggle cluster reclaims the top-right corner, so the DSH
   // session header's right-aligned utilities (the "Session log" download

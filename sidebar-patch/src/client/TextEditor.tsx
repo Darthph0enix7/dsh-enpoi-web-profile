@@ -100,6 +100,14 @@ export function TextEditor(props: FileViewerProps) {
   const popupRef = useRef<SelectionPopup | null>(null)
   /** The markdown preview container (selection-containment + line lookup). */
   const mdRef = useRef<HTMLDivElement>(null)
+  /** External-change banner: true when disk changed while dirty (no auto-replace). */
+  const [externalChange, setExternalChange] = useState(false)
+  const [pendingContent, setPendingContent] = useState<string | null>(null)
+  const lastStatRef = useRef<{ mtimeMs: number; size: number } | null>(null)
+  const dirtyRef = useRef(false)
+  dirtyRef.current = dirty
+  const contentRef = useRef(content)
+  contentRef.current = content
 
   const hidePopup = (): void => {
     popupRef.current = null
@@ -134,6 +142,9 @@ export function TextEditor(props: FileViewerProps) {
     setDirty(false)
     setSaveState('idle')
     hidePopup()
+    setExternalChange(false)
+    setPendingContent(null)
+    lastStatRef.current = null
   }, [content])
 
   // Create the CodeMirror editor once the content is loaded. The view owns
@@ -260,55 +271,81 @@ export function TextEditor(props: FileViewerProps) {
     view.dispatch({ effects: wrapComp.reconfigure(next ? CodeMirrorView.lineWrapping : []) })
   }
 
-  // External change detection: while the tab is visible, NOT dirty, and the
-  // document is focused (active tab), poll fs.stat every 2s; on mtime/size
-  // delta, re-read and compare content before swapping (an mtime touch with
-  // identical content never clobbers cursor/scroll). No auto-save of edits.
+  // External change detection: polls fs.stat every 1s while visible (no focus gate).
+  // When disk changes and editor is clean, auto-swap in place (preserve undo);
+  // when dirty, show a banner with Reload instead of clobbering the draft.
+  // Truncated files still poll and show the banner (they cannot auto-swap safely
+  // without a full reload, so the banner triggers a reload via EditorHost).
   useEffect(() => {
-    if (content === undefined || truncated === true) return
-    let lastStat: { mtimeMs: number; size: number } | null = null
+    if (content === undefined) return
     let cancelled = false
     const tick = async (): Promise<void> => {
       if (cancelled) return
       if (document.visibilityState !== 'visible') return
-      if (dirtyRef.current) return
-      if (!document.hasFocus()) return
       try {
         const info = await api.fsStat(scope, path)
         if (cancelled) return
-        if (lastStat !== null && (info.mtimeMs !== lastStat.mtimeMs || info.size !== lastStat.size)) {
-          const fresh = await api.fsRead(scope, path)
-          if (cancelled || fresh.kind !== 'text') return
-          // Keystroke-loss guard (Oracle B2): the user may have typed during
-          // the stat/read awaits — never swap over a now-dirty document.
-          if (dirtyRef.current) return
-          if (fresh.content !== contentRef.current) {
-            // External change: swap the document in place (preserve undo).
-            const view = viewRef.current
-            if (view !== null) {
-              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: fresh.content } })
-              setDraft(null)
-              setDirty(false)
+        const prev = lastStatRef.current
+        if (prev !== null && (info.mtimeMs !== prev.mtimeMs || info.size !== prev.size)) {
+          try {
+            const fresh: unknown = await api.fsRead(scope, path)
+            const r = fresh as { kind?: string; content?: string; code?: string; truncated?: boolean } | undefined
+            if (cancelled || r === undefined || r === null) return
+            if (r.kind !== 'text') {
+              if (dirtyRef.current) {
+                setExternalChange(true)
+                setPendingContent(null)
+              } else {
+                // Binary/external: keep banner to prompt reload (EditorHost will handle binary)
+                setExternalChange(true)
+                setPendingContent(null)
+              }
+              return
             }
+            const freshContent = r?.content ?? (r as { code?: string })?.code ?? ''
+            const currentDoc = viewRef.current?.state.doc.toString() ?? contentRef.current ?? ''
+            if (dirtyRef.current) {
+              if (freshContent !== currentDoc && freshContent !== contentRef.current) {
+                setExternalChange(true)
+                setPendingContent(freshContent)
+              }
+            } else {
+              if (freshContent !== contentRef.current) {
+                const view = viewRef.current
+                if (view !== null) {
+                  // Keystroke-loss guard: typed during awaits -> keep banner
+                  if (dirtyRef.current) {
+                    setExternalChange(true)
+                    setPendingContent(freshContent)
+                    return
+                  }
+                  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: freshContent } })
+                  setDraft(null)
+                  setDirty(false)
+                  setExternalChange(false)
+                  setPendingContent(null)
+                }
+              } else {
+                setExternalChange(false)
+                setPendingContent(null)
+              }
+            }
+          } catch {
+            // read failure silent
           }
         }
-        lastStat = { mtimeMs: info.mtimeMs, size: info.size }
+        lastStatRef.current = { mtimeMs: info.mtimeMs, size: info.size }
       } catch {
-        // stat/read failures (file deleted) are silent — the tree refresh
-        // surfaces the state; the editor keeps the last known content.
+        // stat/read failures (file deleted) are silent
       }
     }
-    const timer = window.setInterval(() => { void tick() }, 2000)
-    return () => { cancelled = true; window.clearInterval(timer) }
+    const timer = window.setInterval(() => { void tick() }, 1000)
+    // Prime immediately after a short delay so first tick stores stat
+    const prime = window.setTimeout(() => { void tick() }, 300)
+    return () => { cancelled = true; window.clearInterval(timer); window.clearTimeout(prime) }
     // Stable deps only: `scope` is a fresh object per render — including it
     // would re-run the effect (and reset lastStat) on every render.
-  }, [content, path, scope.sessionId, scope.cwd, truncated])
-
-  // Live refs for the polling effect (avoids stale closures).
-  const dirtyRef = useRef(false)
-  dirtyRef.current = dirty
-  const contentRef = useRef(content)
-  contentRef.current = content
+  }, [content, path, scope.sessionId, scope.cwd])
 
   // The editor may have been display:none while previewing; re-measure when
   // it becomes visible again (CodeMirror sizes itself on reveal). A mode
@@ -328,6 +365,11 @@ export function TextEditor(props: FileViewerProps) {
       setDraft(null)
       setDirty(false)
       setSaveState('saved')
+      setExternalChange(false)
+      setPendingContent(null)
+      api.fsStat(scope, path).then(info => {
+        lastStatRef.current = { mtimeMs: info.mtimeMs, size: info.size }
+      }).catch(() => {})
     }).catch(() => {
       savingRef.current = false
       setSaveState('failed')
@@ -468,6 +510,50 @@ export function TextEditor(props: FileViewerProps) {
       {editable && (
         <>
           {truncated === true && mode === 'edit' && <div className={css.editorBanner}>{t('truncation')}</div>}
+          {externalChange && (
+            <div className={css.editorBanner} style={{ display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'space-between' }}>
+              <span>File changed on disk</span>
+              <span style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  type="button"
+                  className={css.sandboxAction}
+                  onClick={() => {
+                    const view = viewRef.current
+                    if (pendingContent !== null && view !== null) {
+                      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: pendingContent } })
+                      setDraft(null)
+                      setDirty(false)
+                    } else {
+                      // For truncated/binary, force reload via stat refresh; EditorHost will pick up fsChangedTick
+                      void api.fsRead(scope, path).then((fresh: unknown) => {
+                        const r = fresh as { kind?: string; content?: string; code?: string } | undefined
+                        const freshContent = r?.content ?? (r as { code?: string })?.code ?? ''
+                        if (view !== null && r?.kind === 'text') {
+                          view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: freshContent } })
+                          setDraft(null)
+                          setDirty(false)
+                        }
+                      }).catch(() => {})
+                    }
+                    setExternalChange(false)
+                    setPendingContent(null)
+                    api.fsStat(scope, path).then(info => {
+                      lastStatRef.current = { mtimeMs: info.mtimeMs, size: info.size }
+                    }).catch(() => {})
+                  }}
+                >
+                  Reload
+                </button>
+                <button
+                  type="button"
+                  className={css.sandboxAction}
+                  onClick={() => { setExternalChange(false); setPendingContent(null) }}
+                >
+                  Dismiss
+                </button>
+              </span>
+            </div>
+          )}
           <div
             className={clsx(css.editorCm, (markdown || html) && mode === 'preview' && css.editorCmHidden)}
             ref={hostRef}

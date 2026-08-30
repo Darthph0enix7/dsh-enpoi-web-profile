@@ -4,7 +4,7 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// ../node_modules/zod/v3/external.js
+// node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -116,7 +116,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// ../node_modules/zod/v3/helpers/util.js
+// node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -250,7 +250,7 @@ var getParsedType = (data) => {
   }
 };
 
-// ../node_modules/zod/v3/ZodError.js
+// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -368,7 +368,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// ../node_modules/zod/v3/locales/en.js
+// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -471,7 +471,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// ../node_modules/zod/v3/errors.js
+// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -480,7 +480,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// ../node_modules/zod/v3/helpers/parseUtil.js
+// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -590,14 +590,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// ../node_modules/zod/v3/helpers/errorUtil.js
+// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// ../node_modules/zod/v3/types.js
+// node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -3832,7 +3832,7 @@ ZodNaN.create = (params) => {
     ...processCreateParams(params)
   });
 };
-var BRAND = Symbol("zod_brand");
+var BRAND = /* @__PURE__ */ Symbol("zod_brand");
 var ZodBranded = class extends ZodType {
   _parse(input) {
     const { ctx } = this._processInputParams(input);
@@ -4045,7 +4045,7 @@ var coerce = {
 };
 var NEVER = INVALID;
 
-// enpoi-contracts/src/index.ts
+// packages/enpoi-contracts/src/index.ts
 var traceContextSchema = external_exports.object({
   /** Root query id — one user query spans one trace. */
   traceId: external_exports.string().min(1),
@@ -4081,6 +4081,10 @@ var briefProseUpdatedSchema = external_exports.object({
   openThreads: external_exports.array(external_exports.string()).optional(),
   /** The session seq the keeper's input was based on (I3 comparison). */
   basedOnSeq: external_exports.number().int().nonnegative(),
+  /** Structural-event count (user/message, turn/end, tool/call, tool/result) at basedOnSeq — seq-based freshness (Oracle amendment 4). */
+  basedOnStructuralCount: external_exports.number().int().nonnegative(),
+  /** The structural-distance threshold the keeper used — view() classifies freshness with it. */
+  structuralDistanceK: external_exports.number().int().positive().optional(),
   /** Route used, e.g. "deepseek/deepseek-v4-flash". */
   model: external_exports.string(),
   /** The prose summary text. */
@@ -4107,11 +4111,19 @@ var livingBriefStateSchema = external_exports.object({
   filesTouched: external_exports.array(external_exports.string()),
   blockers: external_exports.array(blockerSchema),
   phase: external_exports.string(),
-  prose: external_exports.object({ text: external_exports.string(), updatedAt: external_exports.number(), model: external_exports.string() }).nullable(),
+  prose: external_exports.object({
+    text: external_exports.string(),
+    updatedAt: external_exports.number(),
+    model: external_exports.string(),
+    basedOnSeq: external_exports.number().int().nonnegative(),
+    basedOnStructuralCount: external_exports.number().int().nonnegative(),
+    structuralDistanceK: external_exports.number().int().positive()
+  }).nullable(),
   goalSeq: external_exports.number().int().nonnegative(),
   lastEventSeq: external_exports.number().int().nonnegative(),
   foldErrors: external_exports.number().int().nonnegative(),
-  toolNames: external_exports.record(external_exports.string())
+  toolNames: external_exports.record(external_exports.string()),
+  structuralCount: external_exports.number().int().nonnegative()
 }).strict();
 var livingBriefViewSchema = external_exports.object({
   goal: external_exports.string(),
@@ -4121,7 +4133,14 @@ var livingBriefViewSchema = external_exports.object({
   filesTouched: external_exports.array(external_exports.string()),
   blockers: external_exports.array(blockerSchema),
   phase: external_exports.string(),
-  prose: external_exports.object({ text: external_exports.string(), updatedAt: external_exports.number(), model: external_exports.string() }).nullable(),
+  prose: external_exports.object({
+    text: external_exports.string(),
+    updatedAt: external_exports.number(),
+    model: external_exports.string(),
+    basedOnSeq: external_exports.number().int().nonnegative(),
+    basedOnStructuralCount: external_exports.number().int().nonnegative(),
+    structuralDistanceK: external_exports.number().int().positive()
+  }).nullable(),
   asOfSeq: external_exports.number().int().nonnegative(),
   freshness: external_exports.union([external_exports.literal("live"), external_exports.literal("cooling"), external_exports.literal("stale")])
 }).strict();

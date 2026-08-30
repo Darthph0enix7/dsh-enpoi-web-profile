@@ -158,22 +158,26 @@ function notify() {
 export async function refreshSkills(sessionId: string): Promise<void> {
   if (!sessionId) return
   try {
-    const res = await fetch('/api/skill.list', {
+    const res = await fetch('/api/skills.list', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request',
-        method: 'skill.list',
+        method: 'skills/list',
         rpcId: 'skill-list-caps',
-        payload: { sessionId },
+        payload: { args: { request: { sessionId } } },
       }),
     })
     if (!res.ok) return
-    const json = await res.json() as { result?: { value?: { skills?: DynamicSkillEntry[] } } }
-    const skills = json?.result?.value?.skills
+    const json = await res.json() as { result?: { ok?: boolean; value?: { skills?: DynamicSkillEntry[] }; error?: unknown } }
+    // Typert wraps success as {ok:true, value:{skills}}; tolerate both shapes.
+    const skills = (json as { result?: { value?: { skills?: DynamicSkillEntry[] } } })?.result?.value?.skills
+      ?? (json as { result?: { ok?: boolean; value?: { skills?: DynamicSkillEntry[] } } })?.result?.value?.skills
     if (Array.isArray(skills)) {
       globalSkills = skills
       notify()
+    } else if ((json as { result?: { ok?: boolean } })?.result?.ok === false) {
+      // keep last known on typed error; do not clear catalog
     }
   } catch {
     // keep last known catalog on transient failures
@@ -186,7 +190,7 @@ export async function refreshMcpStatus(): Promise<void> {
     const res = await fetch('/api/settings.describe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'client-request', method: 'settings.describe', rpcId: 'mcp-status-poll', payload: {} }),
+      body: JSON.stringify({ type: 'client-request', method: 'settings/describe', rpcId: 'mcp-status-poll', payload: { args: {} } }),
     })
     if (!res.ok) return
     const json = await res.json() as { result?: { value?: { namespaces?: Array<{ ns?: string; value?: { mcpStatus?: Record<string, McpStatusEntry>; mcpServers?: Record<string, McpServerEntry> } }> } } }
@@ -214,9 +218,9 @@ if (typeof window !== 'undefined') {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       type: 'client-request',
-      method: 'settings.describe',
+      method: 'settings/describe',
       rpcId: 'prime-caps-sidebar',
-      payload: {},
+      payload: { args: {} },
     }),
   }).then(async (res) => {
     if (!res.ok) return
@@ -267,12 +271,12 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request',
-        method: 'settings.mutate',
+        method: 'settings/mutate',
         rpcId: `toggle-cap-${id}`,
-        payload: {
+        payload: { args: {
           ns: 'enpoi-orchestration',
           ops: [{ op: 'set', path: ['capabilities', kind === 'tool' ? 'tools' : kind === 'skill' ? 'skills' : 'mcp', id], value: enabled }],
-        },
+        } },
       }),
     })
     if (!res.ok) {

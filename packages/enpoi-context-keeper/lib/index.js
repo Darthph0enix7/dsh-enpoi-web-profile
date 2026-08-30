@@ -1,4 +1,4 @@
-var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : /* @__PURE__ */ Symbol.for("Symbol." + name2);
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
@@ -49,10 +49,12 @@ import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
 
-// packages/enpoi-memory/src/db.ts
+// packages/enpoi-memory/lib/index.js
+import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 var CATEGORIES = ["RULES", "ARCHITECTURE", "CONSTRAINTS", "CONFIG_VALUES", "NAMING", "PROJECT"];
 var KEEPER_ALLOWED = /* @__PURE__ */ new Set(["ARCHITECTURE", "CONFIG_VALUES", "PROJECT"]);
 function memoryDbPath() {
@@ -98,9 +100,6 @@ function openMemoryDb() {
   db.exec(SCHEMA);
   return db;
 }
-
-// packages/enpoi-memory/src/pipeline.ts
-import { createHash } from "node:crypto";
 var FACT_CAP = 400;
 function claimHash(fact, category) {
   return createHash("sha256").update(`${fact}::${category}`).digest("hex").slice(0, 12);
@@ -108,9 +107,9 @@ function claimHash(fact, category) {
 var Mutex = class {
   chain = Promise.resolve();
   run(fn) {
-    const run2 = this.chain.then(fn, fn);
-    this.chain = run2.then(() => void 0, () => void 0);
-    return run2;
+    const run = this.chain.then(fn, fn);
+    this.chain = run.then(() => void 0, () => void 0);
+    return run;
   }
 };
 function makePipeline(db) {
@@ -244,18 +243,19 @@ function makePipeline(db) {
   }
   return { intake, graduate, confirm, rescind, reconcileBoot, list, get, stateOf };
 }
+var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 
 // packages/enpoi-context-keeper/src/index.ts
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 import Schema from "schemastery";
 var name = "enpoi-context-keeper";
 var inject = ["llm"];
 function diag(line) {
   try {
     const home = process.env.DSH_HOME ?? process.env.HOME ?? "/tmp";
-    const dir = join2(home.endsWith(".dsh") ? home : join2(home, ".dsh"), "logs");
+    const dir = join3(home.endsWith(".dsh") ? home : join3(home, ".dsh"), "logs");
     mkdirSync(dir, { recursive: true });
-    appendFileSync(join2(dir, "enpoi-keeper.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+    appendFileSync(join3(dir, "enpoi-keeper.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
   }
@@ -265,14 +265,18 @@ var Config = Schema.object({
   model: Schema.string().default("auto"),
   fallbackProvider: Schema.string().default("antigravity"),
   fallbackModel: Schema.string().default("gemini-3.7-flash-tiered"),
-  debounceMs: Schema.number().default(15e3),
   leaseMs: Schema.number().default(45e3),
   maxInputEvents: Schema.number().default(80),
-  maxOutputTokens: Schema.number().default(2048)
+  maxOutputTokens: Schema.number().default(2048),
+  structuralDistanceK: Schema.number().default(24),
+  minRefreshMs: Schema.number().default(6e4),
+  negativeCacheMs: Schema.number().default(12e4),
+  claimsBatchSize: Schema.number().default(8),
+  claimsBatchMinutes: Schema.number().default(5)
 });
-var SYSTEM_PROMPT = [
+var PROSE_PROMPT = [
   "You are the Enpoi Harness context keeper \u2014 the master background summarizer and architectural keeper for this coding session.",
-  "You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to subagent workers, the Oracle, Council debaters, and permanent memory.",
+  "You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to the Oracle and Council debaters.",
   "If a [PREVIOUS SESSION BRIEF] is provided, incrementally merge it with the [RECENT SESSION EVENTS & TOOL RESULTS] (including Council/Roundtable consensus, Oracle verdicts, subagent returns, tool results, documentation paths, and user directives).",
   "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
   "",
@@ -283,12 +287,8 @@ var SYSTEM_PROMPT = [
   '- If there are no open blockers, DO NOT emit the \u26A1 section and NEVER write "No blockers remain...".',
   "- For simple queries, greetings, or health-checks (e.g. ping), emit ONLY a single-line \u{1F3AF} ACTIVE GOAL or keep the brief empty. NEVER invent placeholder bullets.",
   "",
-  "You have ONE background tool: memory_save. Use it via the CLAIMS block below.",
+  "Output ONLY the relevant section headers from below (omit any section with no substantive content):",
   "",
-  "Output EXACTLY two blocks, IN THIS ORDER (no other text at all):",
-  "",
-  "BLOCK 1 \u2014 PROSE:",
-  "Use ONLY the relevant section headers from below (omit any section with no substantive content):",
   "\u{1F3AF} ACTIVE GOAL & CORE TRAJECTORY:",
   "- Current active objective, user directives, and high-level technical paradigms.",
   "",
@@ -304,13 +304,59 @@ var SYSTEM_PROMPT = [
   "\u26A1 ACTIVE BLOCKERS & OPEN QUESTIONS:",
   "- Unresolved technical questions, pending implementation tasks, or immediate next steps.",
   "",
-  "BLOCK 2 \u2014 CLAIMS:",
-  'A line starting with "CLAIMS:" followed by a JSON array of permanent facts you are SAVING to memory.db: [{"fact":"...","category":"ARCHITECTURE","tags":"..."}]',
-  "  - File 2\u20134 durable facts about Adam's environment/infrastructure/architecture whenever the session surfaces them.",
-  "  - Categories limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.",
-  '  - If no new permanent facts emerged, emit "CLAIMS: []".',
-  "  - NO credentials/passwords/tokens/secrets; skip transient chatter."
+  "No other text at all \u2014 no preamble, no CLAIMS block, no JSON."
 ].join("\n");
+var CLAIMS_PROMPT = [
+  "You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about Adam's environment, infrastructure, and architecture.",
+  "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
+  "",
+  'Output EXACTLY one line: "CLAIMS:" followed by a JSON array: [{"fact":"...","category":"ARCHITECTURE","tags":"...","source":"tool"}]',
+  "- category limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.",
+  '- source MUST be "tool" when the fact is derived from tool results/executions (verified by execution), or "chat" when it was stated by the user or assistant in conversation.',
+  '- File 2-4 durable facts whenever the session surfaces them; else "CLAIMS: []".',
+  "- Skip transient chatter and anything already obvious from the session itself.",
+  "No other text at all."
+].join("\n");
+var STRUCTURAL_TYPES = /* @__PURE__ */ new Set(["user/message", "turn/end", "tool/call", "tool/result"]);
+function countStructuralAfter(session, fromSeq) {
+  let count = 0;
+  const events = session.events;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.seq <= fromSeq) break;
+    if (STRUCTURAL_TYPES.has(event.type)) count += 1;
+  }
+  return count;
+}
+function countStructuralUpTo(session, toSeq) {
+  let count = 0;
+  for (const event of session.events) {
+    if (event.seq > toSeq) break;
+    if (STRUCTURAL_TYPES.has(event.type)) count += 1;
+  }
+  return count;
+}
+function resolveKeeperParams(ctx, config) {
+  try {
+    const settings = ctx.get("settings");
+    const p = settings?.get?.("enpoi-orchestration")?.parameters?.keeper;
+    if (p === void 0 || typeof p !== "object") return config;
+    const clamp = (v, fallback, min, max) => typeof v === "number" && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback;
+    return {
+      ...config,
+      leaseMs: clamp(p.leaseMs, config.leaseMs ?? 45e3, 15e3, 12e4),
+      maxInputEvents: clamp(p.maxInputEvents, config.maxInputEvents ?? 80, 20, 200),
+      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, 4096),
+      structuralDistanceK: clamp(p.structuralDistanceK, config.structuralDistanceK ?? 24, 4, 200),
+      minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 6e4, 5e3, 3e5),
+      negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 12e4, 5e3, 6e5),
+      claimsBatchSize: clamp(p.claimsBatchSize, config.claimsBatchSize ?? 8, 1, 50),
+      claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60)
+    };
+  } catch {
+    return config;
+  }
+}
 function resolveKeeperRoute(ctx, config) {
   const fallbackProvider = config.fallbackProvider ?? "antigravity";
   const fallbackModel = config.fallbackModel ?? "gemini-3.7-flash-tiered";
@@ -335,109 +381,222 @@ function resolveKeeperRoute(ctx, config) {
     fallbackModel
   };
 }
+function emptyEntry() {
+  return {
+    basedOnSeq: 0,
+    basedOnStructuralCount: 0,
+    prose: "",
+    model: "",
+    updatedAt: 0,
+    negativeUntil: 0,
+    inFlight: null,
+    inFlightSnapshotSeq: 0
+  };
+}
+var BriefService = class {
+  constructor(ctx, config) {
+    this.ctx = ctx;
+    this.config = config;
+  }
+  ctx;
+  config;
+  cache = /* @__PURE__ */ new Map();
+  /**
+   * Materialize (or reuse) the session's prose brief.
+   *
+   * Cache policy: negative-cache → anti-thrash floor → structural distance →
+   * single-flight join → distill. Never throws for provider failures — it
+   * returns `{ ok: false }` (soft-degrading, frozen doc principle). Throws
+   * only when the CALLER's signal aborts (the consumer is being cancelled).
+   */
+  async ensureFreshBrief(session, signal) {
+    const key = session.id;
+    const cfg = resolveKeeperParams(this.ctx, this.config);
+    const entry = this.cache.get(key);
+    const now = Date.now();
+    if (entry !== void 0 && entry.negativeUntil > now) {
+      return { ok: false, prose: null, reason: "negative-cached" };
+    }
+    if (entry !== void 0 && entry.prose.length > 0 && now - entry.updatedAt < (cfg.minRefreshMs ?? 6e4)) {
+      return { ok: true, prose: entry.prose, model: entry.model, reason: "cache-hit" };
+    }
+    if (entry !== void 0 && entry.prose.length > 0) {
+      const distance = countStructuralAfter(session, entry.basedOnSeq);
+      if (distance <= (cfg.structuralDistanceK ?? 24)) {
+        return { ok: true, prose: entry.prose, model: entry.model, reason: "cache-hit" };
+      }
+    }
+    if (entry !== void 0 && entry.inFlight !== null) {
+      const inFlightDistance = countStructuralAfter(session, entry.inFlightSnapshotSeq);
+      if (inFlightDistance <= (cfg.structuralDistanceK ?? 24)) {
+        try {
+          return await entry.inFlight;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          return { ok: false, prose: null, reason: "failed" };
+        }
+      }
+    }
+    const snapshotSeq = session.events.at(-1)?.seq ?? session.seq;
+    const promise = this.distill(session, signal, snapshotSeq, cfg);
+    this.cache.set(key, {
+      ...entry ?? emptyEntry(),
+      inFlight: promise,
+      inFlightSnapshotSeq: snapshotSeq
+    });
+    try {
+      return await promise;
+    } finally {
+      const current = this.cache.get(key);
+      if (current !== void 0 && current.inFlight === promise) {
+        this.cache.set(key, { ...current, inFlight: null });
+      }
+    }
+  }
+  /** One distillation pass: lease-bound LLM call, then append + cache. */
+  async distill(session, signal, snapshotSeq, cfg) {
+    const lease = new AbortController();
+    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
+    const combined = signal !== void 0 ? AbortSignal.any([signal, lease.signal]) : lease.signal;
+    try {
+      const input = frameInput(session, cfg.maxInputEvents ?? 80);
+      if (input.length === 0) {
+        diag(`ensureFreshBrief: session=${session.id} \u2014 empty input, skipping`);
+        return { ok: false, prose: null, reason: "failed" };
+      }
+      const route = resolveKeeperRoute(this.ctx, cfg);
+      const snapshotStructural = countStructuralUpTo(session, snapshotSeq);
+      diag(`ensureFreshBrief: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`);
+      const result = await summarize(this.ctx, cfg, session, input, combined, route, PROSE_PROMPT, false);
+      const prose = cleanKeeperProse(result.text);
+      if (prose.length === 0) {
+        diag(`ensureFreshBrief: session=${session.id} \u2014 empty or cleaned-empty prose, skipping`);
+        return { ok: false, prose: null, reason: "failed" };
+      }
+      session.append("brief/prose-updated", {
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: snapshotStructural,
+        structuralDistanceK: cfg.structuralDistanceK ?? 24,
+        model: result.route,
+        text: prose,
+        origin: "context-keeper"
+      });
+      const current = this.cache.get(session.id);
+      this.cache.set(session.id, {
+        ...current ?? emptyEntry(),
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: snapshotStructural,
+        prose,
+        model: result.route,
+        updatedAt: Date.now(),
+        negativeUntil: 0
+      });
+      diag(`ensureFreshBrief: session=${session.id} \u2014 appended brief/prose-updated via ${result.route} (${prose.length} chars, basedOnSeq ${snapshotSeq})`);
+      return { ok: true, prose, model: result.route, reason: "distilled" };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const entry = this.cache.get(session.id);
+      this.cache.set(session.id, {
+        ...entry ?? emptyEntry(),
+        negativeUntil: Date.now() + (cfg.negativeCacheMs ?? 12e4)
+      });
+      diag(`ensureFreshBrief: session=${session.id} \u2014 FAILED ${String(error)} (negative-cached ${cfg.negativeCacheMs ?? 12e4}ms)`);
+      return { ok: false, prose: null, reason: "failed" };
+    } finally {
+      clearTimeout(leaseTimer);
+    }
+  }
+};
+var briefService = null;
+function getBriefService() {
+  return briefService;
+}
+function createBriefService(ctx, config) {
+  return new BriefService(ctx, config);
+}
 function apply(ctx, config) {
-  const states = /* @__PURE__ */ new Map();
-  diag(`apply: mounted (provider=${config.provider}/${config.model}, debounce=${config.debounceMs}ms, lease=${config.leaseMs}ms)`);
+  const ownedService = createBriefService(ctx, config);
+  briefService = ownedService;
+  diag(`apply: mounted (demand-driven; prose on oracle/council use, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`);
+  const claimCounters = /* @__PURE__ */ new Map();
+  const claimsRunning = /* @__PURE__ */ new Set();
   ctx.on("session/event", (session, event) => {
     if (event.type !== "turn/end") return;
     const reason = event.data.reason;
     if (reason.kind === "aborted") return;
-    diag(`turn/end: session=${session.id} turn=${event.data.turn} reason=${reason.kind} \u2014 arming`);
-    arm(ctx, config, states, session, event.data.turn);
+    let counter = claimCounters.get(session.id);
+    if (counter === void 0) {
+      counter = { count: 0, timer: null };
+      claimCounters.set(session.id, counter);
+    }
+    counter.count += 1;
+    if (counter.timer !== null) clearTimeout(counter.timer);
+    counter.timer = setTimeout(() => {
+      counter.timer = null;
+      void runClaimsPass(ctx, config, session, claimsRunning);
+    }, (config.claimsBatchMinutes ?? 5) * 6e4);
+    if (counter.count >= (config.claimsBatchSize ?? 8)) {
+      counter.count = 0;
+      if (counter.timer !== null) {
+        clearTimeout(counter.timer);
+        counter.timer = null;
+      }
+      void runClaimsPass(ctx, config, session, claimsRunning);
+    }
   });
   ctx.on("dispose", () => {
-    for (const state of states.values()) {
-      if (state.timer !== null) clearTimeout(state.timer);
+    for (const counter of claimCounters.values()) {
+      if (counter.timer !== null) clearTimeout(counter.timer);
     }
-    states.clear();
+    claimCounters.clear();
+    claimsRunning.clear();
+    if (briefService === ownedService) briefService = null;
   });
 }
-function arm(ctx, config, states, session, turn) {
-  const key = session.id;
-  let state = states.get(key);
-  if (state === void 0) {
-    state = { timer: null, running: false, rerunRequested: false, turn };
-    states.set(key, state);
-  }
-  if (state.timer !== null) clearTimeout(state.timer);
-  state.turn = turn;
-  state.timer = setTimeout(() => {
-    state.timer = null;
-    void run(ctx, config, states, session, turn);
-  }, config.debounceMs);
-}
-async function run(ctx, config, states, session, turn) {
-  const key = session.id;
-  const state = states.get(key);
-  if (state === void 0) return;
-  state.timer = null;
-  if (state.running) {
-    state.rerunRequested = true;
-    return;
-  }
-  state.running = true;
+async function runClaimsPass(ctx, config, session, running) {
+  if (running.has(session.id)) return;
+  running.add(session.id);
+  const cfg = resolveKeeperParams(ctx, config);
   const lease = new AbortController();
-  const leaseTimer = setTimeout(() => lease.abort(), config.leaseMs);
+  const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
   try {
-    const input = frameInput(session, config.maxInputEvents);
-    if (input.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} \u2014 empty input, skipping`);
+    const input = frameInput(session, cfg.maxInputEvents ?? 80);
+    if (input.length === 0) return;
+    const route = resolveKeeperRoute(ctx, cfg);
+    diag(`claims: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`);
+    const result = await summarize(ctx, cfg, session, input, lease.signal, route, CLAIMS_PROMPT, true);
+    const claims = splitClaims(result.text);
+    if (claims.length === 0) {
+      diag(`claims: session=${session.id} \u2014 no claims extracted`);
       return;
     }
-    const route = resolveKeeperRoute(ctx, config);
-    diag(`run: session=${session.id} turn=${turn} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model})`);
-    const snapshotSeq = session.events.at(-1)?.seq ?? session.seq;
-    const result = await summarize(ctx, config, session, input, lease.signal, route);
-    if (result.text.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} \u2014 empty summary, skipping`);
-      return;
-    }
-    diag(`run: session=${session.id} turn=${turn} \u2014 raw output: ${result.text.slice(0, 1200).replace(/\n/g, " | ")}`);
-    const { prose: rawProse, claims } = splitProseClaims(result.text);
-    const prose = cleanKeeperProse(rawProse);
-    if (prose.length === 0) {
-      diag(`run: session=${session.id} turn=${turn} \u2014 empty or cleaned-empty prose, skipping`);
-      return;
-    }
-    session.append("brief/prose-updated", {
-      basedOnSeq: snapshotSeq,
-      model: result.route,
-      text: prose,
-      origin: "context-keeper"
-    });
-    diag(`run: session=${session.id} turn=${turn} \u2014 appended brief/prose-updated via ${result.route} (${prose.length} chars, ${claims.length} claims)`);
-    ctx.logger.info(`enpoi-context-keeper: brief updated for session ${session.id} (turn ${turn})`);
-    if (claims.length > 0) {
-      try {
-        const memDb = openMemoryDb();
-        const mem = makePipeline(memDb);
-        const inserted = await mem.intake(
-          claims.map((c) => ({ fact: c.fact, category: c.category, tags: c.tags })),
-          { origin: "keeper", trust: "verified_execution", provenance: JSON.stringify({ sessionId: session.id, turn }) }
+    const memDb = openMemoryDb();
+    try {
+      const mem = makePipeline(memDb);
+      const provenance = JSON.stringify({ sessionId: session.id });
+      const toolClaims = claims.filter((c) => c.source === "tool");
+      const chatClaims = claims.filter((c) => c.source !== "tool");
+      if (toolClaims.length > 0) {
+        await mem.intake(
+          toolClaims.map((c) => ({ fact: c.fact, category: c.category, tags: c.tags })),
+          { origin: "keeper", trust: "verified_execution", provenance }
         );
-        diag(`run: session=${session.id} turn=${turn} \u2014 memory intake: ${inserted.length} claim(s) filed`);
-      } catch (err) {
-        diag(`run: session=${session.id} turn=${turn} \u2014 memory intake FAILED: ${String(err)}`);
       }
+      if (chatClaims.length > 0) {
+        await mem.intake(
+          chatClaims.map((c) => ({ fact: c.fact, category: c.category, tags: c.tags })),
+          { origin: "keeper", trust: "operator", provenance }
+        );
+      }
+      diag(`claims: session=${session.id} \u2014 ${toolClaims.length} tool + ${chatClaims.length} chat claim(s) filed`);
+    } finally {
+      memDb.close();
     }
   } catch (error) {
-    if (lease.signal.aborted) {
-      diag(`run: session=${session.id} turn=${turn} \u2014 KEEPER_TIMEOUT`);
-      ctx.logger.warn(`enpoi-context-keeper: KEEPER_TIMEOUT session ${session.id} (turn ${turn})`);
-    } else {
-      diag(`run: session=${session.id} turn=${turn} \u2014 ERROR ${String(error)}`);
-      ctx.logger.warn(`enpoi-context-keeper: ${String(error)} (session ${session.id}, turn ${turn})`);
-    }
+    diag(`claims: session=${session.id} \u2014 FAILED ${String(error)}`);
   } finally {
     clearTimeout(leaseTimer);
-    state.running = false;
-    if (state.rerunRequested) {
-      state.rerunRequested = false;
-      state.timer = setTimeout(() => {
-        state.timer = null;
-        void run(ctx, config, states, session, state.turn);
-      }, config.debounceMs);
-    }
+    running.delete(session.id);
   }
 }
 function cleanKeeperProse(text) {
@@ -459,25 +618,24 @@ function cleanKeeperProse(text) {
   }
   return cleaned.join("\n\n");
 }
-function splitProseClaims(text) {
+function splitClaims(text) {
   const idx = text.indexOf("CLAIMS:");
-  if (idx === -1) return { prose: text.trim(), claims: [] };
-  const prose = text.slice(0, idx).replace(/^PROSE\s*:/m, "").trim();
+  if (idx === -1) return [];
   const jsonPart = text.slice(idx + "CLAIMS:".length).trim();
   try {
-    const m = jsonPart.match(/\[[\s\S]*\]/);
-    if (m === null) return { prose, claims: [] };
+    const m = jsonPart.match(/\[[\s\S]*?\]/);
+    if (m === null) return [];
     const arr = JSON.parse(m[0]);
-    if (!Array.isArray(arr)) return { prose, claims: [] };
-    const claims = arr.filter((c) => typeof c === "object" && c !== null && typeof c.fact === "string").map((c) => ({
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((c) => typeof c === "object" && c !== null && typeof c.fact === "string").map((c) => ({
       fact: String(c.fact).trim().slice(0, 300),
       category: String(c.category ?? "PROJECT").slice(0, 32),
-      tags: typeof c.tags === "string" ? c.tags : void 0
+      tags: typeof c.tags === "string" ? c.tags : void 0,
+      source: c.source === "tool" ? "tool" : "chat"
     })).filter((c) => c.fact.length > 0);
-    return { prose, claims };
   } catch {
-    diag("splitProseClaims: CLAIMS JSON parse failed (isolated, prose kept)");
-    return { prose, claims: [] };
+    diag("splitClaims: CLAIMS JSON parse failed (isolated)");
+    return [];
   }
 }
 function frameInput(session, maxEvents) {
@@ -577,7 +735,7 @@ function messageText(content) {
   }
   return "";
 }
-function validateKeeperOutput(text, finishKind) {
+function validateKeeperOutput(text, finishKind, expectClaims = false) {
   if (finishKind === "max-tokens") {
     return { valid: false, reason: "Stream truncated by maxOutputTokens limit" };
   }
@@ -585,25 +743,27 @@ function validateKeeperOutput(text, finishKind) {
   if (trimmed.length === 0) {
     return { valid: false, reason: "Empty output received from model" };
   }
-  const claimsMatch = trimmed.match(/CLAIMS:\s*([\s\S]*)$/i);
-  if (claimsMatch) {
-    const rawClaims = claimsMatch[1].trim();
-    if (/^(none|n\/a|\[\s*\])$/i.test(rawClaims)) {
-      return { valid: true };
-    }
-    const jsonMatch = rawClaims.match(/\[[\s\S]*?\]/);
-    if (!jsonMatch) {
-      return { valid: false, reason: "CLAIMS tag present but JSON array was truncated/unclosed" };
-    }
-    try {
-      JSON.parse(jsonMatch[0]);
-    } catch (e) {
-      return { valid: false, reason: `Malformed CLAIMS JSON: ${String(e)}` };
+  if (expectClaims) {
+    const claimsMatch = trimmed.match(/CLAIMS:\s*([\s\S]*)$/i);
+    if (claimsMatch) {
+      const rawClaims = claimsMatch[1].trim();
+      if (/^(none|n\/a|\[\s*\])$/i.test(rawClaims)) {
+        return { valid: true };
+      }
+      const jsonMatch = rawClaims.match(/\[[\s\S]*?\]/);
+      if (!jsonMatch) {
+        return { valid: false, reason: "CLAIMS tag present but JSON array was truncated/unclosed" };
+      }
+      try {
+        JSON.parse(jsonMatch[0]);
+      } catch (e) {
+        return { valid: false, reason: `Malformed CLAIMS JSON: ${String(e)}` };
+      }
     }
   }
   return { valid: true };
 }
-async function summarize(ctx, config, session, input, signal, route) {
+async function summarize(ctx, config, session, input, signal, route, systemPrompt, expectClaims) {
   const messages = [createUserMessage({
     content: [{ type: "text", text: input }],
     source: { kind: "plugin", plugin: "enpoi-context-keeper" }
@@ -612,7 +772,7 @@ async function summarize(ctx, config, session, input, signal, route) {
     provider: route.provider,
     model: route.model,
     messages,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     maxTokens: config.maxOutputTokens,
     sessionId: session.id,
     purpose: "context-keeper",
@@ -621,7 +781,7 @@ async function summarize(ctx, config, session, input, signal, route) {
   };
   async function executeRoute(provider, model) {
     const result = await streamTextWithMeta(ctx, { ...base, provider, model });
-    const validation = validateKeeperOutput(result.text, result.finishKind);
+    const validation = validateKeeperOutput(result.text, result.finishKind, expectClaims);
     if (!validation.valid) {
       throw new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`);
     }
@@ -687,12 +847,15 @@ function finishError(finish) {
   }
 }
 export {
+  BriefService,
   Config,
   apply,
-  arm,
   cleanKeeperProse,
+  createBriefService,
+  getBriefService,
   inject,
   name,
+  resolveKeeperParams,
   resolveKeeperRoute,
-  run
+  splitClaims
 };

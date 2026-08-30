@@ -1,5 +1,74 @@
 // packages/enpoi-oracle/src/index.ts
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { createUserMessage as createUserMessage2 } from "@deepseek-ai/dsh-llm";
+
+// packages/enpoi-context-keeper/lib/index.js
+import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { deadline } from "@deepseek-ai/dsh-timeout";
+import { DatabaseSync } from "node:sqlite";
+import Schema from "schemastery";
+var Config = Schema.object({
+  provider: Schema.string().default("freellmapi"),
+  model: Schema.string().default("auto"),
+  fallbackProvider: Schema.string().default("antigravity"),
+  fallbackModel: Schema.string().default("gemini-3.7-flash-tiered"),
+  leaseMs: Schema.number().default(45e3),
+  maxInputEvents: Schema.number().default(80),
+  maxOutputTokens: Schema.number().default(2048),
+  structuralDistanceK: Schema.number().default(24),
+  minRefreshMs: Schema.number().default(6e4),
+  negativeCacheMs: Schema.number().default(12e4),
+  claimsBatchSize: Schema.number().default(8),
+  claimsBatchMinutes: Schema.number().default(5)
+});
+var PROSE_PROMPT = [
+  "You are the Enpoi Harness context keeper \u2014 the master background summarizer and architectural keeper for this coding session.",
+  "You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to the Oracle and Council debaters.",
+  "If a [PREVIOUS SESSION BRIEF] is provided, incrementally merge it with the [RECENT SESSION EVENTS & TOOL RESULTS] (including Council/Roundtable consensus, Oracle verdicts, subagent returns, tool results, documentation paths, and user directives).",
+  "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
+  "",
+  "CRITICAL SECTION DISCIPLINE (ZERO-FILLER RULE):",
+  "- ONLY include a section if there is genuine, substantive information established in the session.",
+  '- If no documentation files were created or referenced, DO NOT emit the \u{1F4DA} section and NEVER write "No documentation...".',
+  '- If no approaches were debated/rejected, DO NOT emit the \u{1F6AB} section and NEVER write "No alternative approaches...".',
+  '- If there are no open blockers, DO NOT emit the \u26A1 section and NEVER write "No blockers remain...".',
+  "- For simple queries, greetings, or health-checks (e.g. ping), emit ONLY a single-line \u{1F3AF} ACTIVE GOAL or keep the brief empty. NEVER invent placeholder bullets.",
+  "",
+  "Output ONLY the relevant section headers from below (omit any section with no substantive content):",
+  "",
+  "\u{1F3AF} ACTIVE GOAL & CORE TRAJECTORY:",
+  "- Current active objective, user directives, and high-level technical paradigms.",
+  "",
+  "\u{1F4DA} DOCUMENTATION & SPECIFICATIONS INVENTORY:",
+  "- List documentation, plans, architectures, and spec files written, modified, or referenced in the session with a 1-line summary.",
+  "",
+  "\u{1F3DB}\uFE0F ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:",
+  "- Concrete technical decisions established in the session: exact component boundaries, protocols (IPC/HTTP/WS/Redis), data keys/schemas, state machines, and concurrency rules.",
+  "",
+  "\u{1F6AB} REJECTED APPROACHES & EDGE CASES:",
+  "- Approaches debated and explicitly ruled out (and reasons why), edge cases handled, and failure modes defended.",
+  "",
+  "\u26A1 ACTIVE BLOCKERS & OPEN QUESTIONS:",
+  "- Unresolved technical questions, pending implementation tasks, or immediate next steps.",
+  "",
+  "No other text at all \u2014 no preamble, no CLAIMS block, no JSON."
+].join("\n");
+var CLAIMS_PROMPT = [
+  "You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about Adam's environment, infrastructure, and architecture.",
+  "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
+  "",
+  'Output EXACTLY one line: "CLAIMS:" followed by a JSON array: [{"fact":"...","category":"ARCHITECTURE","tags":"...","source":"tool"}]',
+  "- category limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.",
+  '- source MUST be "tool" when the fact is derived from tool results/executions (verified by execution), or "chat" when it was stated by the user or assistant in conversation.',
+  '- File 2-4 durable facts whenever the session surfaces them; else "CLAIMS: []".',
+  "- Skip transient chatter and anything already obvious from the session itself.",
+  "No other text at all."
+].join("\n");
+var briefService = null;
+function getBriefService() {
+  return briefService;
+}
+
+// packages/enpoi-oracle/src/index.ts
 var name = "enpoi-oracle";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var ORACLE_PERSONA = [
@@ -97,6 +166,15 @@ function buildDelta(brief, args) {
     for (const f of args.files) lines.push(`- ${f}`);
   }
   return lines.join("\n");
+}
+function resolveOracleTimeoutMs(ctx) {
+  try {
+    const settings = ctx.get("settings");
+    const v = settings?.get?.("enpoi-orchestration")?.parameters?.oracle?.timeoutMs;
+    if (typeof v === "number" && !Number.isNaN(v)) return Math.min(3e5, Math.max(3e4, v));
+  } catch {
+  }
+  return 12e4;
 }
 function resolvePersonaModel(ctx, persona) {
   try {
@@ -217,6 +295,7 @@ function apply(ctx) {
 function registerOracleTools(ctx, root) {
   ctx = root;
   const fibers = /* @__PURE__ */ new Map();
+  const rolloverScorecards = /* @__PURE__ */ new Map();
   const busy = /* @__PURE__ */ new Set();
   ctx.tools.register({
     name: "oracle_review",
@@ -292,20 +371,30 @@ function registerOracleTools(ctx, root) {
       try {
         const lastUserSeq = lastHumanUserMessageSeq(parent.session.events);
         let fiber = fibers.get(key);
+        let rolloverScorecard = null;
         if (fiber !== void 0 && (fiber.lastParentUserSeq !== lastUserSeq || fiber.childId === null)) {
+          rolloverScorecard = fiber.scorecard;
           fibers.delete(key);
           fiber = void 0;
+        } else if (fiber === void 0 && rolloverScorecards.has(key)) {
+          rolloverScorecard = rolloverScorecards.get(key);
         }
-        const brief = readLivingBrief(ctx, parent.session);
         const fresh = fiber === void 0;
         if (fresh) {
+          try {
+            await getBriefService()?.ensureFreshBrief(parent.session, exec.signal);
+          } catch {
+            if (exec.signal.aborted) throw exec.signal.reason ?? new Error("aborted");
+          }
           fiber = {
             childId: null,
             consultations: 0,
             lastParentUserSeq: lastUserSeq,
-            scorecard: { files: [], verdicts: [] }
+            scorecard: rolloverScorecard ?? { files: [], verdicts: [] },
+            brief: readLivingBrief(ctx, parent.session)
           };
         }
+        const brief = fiber.brief;
         if (args.background === true) {
           bg = new AbortController();
           stopWatch = ctx.on("session/event", (s, e) => {
@@ -345,6 +434,9 @@ function registerOracleTools(ctx, root) {
             fiber.childId = started.childId;
             applyPersonaModel(ctx, started.childId, "oracle");
             fibers.set(key, fiber);
+            if (rolloverScorecard !== null && rolloverScorecards.has(key)) {
+              rolloverScorecards.delete(key);
+            }
           } catch (err) {
             fibers.delete(key);
             throw err;
@@ -360,15 +452,18 @@ function registerOracleTools(ctx, root) {
           const childId = fiber.childId;
           void (async () => {
             try {
-              const t = await waitForChildTurn(ctx, childId, bg.signal);
+              const t = await waitForChildTurn(ctx, childId, bg.signal, resolveOracleTimeoutMs(ctx));
               const v = parseVerdict(t);
               fiber.consultations += 1;
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
               if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
-              if (fiber.consultations >= 10) fibers.delete(key);
+              if (fiber.consultations >= 10) {
+                rolloverScorecards.set(key, fiber.scorecard);
+                fibers.delete(key);
+              }
               const agent = ctx.get("agents")?.get(parent.session.id);
               if (agent !== void 0) {
-                agent.inject(createUserMessage({
+                agent.inject(createUserMessage2({
                   content: [{
                     type: "text",
                     text: `\u{1F4EC} Oracle (background) finished \u2014 ${v.approved ? "APPROVED" : "CONCERNS"} (${v.concerns.length} concern(s)).
@@ -395,7 +490,7 @@ ${t}`
         }
         let verdictText = "";
         try {
-          verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal);
+          verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal, resolveOracleTimeoutMs(ctx));
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           fibers.delete(key);
@@ -413,6 +508,7 @@ ${t}`
         fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns });
         if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
         if (fiber.consultations >= 10) {
+          rolloverScorecards.set(key, fiber.scorecard);
           fibers.delete(key);
         }
         return {
@@ -433,7 +529,9 @@ ${t}`
 }
 export {
   apply,
+  buildInitialPackage,
   inject,
   name,
+  resolveOracleTimeoutMs,
   resolvePersonaModel
 };

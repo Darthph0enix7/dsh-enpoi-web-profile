@@ -198,6 +198,25 @@ function makePipeline(db) {
 }
 
 // packages/enpoi-memory/src/retriever.ts
+var MEMORY_PARAM_DEFAULTS = {
+  retrieverTopK: 10,
+  retrieverCharBudget: 1200
+};
+function getMemoryParams(ctx) {
+  const d = MEMORY_PARAM_DEFAULTS;
+  try {
+    const settings = ctx?.get?.("settings");
+    const p = settings?.get?.("enpoi-orchestration")?.parameters?.memory;
+    if (p === void 0 || typeof p !== "object") return d;
+    const clamp = (v, fallback, min, max) => typeof v === "number" && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback;
+    return {
+      retrieverTopK: clamp(p.retrieverTopK, d.retrieverTopK, 1, 20),
+      retrieverCharBudget: clamp(p.retrieverCharBudget, d.retrieverCharBudget, 200, 4e3)
+    };
+  } catch {
+    return d;
+  }
+}
 function getOriginWeight(origin, trust) {
   if (trust === "operator" || origin === "orchestrator") return 1.5;
   if (origin.startsWith("worker")) return 1.2;
@@ -307,7 +326,8 @@ function registerMemoryTools(ctx, db, pipeline) {
     },
     isConcurrencySafe: () => true,
     async execute(args) {
-      const hits = searchMemory(db, String(args.query ?? ""), Math.min(Number(args.limit ?? 8) || 8, 10));
+      const params = getMemoryParams(ctx);
+      const hits = searchMemory(db, String(args.query ?? ""), Math.min(Number(args.limit ?? params.retrieverTopK) || params.retrieverTopK, params.retrieverTopK));
       if (hits.length === 0) return { facts: [], note: "No matching memory." };
       return {
         facts: hits.map((h) => ({ id: h.id, category: h.category, state: h.state, trust: h.source_trust, fact: h.fact })),
@@ -385,5 +405,7 @@ function apply(ctx) {
 export {
   apply,
   inject,
-  name
+  makePipeline,
+  name,
+  openMemoryDb
 };

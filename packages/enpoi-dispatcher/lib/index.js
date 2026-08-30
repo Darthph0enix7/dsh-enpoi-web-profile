@@ -1,10 +1,12 @@
-// src/index.ts
+// packages/enpoi-dispatcher/src/index.ts
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
-// ../enpoi-memory/src/db.ts
+// packages/enpoi-memory/lib/index.js
+import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 var CATEGORIES = ["RULES", "ARCHITECTURE", "CONSTRAINTS", "CONFIG_VALUES", "NAMING", "PROJECT"];
 var KEEPER_ALLOWED = /* @__PURE__ */ new Set(["ARCHITECTURE", "CONFIG_VALUES", "PROJECT"]);
 function memoryDbPath() {
@@ -50,9 +52,6 @@ function openMemoryDb() {
   db.exec(SCHEMA);
   return db;
 }
-
-// ../enpoi-memory/src/pipeline.ts
-import { createHash } from "node:crypto";
 var FACT_CAP = 400;
 function claimHash(fact, category) {
   return createHash("sha256").update(`${fact}::${category}`).digest("hex").slice(0, 12);
@@ -196,8 +195,9 @@ function makePipeline(db) {
   }
   return { intake, graduate, confirm, rescind, reconcileBoot, list, get, stateOf };
 }
+var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 
-// src/index.ts
+// packages/enpoi-dispatcher/src/index.ts
 var name = "enpoi-dispatcher";
 var inject = ["tools", "subagents"];
 var PERSONAS = {

@@ -173,7 +173,10 @@ export class RevertExecutor {
           outcomes[targetKey] = { status: 'restored', fromSha: p.expectedDiskSha, toSha: p.targetBlobSha }
         } else if (action === 'trash') {
           const dest = await opts.trashFile(path)
-          outcomes[targetKey] = { status: 'trashed', dest }
+          // fromSha = the pre-trash disk state (expectedDiskSha); toSha = null
+          // (the file is gone) — recordOutcomes needs both to keep the
+          // mutation chain consistent (a null/null record corrupts it).
+          outcomes[targetKey] = { status: 'trashed', dest, fromSha: p.expectedDiskSha, toSha: null }
         }
       }
     } catch (err) {
@@ -285,7 +288,8 @@ export class RevertExecutor {
         }
       } else if (opts.resolution === 'trash') {
         const dest = await opts.trashFile(path)
-        outcome = { status: 'trashed', dest }
+        // fromSha = the pre-trash disk state (expectedDiskSha); toSha = null.
+        outcome = { status: 'trashed', dest, fromSha: opts.expectedDiskSha, toSha: null }
       } else {
         outcome = { status: 'invalid_resolution' }
       }

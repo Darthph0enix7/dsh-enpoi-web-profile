@@ -1,9 +1,10 @@
-// enpoi-contracts/lib/index.js
 var __defProp = Object.defineProperty;
 var __export = (target, all) => {
   for (var name2 in all)
     __defProp(target, name2, { get: all[name2], enumerable: true });
 };
+
+// node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -114,6 +115,8 @@ __export(external_exports, {
   util: () => util,
   void: () => voidType
 });
+
+// node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -246,6 +249,8 @@ var getParsedType = (data) => {
       return ZodParsedType.unknown;
   }
 };
+
+// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -362,6 +367,8 @@ ZodError.create = (issues) => {
   const error = new ZodError(issues);
   return error;
 };
+
+// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -463,6 +470,8 @@ var errorMap = (issue, _ctx) => {
   return { message };
 };
 var en_default = errorMap;
+
+// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -470,6 +479,8 @@ function setErrorMap(map) {
 function getErrorMap() {
   return overrideErrorMap;
 }
+
+// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -578,11 +589,15 @@ var isAborted = (x) => x.status === "aborted";
 var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
+
+// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
+
+// node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -3817,7 +3832,7 @@ ZodNaN.create = (params) => {
     ...processCreateParams(params)
   });
 };
-var BRAND = Symbol("zod_brand");
+var BRAND = /* @__PURE__ */ Symbol("zod_brand");
 var ZodBranded = class extends ZodType {
   _parse(input) {
     const { ctx } = this._processInputParams(input);
@@ -4029,6 +4044,8 @@ var coerce = {
   date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
 };
 var NEVER = INVALID;
+
+// packages/enpoi-contracts/lib/index.js
 var traceContextSchema = external_exports.object({
   /** Root query id — one user query spans one trace. */
   traceId: external_exports.string().min(1),
@@ -4064,6 +4081,10 @@ var briefProseUpdatedSchema = external_exports.object({
   openThreads: external_exports.array(external_exports.string()).optional(),
   /** The session seq the keeper's input was based on (I3 comparison). */
   basedOnSeq: external_exports.number().int().nonnegative(),
+  /** Structural-event count (user/message, turn/end, tool/call, tool/result) at basedOnSeq — seq-based freshness (Oracle amendment 4). */
+  basedOnStructuralCount: external_exports.number().int().nonnegative(),
+  /** The structural-distance threshold the keeper used — view() classifies freshness with it. */
+  structuralDistanceK: external_exports.number().int().positive().optional(),
   /** Route used, e.g. "deepseek/deepseek-v4-flash". */
   model: external_exports.string(),
   /** The prose summary text. */
@@ -4090,11 +4111,19 @@ var livingBriefStateSchema = external_exports.object({
   filesTouched: external_exports.array(external_exports.string()),
   blockers: external_exports.array(blockerSchema),
   phase: external_exports.string(),
-  prose: external_exports.object({ text: external_exports.string(), updatedAt: external_exports.number(), model: external_exports.string() }).nullable(),
+  prose: external_exports.object({
+    text: external_exports.string(),
+    updatedAt: external_exports.number(),
+    model: external_exports.string(),
+    basedOnSeq: external_exports.number().int().nonnegative(),
+    basedOnStructuralCount: external_exports.number().int().nonnegative(),
+    structuralDistanceK: external_exports.number().int().positive()
+  }).nullable(),
   goalSeq: external_exports.number().int().nonnegative(),
   lastEventSeq: external_exports.number().int().nonnegative(),
   foldErrors: external_exports.number().int().nonnegative(),
-  toolNames: external_exports.record(external_exports.string())
+  toolNames: external_exports.record(external_exports.string()),
+  structuralCount: external_exports.number().int().nonnegative()
 }).strict();
 var livingBriefViewSchema = external_exports.object({
   goal: external_exports.string(),
@@ -4104,12 +4133,19 @@ var livingBriefViewSchema = external_exports.object({
   filesTouched: external_exports.array(external_exports.string()),
   blockers: external_exports.array(blockerSchema),
   phase: external_exports.string(),
-  prose: external_exports.object({ text: external_exports.string(), updatedAt: external_exports.number(), model: external_exports.string() }).nullable(),
+  prose: external_exports.object({
+    text: external_exports.string(),
+    updatedAt: external_exports.number(),
+    model: external_exports.string(),
+    basedOnSeq: external_exports.number().int().nonnegative(),
+    basedOnStructuralCount: external_exports.number().int().nonnegative(),
+    structuralDistanceK: external_exports.number().int().positive()
+  }).nullable(),
   asOfSeq: external_exports.number().int().nonnegative(),
   freshness: external_exports.union([external_exports.literal("live"), external_exports.literal("cooling"), external_exports.literal("stale")])
 }).strict();
 
-// enpoi-living-brief/src/index.ts
+// packages/enpoi-living-brief/src/index.ts
 var name = "enpoi-living-brief";
 var inject = ["sessionProjections"];
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["write", "edit", "str_replace_editor"]);
@@ -4132,7 +4168,8 @@ function apply(ctx) {
         goalSeq: 0,
         lastEventSeq: 0,
         foldErrors: 0,
-        toolNames: {}
+        toolNames: {},
+        structuralCount: 0
       }),
       apply: (state, event) => fold(ctx, state, event),
       wire: {
@@ -4150,8 +4187,15 @@ function fold(ctx, state, event) {
         return { ...state, phase: "working", lastEventSeq: event.seq };
       case "turn/end": {
         const kind = event.data.reason.kind;
-        return { ...state, phase: kind === "aborted" ? "aborted" : "idle", lastEventSeq: event.seq };
+        return {
+          ...state,
+          phase: kind === "aborted" ? "aborted" : "idle",
+          lastEventSeq: event.seq,
+          structuralCount: state.structuralCount + 1
+        };
       }
+      case "user/message":
+        return { ...state, lastEventSeq: event.seq, structuralCount: state.structuralCount + 1 };
       case "tool/call": {
         const data = event.data;
         const toolNames = { ...state.toolNames };
@@ -4167,11 +4211,19 @@ function fold(ctx, state, event) {
             filesTouched = [...filesTouched, path];
           }
         }
-        return { ...state, toolNames, filesTouched, lastEventSeq: event.seq };
+        return {
+          ...state,
+          toolNames,
+          filesTouched,
+          lastEventSeq: event.seq,
+          structuralCount: state.structuralCount + 1
+        };
       }
       case "tool/result": {
         const data = event.data;
-        if (data.error === void 0) return { ...state, lastEventSeq: event.seq };
+        if (data.error === void 0) {
+          return { ...state, lastEventSeq: event.seq, structuralCount: state.structuralCount + 1 };
+        }
         const tool = state.toolNames[data.callId];
         const blocker = {
           id: `b-${event.seq}`,
@@ -4182,7 +4234,8 @@ function fold(ctx, state, event) {
         return {
           ...state,
           blockers: [...state.blockers, blocker].slice(-MAX_ENTRIES),
-          lastEventSeq: event.seq
+          lastEventSeq: event.seq,
+          structuralCount: state.structuralCount + 1
         };
       }
       case "brief/prose-updated": {
@@ -4190,7 +4243,14 @@ function fold(ctx, state, event) {
         if (data.origin !== "context-keeper") return { ...state, lastEventSeq: event.seq };
         const next = {
           ...state,
-          prose: { text: data.text, updatedAt: event.time, model: data.model },
+          prose: {
+            text: data.text,
+            updatedAt: event.time,
+            model: data.model,
+            basedOnSeq: data.basedOnSeq,
+            basedOnStructuralCount: data.basedOnStructuralCount,
+            structuralDistanceK: data.structuralDistanceK ?? 24
+          },
           lastEventSeq: event.seq
         };
         if (data.goal !== void 0 && data.basedOnSeq >= state.goalSeq) {
@@ -4224,9 +4284,7 @@ function extractFilePath(argumentsJson) {
   }
 }
 function view(state) {
-  const now = Date.now();
-  const ageMs = state.prose === null ? Number.POSITIVE_INFINITY : now - state.prose.updatedAt;
-  const freshness = state.prose === null ? "stale" : ageMs < 3e4 ? "live" : ageMs < 3e5 ? "cooling" : "stale";
+  const freshness = state.prose === null ? "stale" : state.structuralCount - state.prose.basedOnStructuralCount <= state.prose.structuralDistanceK ? "live" : state.structuralCount - state.prose.basedOnStructuralCount <= state.prose.structuralDistanceK * 2 ? "cooling" : "stale";
   return {
     goal: state.goal,
     decisions: state.decisions,
@@ -4242,6 +4300,8 @@ function view(state) {
 }
 export {
   apply,
+  fold,
   inject,
-  name
+  name,
+  view
 };
