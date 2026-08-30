@@ -18,7 +18,7 @@
  * @module dsh-enpoi-provider-sync
  */
 
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from 'schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -45,7 +45,7 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  intervalMs: Schema.number().default(21_600_000),
+  intervalMs: Schema.number().default(3_600_000),
   syncOnStart: Schema.boolean().default(true),
   syncDelayMs: Schema.number().default(2000),
   endpoints: Schema.dict(String).default({}),
@@ -144,6 +144,13 @@ async function refreshModelsDevOnline(): Promise<void> {
       const data = (await res.json()) as ModelsDevDatabase
       if (data && typeof data === 'object' && Object.keys(data).length > 50) {
         modelsDevCache = data
+        // Persist the fresh catalog to the shared cache so OpenCode and every
+        // restart read current metadata even when OpenCode itself is idle.
+        try {
+          writeFileSync(LOCAL_MODELS_CACHE_PATH, JSON.stringify(data), 'utf8')
+        } catch {
+          // cache write failure is non-fatal; the in-memory copy still serves
+        }
       }
     }
   } catch {
@@ -525,6 +532,10 @@ export function apply(ctx: Context, config: Config): void {
   void refreshModelsDevOnline()
 
   async function syncOnce(): Promise<void> {
+    // Refresh models.dev metadata on every pass (not just startup) so new
+    // models and corrected limits appear within one interval, matching
+    // OpenCode's hourly cadence.
+    await refreshModelsDevOnline()
     const settings = ctx.get('settings') as SettingsSeam | undefined
     if (settings === undefined) {
       logger.warn('settings seam absent — skipping sync pass')
@@ -586,7 +597,7 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const delay = config.syncDelayMs ?? 2000
-  const interval = config.intervalMs ?? 21_600_000
+  const interval = config.intervalMs ?? 3_600_000
 
   ctx.effect(() => {
     let timer: NodeJS.Timeout | undefined
