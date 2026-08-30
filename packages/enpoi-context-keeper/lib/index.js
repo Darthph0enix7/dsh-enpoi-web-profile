@@ -1,4 +1,4 @@
-var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : /* @__PURE__ */ Symbol.for("Symbol." + name2);
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
@@ -44,12 +44,12 @@ var __callDispose = (stack, error, hasError) => {
   return next();
 };
 
-// packages/enpoi-context-keeper/src/index.ts
+// src/index.ts
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
 
-// packages/enpoi-memory/lib/index.js
+// ../enpoi-memory/lib/index.js
 import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
@@ -245,7 +245,7 @@ function makePipeline(db) {
 }
 var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 
-// packages/enpoi-context-keeper/src/index.ts
+// src/index.ts
 import { join as join3 } from "node:path";
 import Schema from "schemastery";
 var name = "enpoi-context-keeper";
@@ -258,6 +258,15 @@ function diag(line) {
     appendFileSync(join3(dir, "enpoi-keeper.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
+  }
+}
+function keeperEnabled(ctx) {
+  try {
+    const settings = ctx.get("settings");
+    const tools = settings?.get?.("enpoi-orchestration")?.capabilities?.tools;
+    return tools?.["keeper"] !== false;
+  } catch {
+    return true;
   }
 }
 var Config = Schema.object({
@@ -398,8 +407,6 @@ var BriefService = class {
     this.ctx = ctx;
     this.config = config;
   }
-  ctx;
-  config;
   cache = /* @__PURE__ */ new Map();
   /**
    * Materialize (or reuse) the session's prose brief.
@@ -410,6 +417,9 @@ var BriefService = class {
    * only when the CALLER's signal aborts (the consumer is being cancelled).
    */
   async ensureFreshBrief(session, signal) {
+    if (!keeperEnabled(this.ctx)) {
+      return { ok: false, prose: null, reason: "keeper-disabled" };
+    }
     const key = session.id;
     const cfg = resolveKeeperParams(this.ctx, this.config);
     const entry = this.cache.get(key);
@@ -522,6 +532,7 @@ function apply(ctx, config) {
   const claimsRunning = /* @__PURE__ */ new Set();
   ctx.on("session/event", (session, event) => {
     if (event.type !== "turn/end") return;
+    if (!keeperEnabled(ctx)) return;
     const reason = event.data.reason;
     if (reason.kind === "aborted") return;
     let counter = claimCounters.get(session.id);

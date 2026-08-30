@@ -59,6 +59,21 @@ function diag(line: string): void {
   }
 }
 
+/**
+ * Whether the Context Keeper is enabled in the Capabilities Control Center
+ * (enpoi-orchestration.capabilities.tools.keeper, default true). When
+ * disabled, prose distillation and claims extraction are skipped.
+ */
+function keeperEnabled(ctx: Context): boolean {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { capabilities?: { tools?: Record<string, boolean> } } } | undefined
+    const tools = settings?.get?.('enpoi-orchestration')?.capabilities?.tools
+    return tools?.['keeper'] !== false
+  } catch {
+    return true
+  }
+}
+
 export interface Config {
   provider?: string
   model?: string
@@ -296,6 +311,13 @@ export class BriefService {
    * only when the CALLER's signal aborts (the consumer is being cancelled).
    */
   async ensureFreshBrief(session: Session, signal?: AbortSignal): Promise<BriefResult> {
+    // Capabilities Control Center: the keeper can be disabled globally
+    // (enpoi-orchestration.capabilities.tools.keeper). When disabled, prose
+    // distillation is skipped — consumers (oracle/council) degrade to the
+    // deterministic fold only.
+    if (!keeperEnabled(this.ctx)) {
+      return { ok: false, prose: null, reason: 'keeper-disabled' }
+    }
     const key = session.id
     // Doc 38: runtime parameters resolved fresh per call (hot-swap).
     const cfg = resolveKeeperParams(this.ctx, this.config)
@@ -438,6 +460,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type !== 'turn/end') return
+    if (!keeperEnabled(ctx)) return // Capabilities toggle: keeper disabled
     const reason = (event.data as { reason: { kind: string } }).reason
     if (reason.kind === 'aborted') return // don't extract from interrupted turns
     let counter = claimCounters.get(session.id)
