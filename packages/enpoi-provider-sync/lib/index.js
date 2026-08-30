@@ -1,12 +1,12 @@
-// src/index.ts
-import { readFileSync, existsSync } from "node:fs";
+// packages/enpoi-provider-sync/src/index.ts
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import Schema from "schemastery";
 import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { builtinProviders, getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 var name = "enpoi-provider-sync";
 var inject = [];
 var Config = Schema.object({
-  intervalMs: Schema.number().default(216e5),
+  intervalMs: Schema.number().default(36e5),
   syncOnStart: Schema.boolean().default(true),
   syncDelayMs: Schema.number().default(2e3),
   endpoints: Schema.dict(String).default({}),
@@ -39,6 +39,10 @@ async function refreshModelsDevOnline() {
       const data = await res.json();
       if (data && typeof data === "object" && Object.keys(data).length > 50) {
         modelsDevCache = data;
+        try {
+          writeFileSync(LOCAL_MODELS_CACHE_PATH, JSON.stringify(data), "utf8");
+        } catch {
+        }
       }
     }
   } catch {
@@ -202,7 +206,7 @@ function enrichModel(route, model, fallback) {
   const isReasoning = isReasoningModel(model.id, mDev, cat);
   let reasoningEfforts;
   if (isReasoning) {
-    const levels = { off: null };
+    const levels = {};
     if (Array.isArray(mDev?.reasoning_options)) {
       for (const opt of mDev.reasoning_options) {
         if (Array.isArray(opt.values)) {
@@ -221,7 +225,7 @@ function enrichModel(route, model, fallback) {
         }
       }
     }
-    if (Object.keys(levels).filter((k) => k !== "off").length === 0) {
+    if (Object.keys(levels).length === 0) {
       levels.minimal = "minimal";
       levels.low = "low";
       levels.medium = "medium";
@@ -229,7 +233,7 @@ function enrichModel(route, model, fallback) {
       levels.xhigh = "xhigh";
       levels.max = "max";
     }
-    if (Object.keys(levels).filter((k) => k !== "off").length > 0) {
+    if (Object.keys(levels).length > 0) {
       reasoningEfforts = levels;
     }
   }
@@ -269,6 +273,7 @@ function apply(ctx, config) {
   loadModelsDev();
   void refreshModelsDevOnline();
   async function syncOnce() {
+    await refreshModelsDevOnline();
     const settings = ctx.get("settings");
     if (settings === void 0) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
@@ -324,7 +329,7 @@ function apply(ctx, config) {
     }
   }
   const delay = config.syncDelayMs ?? 2e3;
-  const interval = config.intervalMs ?? 216e5;
+  const interval = config.intervalMs ?? 36e5;
   ctx.effect(() => {
     let timer;
     let intervalTimer;

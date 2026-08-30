@@ -447,9 +447,16 @@ function enrichModel(
   const isReasoning = isReasoningModel(model.id, mDev, cat)
 
   // 4. Resolve Reasoning Efforts
+  // NOTE: the `off` level is deliberately NOT written as a key — `off` is a
+  // YAML 1.1 boolean alias, so a YAML 1.1 parser (PyYAML, js-yaml 1.1 schema)
+  // would read `off: null` as `false: null` and corrupt the dict. The harness
+  // itself uses YAML 1.2 (reads `off` as a string), but the sync output must
+  // stay unambiguous for every consumer. Omitting `off` is equivalent: the
+  // catalog materializer maps absent levels to `null` (off included), and
+  // "not thinking" is the parameter's absence on the wire anyway.
   let reasoningEfforts: Record<string, string | null> | undefined
   if (isReasoning) {
-    const levels: Record<string, string | null> = { off: null }
+    const levels: Record<string, string | null> = {}
 
     if (Array.isArray(mDev?.reasoning_options)) {
       for (const opt of mDev.reasoning_options) {
@@ -471,7 +478,7 @@ function enrichModel(
       }
     }
 
-    if (Object.keys(levels).filter(k => k !== 'off').length === 0) {
+    if (Object.keys(levels).length === 0) {
       levels.minimal = 'minimal'
       levels.low = 'low'
       levels.medium = 'medium'
@@ -480,7 +487,7 @@ function enrichModel(
       levels.max = 'max'
     }
 
-    if (Object.keys(levels).filter(k => k !== 'off').length > 0) {
+    if (Object.keys(levels).length > 0) {
       reasoningEfforts = levels
     }
   }
