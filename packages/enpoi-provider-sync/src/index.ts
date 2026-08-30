@@ -167,32 +167,54 @@ const ROUTE_PROVIDER_MAP: Record<string, string[]> = {
 function resolveFromModelsDev(route: string, modelId: string): ModelsDevModel | undefined {
   const db = loadModelsDev()
   const cleanId = modelId.toLowerCase().trim()
-  const baseId = cleanId
-    .replace(/-thinking$/, '')
-    .replace(/-tiered$/, '')
-    .replace(/-preview$/, '')
-    .replace(/-exp$/, '')
+
+  // Progressive suffix stripping: -thinking → -tiered → -preview → -exp →
+  // -high/-low/-medium → -agent → -latest → -image. Each round re-checks the
+  // exact id, so gemini-2.5-flash-thinking → gemini-2.5-flash resolves.
+  // The ORIGINAL case is checked first: models.dev keys preserve case
+  // (e.g. 'MiniMax-M3', 'zai-org/GLM-5.3-Flash'), so lowercasing alone would
+  // miss them.
+  const SUFFIXES = ['-thinking', '-tiered', '-preview', '-exp', '-high', '-low', '-medium', '-agent', '-latest', '-image']
+  const candidates: string[] = [modelId, cleanId]
+  let base = cleanId
+  for (const suffix of SUFFIXES) {
+    if (base.endsWith(suffix)) {
+      base = base.slice(0, -suffix.length)
+      candidates.push(base)
+    }
+  }
 
   const candidateProviders = ROUTE_PROVIDER_MAP[route] ?? [route]
 
+  const find = (pModels: Record<string, unknown> | undefined): ModelsDevModel | undefined => {
+    if (!pModels) return undefined
+    for (const c of candidates) {
+      const hit = pModels[c] as ModelsDevModel | undefined
+      if (hit) return hit
+    }
+    // Prefix match: alias ids like gemini-3.1-pro-high → gemini-3.1-pro →
+    // models.dev gemini-3.1-pro-preview. Pick the shortest matching id.
+    const prefix = base
+    if (prefix.length >= 8) {
+      const matches = Object.keys(pModels).filter(k => k.startsWith(`${prefix}-`))
+      if (matches.length > 0) {
+        matches.sort((a, b) => a.length - b.length)
+        return pModels[matches[0]] as ModelsDevModel | undefined
+      }
+    }
+    return undefined
+  }
+
   // 1. Check candidate providers
   for (const p of candidateProviders) {
-    const pModels = db[p]?.models
-    if (pModels) {
-      if (pModels[modelId]) return pModels[modelId]
-      if (pModels[cleanId]) return pModels[cleanId]
-      if (pModels[baseId]) return pModels[baseId]
-    }
+    const hit = find(db[p]?.models)
+    if (hit) return hit
   }
 
   // 2. Global search across all providers in models.dev
   for (const [, pData] of Object.entries(db)) {
-    const pModels = pData.models
-    if (pModels) {
-      if (pModels[modelId]) return pModels[modelId]
-      if (pModels[cleanId]) return pModels[cleanId]
-      if (pModels[baseId]) return pModels[baseId]
-    }
+    const hit = find(pData.models)
+    if (hit) return hit
   }
 
   return undefined
@@ -305,15 +327,24 @@ function fallbackFor(capacities: Record<string, RouteCapacity> | undefined, rout
   return routeCaps.default === undefined ? undefined : { ...routeCaps.default, matched: 'default' }
 }
 
-/** Detect input modalities (strictly 'text' | 'image' as required by pi-ai schema). */
+/** Detect input modalities (strictly 'text' | 'image' as required by pi-ai schema).
+ *
+ * Data-first: when models.dev / catalog carry modalities, they are
+ * AUTHORITATIVE — id heuristics never add image on top (that produced false
+ * vision claims for text-only models). Heuristics run only when no structured
+ * data exists (custom/alias models).
+ */
 function detectModalities(id: string, mDev: ModelsDevModel | undefined, cat: Model<Api> | undefined): ('text' | 'image')[] {
-  const inputs: ('text' | 'image')[] = ['text']
   const rawInputs = mDev?.modalities?.input ?? cat?.input ?? []
   const lower = id.toLowerCase()
 
+  if (rawInputs.length > 0) {
+    const inputs: ('text' | 'image')[] = ['text']
+    if (rawInputs.includes('image') || rawInputs.includes('vision')) inputs.push('image')
+    return inputs
+  }
+
   if (
-    rawInputs.includes('image') ||
-    rawInputs.includes('vision') ||
     lower.includes('vision') ||
     lower.includes('vl') ||
     lower.includes('minimax') ||
@@ -331,10 +362,10 @@ function detectModalities(id: string, mDev: ModelsDevModel | undefined, cat: Mod
     lower.includes('grok-2') ||
     lower.includes('mimo')
   ) {
-    inputs.push('image')
+    return ['text', 'image']
   }
 
-  return inputs
+  return ['text']
 }
 
 /** Determines if a model has reasoning capabilities. */
@@ -379,20 +410,30 @@ function enrichModel(
   const shortId = model.id.includes('/') ? model.id.split('/').pop()! : model.id
   const cat = catalog.get(model.id) ?? catalog.get(shortId)
 
-  // 1. Resolve Name
-  let name = model.name
-  if (name === undefined || name === model.id || name.length > 60) {
-    name = mDev?.name ?? cat?.name ?? beautifyId(model.id)
+  // 1. Resolve Name — models.dev is AUTHORITATIVE; the live proxy's
+  // description is often mislabeled (e.g. gemini-2.5-flash-thinking described
+  // as "Gemini 3.1 Flash Lite"), so it is only a fallback.
+  let name = mDev?.name
+  if (name === undefined || name.length === 0) {
+    const liveName = model.name
+    if (liveName !== undefined && liveName !== model.id && liveName.length <= 60) {
+      name = liveName
+    } else {
+      name = cat?.name ?? beautifyId(model.id)
+    }
   }
 
-  // 2. Resolve Context Window & Max Output Tokens
+  // 2. Resolve Context Window & Max Output Tokens — models.dev is
+  // AUTHORITATIVE; the route prefix fallback is a guess for unknown ids and
+  // must come LAST (it was winning over real models.dev limits, e.g.
+  // gemini-3.1-flash-image got 1M instead of its true 65K).
   const devContext = mDev?.limit?.context ?? mDev?.limit?.input ?? mDev?.contextWindow
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens
   const prefixContext = fallback?.matched === 'prefix' ? fallback.contextWindow : undefined
   const prefixMax = fallback?.matched === 'prefix' ? fallback.maxTokens : undefined
 
-  const contextWindow = model.contextWindow ?? prefixContext ?? devContext ?? cat?.contextWindow ?? fallback?.contextWindow ?? 131_072
-  const maxTokens = prefixMax ?? devMax ?? cat?.maxTokens ?? fallback?.maxTokens ?? 8192
+  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262_144
+  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32_768
 
   // 3. Resolve Modalities & Capabilities
   const inputModalities = detectModalities(model.id, mDev, cat)
