@@ -189,7 +189,7 @@ export async function startDebaterFiber(
   initialPromptText: string,
   signal: AbortSignal,
 ): Promise<DebaterFiberState> {
-  const denied = COUNCIL_DENIED_TOOLS.filter(name => ctx.tools.get(name) !== undefined)
+  const denied = COUNCIL_DENIED_TOOLS
   const personaModel = resolvePersonaModel(ctx, persona)
 
   councilDiag(`Spawning debater ${persona} with model: ${personaModel ? `${personaModel.provider}/${personaModel.model}` : `inherited from parent (${parent.options.provider}/${parent.options.model})`}`)

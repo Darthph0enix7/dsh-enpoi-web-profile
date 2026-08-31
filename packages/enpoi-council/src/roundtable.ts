@@ -157,6 +157,18 @@ export async function runRoundtable(
 
   const { text: briefText, goalSeq: initialGoalSeq } = getLivingBriefContext(ctx, parent)
 
+  // Progress visibility: emit council/started so the orchestrator's session
+  // log shows the debate began (the blocking tool call otherwise shows no
+  // progress for minutes).
+  try {
+    parent.session.append('council/started', {
+      kind: 'roundtable',
+      query: args.query,
+      maxRounds,
+      hideLimit,
+    })
+  } catch { /* progress events must never break the debate */ }
+
   const debaterFibers: DebaterFiberState[] = [
     { persona: 'Skeptic', childId: '', isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
     { persona: 'Architect', childId: '', isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
@@ -258,6 +270,16 @@ export async function runRoundtable(
         critic: criticScore,
       })
 
+      // Progress visibility: emit council/round after each completed round.
+      try {
+        parent.session.append('council/round', {
+          round,
+          kind: 'roundtable',
+          responses: responses.map(r => ({ persona: r.persona, textLen: r.text.length, isConcur: r.isConcur, error: r.error ?? null })),
+          critic: criticScore ? { consensusScore: criticScore.consensusScore, qualityScore: criticScore.qualityScore, continueDecision: criticScore.continueDecision } : null,
+        })
+      } catch { /* progress events must never break the debate */ }
+
       // 3. Evaluate Stopping Rules (Deterministic Jaccard delta + Consensus)
       const decision = evaluateStopping(stoppingState, criticScore, currentClaims, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold })
       stoppingState.history.push({
@@ -324,6 +346,15 @@ export async function runRoundtable(
       dissents,
     }
   } finally {
+    // Progress visibility: emit council/finished (best-effort, even on abort).
+    try {
+      parent.session.append('council/finished', {
+        kind: 'roundtable',
+        roundsRun: stoppingState.round,
+        stopReason: lastStopDecision.reason || 'aborted',
+        synthesisLen: finalSynthesis.length,
+      })
+    } catch { /* progress events must never break the debate */ }
     // Teardown all fibers cleanly (ephemeral: true)
     const allFibers = [...debaterFibers]
     if (criticFiber !== null) allFibers.push(criticFiber)

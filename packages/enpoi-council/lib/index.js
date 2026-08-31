@@ -519,7 +519,7 @@ function applyPersonaModel(ctx, childId, persona) {
   }
 }
 async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialPromptText, signal) {
-  const denied = COUNCIL_DENIED_TOOLS.filter((name2) => ctx.tools.get(name2) !== void 0);
+  const denied = COUNCIL_DENIED_TOOLS;
   const personaModel = resolvePersonaModel(ctx, persona);
   councilDiag(`Spawning debater ${persona} with model: ${personaModel ? `${personaModel.provider}/${personaModel.model}` : `inherited from parent (${parent.options.provider}/${parent.options.model})`}`);
   const started = await ctx.subagents.startContinuable({
@@ -923,6 +923,15 @@ async function runRoundtable(ctx, parent, args, signal) {
     if (signal.aborted) throw signal.reason ?? new Error("aborted");
   }
   const { text: briefText, goalSeq: initialGoalSeq } = getLivingBriefContext(ctx, parent);
+  try {
+    parent.session.append("council/started", {
+      kind: "roundtable",
+      query: args.query,
+      maxRounds,
+      hideLimit
+    });
+  } catch {
+  }
   const debaterFibers = [
     { persona: "Skeptic", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
     { persona: "Architect", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
@@ -994,6 +1003,15 @@ ${r.text}`).join("\n\n");
         responses,
         critic: criticScore
       });
+      try {
+        parent.session.append("council/round", {
+          round,
+          kind: "roundtable",
+          responses: responses.map((r) => ({ persona: r.persona, textLen: r.text.length, isConcur: r.isConcur, error: r.error ?? null })),
+          critic: criticScore ? { consensusScore: criticScore.consensusScore, qualityScore: criticScore.qualityScore, continueDecision: criticScore.continueDecision } : null
+        });
+      } catch {
+      }
       const decision = evaluateStopping(stoppingState, criticScore, currentClaims, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold });
       stoppingState.history.push({
         round,
@@ -1049,6 +1067,15 @@ ${allRoundsText}`;
       dissents
     };
   } finally {
+    try {
+      parent.session.append("council/finished", {
+        kind: "roundtable",
+        roundsRun: stoppingState.round,
+        stopReason: lastStopDecision.reason || "aborted",
+        synthesisLen: finalSynthesis.length
+      });
+    } catch {
+    }
     const allFibers = [...debaterFibers];
     if (criticFiber !== null) allFibers.push(criticFiber);
     await disposeCouncilFibers(ctx, allFibers);
@@ -1092,6 +1119,15 @@ async function runChorus(ctx, parent, args, signal) {
     if (signal.aborted) throw signal.reason ?? new Error("aborted");
   }
   const briefText = getLivingBriefText(ctx, parent);
+  try {
+    parent.session.append("council/started", {
+      kind: "chorus",
+      query: args.query,
+      maxRounds,
+      hideLimit
+    });
+  } catch {
+  }
   const lensFibers = [
     { persona: "Visionary", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
     { persona: "Experiencer", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
@@ -1170,6 +1206,16 @@ Provide:
         responses,
         curatorBrief: curatorText
       });
+      try {
+        parent.session.append("council/round", {
+          round,
+          kind: "chorus",
+          responses: responses.map((r) => ({ persona: r.persona, textLen: r.text.length, isConcur: r.isConcur, error: r.error ?? null })),
+          curatorBriefLen: curatorText.length,
+          gems: lastGems
+        });
+      } catch {
+      }
       const decision = evaluateStopping(stoppingState, null, currentIdeaTokens, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold });
       stoppingState.history.push({
         round,
@@ -1216,6 +1262,15 @@ ${allRoundsText}`;
       modelsUsed
     };
   } finally {
+    try {
+      parent.session.append("council/finished", {
+        kind: "chorus",
+        roundsRun: stoppingState.round,
+        stopReason: lastStopReason || "aborted",
+        harvestLen: finalHarvest.length
+      });
+    } catch {
+    }
     const allFibers = [...lensFibers];
     if (curatorFiber !== null) allFibers.push(curatorFiber);
     await disposeCouncilFibers(ctx, allFibers);

@@ -109,6 +109,18 @@ export async function runChorus(
 
   const briefText = getLivingBriefText(ctx, parent)
 
+  // Progress visibility: emit council/started so the orchestrator's session
+  // log shows the brainstorm began (the blocking tool call otherwise shows no
+  // progress for minutes).
+  try {
+    parent.session.append('council/started', {
+      kind: 'chorus',
+      query: args.query,
+      maxRounds,
+      hideLimit,
+    })
+  } catch { /* progress events must never break the brainstorm */ }
+
   const lensFibers: DebaterFiberState[] = [
     { persona: 'Visionary', childId: '', isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
     { persona: 'Experiencer', childId: '', isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
@@ -213,6 +225,17 @@ Provide:
         curatorBrief: curatorText,
       })
 
+      // Progress visibility: emit council/round after each completed round.
+      try {
+        parent.session.append('council/round', {
+          round,
+          kind: 'chorus',
+          responses: responses.map(r => ({ persona: r.persona, textLen: r.text.length, isConcur: r.isConcur, error: r.error ?? null })),
+          curatorBriefLen: curatorText.length,
+          gems: lastGems,
+        })
+      } catch { /* progress events must never break the brainstorm */ }
+
       // 3. Evaluate Plateau / Stopping
       const decision = evaluateStopping(stoppingState, null, currentIdeaTokens, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold })
       stoppingState.history.push({
@@ -263,6 +286,15 @@ Provide:
       modelsUsed,
     }
   } finally {
+    // Progress visibility: emit council/finished (best-effort, even on abort).
+    try {
+      parent.session.append('council/finished', {
+        kind: 'chorus',
+        roundsRun: stoppingState.round,
+        stopReason: lastStopReason || 'aborted',
+        harvestLen: finalHarvest.length,
+      })
+    } catch { /* progress events must never break the brainstorm */ }
     const allFibers = [...lensFibers]
     if (curatorFiber !== null) allFibers.push(curatorFiber)
     await disposeCouncilFibers(ctx, allFibers)
