@@ -122,6 +122,13 @@ export function evaluateStopping(
   const jaccardSim = calculateJaccardSimilarity(prevClaims, currentClaims)
   // Delta is the rate of NEW information being introduced (1.0 = completely new, 0.0 = identical)
   const delta = 1.0 - jaccardSim
+  // Novelty vs ALL previous rounds: the max similarity to any earlier round.
+  // A round that mostly repeats ANY earlier round (not just the last) is a
+  // plateau signal — creative lenses reword the same themes across rounds.
+  const maxSimToAnyPrior = state.history.length > 0
+    ? Math.max(...state.history.map(h => calculateJaccardSimilarity(h.claims, currentClaims)))
+    : 0
+  const noveltyVsAll = 1.0 - maxSimToAnyPrior
 
   let consensusRatio = 0
   let heuristicFallback = false
@@ -147,15 +154,15 @@ export function evaluateStopping(
   }
 
   // 5. Plateau detection check (Delta < plateauDeltaThreshold on Round 3+)
-  if (round >= 3 && delta < thresholds.plateauDeltaThreshold) {
+  if (round >= 3 && (delta < thresholds.plateauDeltaThreshold || noveltyVsAll < thresholds.plateauDeltaThreshold)) {
     const prevDelta = state.history.length >= 2
       ? 1.0 - calculateJaccardSimilarity(state.history[state.history.length - 2]!.claims, prevClaims)
       : 1.0
 
-    if (prevDelta < 0.25 || delta < 0.02) {
+    if (prevDelta < 0.25 || delta < 0.02 || noveltyVsAll < 0.02) {
       return {
         shouldStop: true,
-        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)} < ${thresholds.plateauDeltaThreshold.toFixed(2)}).`,
+        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)}, novelty-vs-all: ${noveltyVsAll.toFixed(3)} < ${thresholds.plateauDeltaThreshold.toFixed(2)}).`,
         stopCode: 'PLATEAU_DETECTED',
         heuristicFallback,
         consensusRatio,

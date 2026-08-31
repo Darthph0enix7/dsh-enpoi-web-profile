@@ -26,6 +26,7 @@ import {
   type DebaterResponse,
   executeParallelRound,
   disposeCouncilFibers,
+  followupDebaterFiber,
   startDebaterFiber,
   waitForFiberTurn,
   estimateTokens,
@@ -251,10 +252,7 @@ export async function runRoundtable(
       if (criticFiber === null) {
         criticFiber = await startDebaterFiber(ctx, parent, 'Critic', CRITIC_SYSTEM, criticPrompt, signal)
       } else {
-        await ctx.subagents.followup(parent, criticFiber.childId as any, [{ type: 'text', text: criticPrompt }], {
-          source: { kind: 'user' },
-          signal,
-        })
+        await followupDebaterFiber(ctx, parent, criticFiber, criticPrompt, signal)
       }
 
       const criticText = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs)
@@ -311,10 +309,7 @@ export async function runRoundtable(
     const synthPrompt = buildCriticSynthesisPrompt(args.query, allRoundsText, driftWarning)
 
     if (criticFiber !== null) {
-      await ctx.subagents.followup(parent, criticFiber.childId as any, [{ type: 'text', text: synthPrompt }], {
-        source: { kind: 'user' },
-        signal,
-      })
+      await followupDebaterFiber(ctx, parent, criticFiber, synthPrompt, signal)
       finalSynthesis = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs)
       stoppingState.cumulativeTokens += estimateTokens(finalSynthesis)
     } else {

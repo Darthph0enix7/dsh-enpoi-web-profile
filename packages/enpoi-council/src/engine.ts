@@ -238,16 +238,37 @@ export async function followupDebaterFiber(
   fiber: DebaterFiberState,
   promptText: string,
   signal: AbortSignal,
+  timeoutMs = 30_000,
 ): Promise<void> {
-  await ctx.subagents.followup(
-    parent,
-    fiber.childId as SessionId,
-    [{ type: 'text', text: promptText }],
-    {
-      source: { kind: 'user' },
-      signal,
-    },
-  )
+  // The followup acquires the child's activation lock; a stuck lock (e.g. a
+  // wedged settlement watcher) would otherwise hang the whole council forever.
+  // Bound it so a wedged child surfaces as a loud error instead of a silent
+  // multi-minute stall.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      ctx.subagents.followup(
+        parent,
+        fiber.childId as SessionId,
+        [{ type: 'text', text: promptText }],
+        {
+          source: { kind: 'user' },
+          signal,
+        },
+      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`council followup to ${fiber.persona} (${fiber.childId}) timed out after ${timeoutMs}ms — child activation lock stuck`))
+        }, timeoutMs)
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(new Error('council followup aborted'))
+        }, { once: true })
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 /**

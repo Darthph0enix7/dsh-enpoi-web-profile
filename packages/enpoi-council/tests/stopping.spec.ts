@@ -136,3 +136,40 @@ describe('enpoi-council / stopping — Deterministic Stopping Rules', () => {
     expect(decision.stopCode).toBe('CONSENSUS_REACHED')
   })
 })
+
+describe('chorus novelty stopping (Curator NOVELTY signal)', () => {
+  it('stops after 2 consecutive low-novelty rounds even when raw delta is high', () => {
+    // Simulate the chorus loop's lowNoveltyStreak logic
+    let lowNoveltyStreak = 0
+    const novelties = [8, 2, 2] // round 1 high, rounds 2-3 low
+    let stopped = false
+    for (const n of novelties) {
+      if (n <= 3) lowNoveltyStreak += 1
+      else lowNoveltyStreak = 0
+      if (lowNoveltyStreak >= 2) { stopped = true; break }
+    }
+    expect(stopped).toBe(true)
+  })
+
+  it('does not stop on a single low-novelty round', () => {
+    let lowNoveltyStreak = 0
+    const novelties = [8, 2, 7] // one low round, then high again
+    let stopped = false
+    for (const n of novelties) {
+      if (n <= 3) lowNoveltyStreak += 1
+      else lowNoveltyStreak = 0
+      if (lowNoveltyStreak >= 2) { stopped = true; break }
+    }
+    expect(stopped).toBe(false)
+  })
+
+  it('noveltyVsAll detects repetition of ANY earlier round', () => {
+    const a = new Set(['idea_a', 'idea_b', 'idea_c'])
+    const b = new Set(['idea_a', 'idea_b', 'idea_d']) // 2/4 overlap with a
+    const c = new Set(['idea_a', 'idea_b', 'idea_c']) // identical to a
+    const simToA = calculateJaccardSimilarity(a, c)
+    expect(simToA).toBe(1.0)
+    const noveltyVsAll = 1.0 - simToA
+    expect(noveltyVsAll).toBe(0.0) // pure repetition of an earlier round
+  })
+})

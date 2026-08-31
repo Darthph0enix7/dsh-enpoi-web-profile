@@ -25,6 +25,7 @@ import {
   type DebaterResponse,
   executeParallelRound,
   disposeCouncilFibers,
+  followupDebaterFiber,
   startDebaterFiber,
   waitForFiberTurn,
   estimateTokens,
@@ -147,6 +148,7 @@ export async function runChorus(
   let lastCuratorBrief = ''
   let lastGems: string[] = []
   let finalHarvest = ''
+  let lowNoveltyStreak = 0
   let lastStopReason = 'completed'
 
   try {
@@ -197,15 +199,13 @@ ${roundTranscriptText}
 
 Provide:
 1. Short 2-3 sentence brief summarizing the newest themes.
-2. 1-2 Spotlight Gems from this round (lines starting with "• GEM:").`
+2. 1-2 Spotlight Gems from this round (lines starting with "• GEM:").
+3. NOVELTY: a single integer 0-10 rating how much genuinely NEW direction this round added vs ALL previous rounds combined (0 = pure repetition of earlier ideas, 10 = entirely new territory). Format exactly: "NOVELTY: <n>"`
 
       if (curatorFiber === null) {
         curatorFiber = await startDebaterFiber(ctx, parent, 'Curator', CURATOR_SYSTEM, curatorPrompt, signal)
       } else {
-        await ctx.subagents.followup(parent, curatorFiber.childId as any, [{ type: 'text', text: curatorPrompt }], {
-          source: { kind: 'user' },
-          signal,
-        })
+        await followupDebaterFiber(ctx, parent, curatorFiber, curatorPrompt, signal)
       }
 
       const curatorText = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs)
@@ -217,6 +217,18 @@ Provide:
       lastGems = []
       for (const gm of gemMatches) {
         lastGems.push(gm[1]!.trim())
+      }
+
+      // Extract the Curator's NOVELTY score (0-10) — a quality-based plateau
+      // signal: if the Curator judges two consecutive rounds as adding little
+      // genuinely new direction, the brainstorm is done even if the raw text
+      // Jaccard delta stays high (creative lenses reword the same themes).
+      const noveltyMatch = curatorText.match(/NOVELTY:\s*(\d{1,2})/i)
+      const novelty = noveltyMatch !== null ? Math.max(0, Math.min(10, Number(noveltyMatch[1]))) : null
+      if (novelty !== null && novelty <= 3) {
+        lowNoveltyStreak += 1
+      } else {
+        lowNoveltyStreak = 0
       }
 
       roundsTranscript.push({
@@ -244,6 +256,14 @@ Provide:
         consensusRatio: 0.5,
       })
 
+      // Quality-based plateau: the Curator judged 2 consecutive rounds as
+      // adding little genuinely new direction (NOVELTY <= 3) — stop even if
+      // the raw-text Jaccard delta stays high.
+      if (lowNoveltyStreak >= 2) {
+        lastStopReason = `Curator judged ${lowNoveltyStreak} consecutive rounds as low novelty (ideas repeating, quality plateaued)`
+        break
+      }
+
       lastStopReason = decision.reason
 
       if (decision.shouldStop) {
@@ -261,10 +281,7 @@ Provide:
     const harvestPrompt = buildCuratorHarvestPrompt(args.query, allRoundsText)
 
     if (curatorFiber !== null) {
-      await ctx.subagents.followup(parent, curatorFiber.childId as any, [{ type: 'text', text: harvestPrompt }], {
-        source: { kind: 'user' },
-        signal,
-      })
+      await followupDebaterFiber(ctx, parent, curatorFiber, harvestPrompt, signal)
       finalHarvest = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs)
       stoppingState.cumulativeTokens += estimateTokens(finalHarvest)
     } else {

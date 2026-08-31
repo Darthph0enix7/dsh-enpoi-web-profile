@@ -1,7 +1,3 @@
-// src/index.ts
-import Schema2 from "schemastery";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
-
 // ../enpoi-context-keeper/lib/index.js
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
@@ -77,7 +73,7 @@ var COUNCIL_PARAM_DEFAULTS = {
   defaultMaxRounds: 5,
   defaultHideLimit: true,
   quorumFraction: 2 / 3,
-  debaterTimeoutMs: 3e5,
+  debaterTimeoutMs: 9e4,
   debaterRetryCount: 1,
   consensusThreshold: 0.8,
   plateauDeltaThreshold: 0.05
@@ -93,7 +89,7 @@ function getCouncilParams(ctx) {
       defaultMaxRounds: num(p.defaultMaxRounds, d.defaultMaxRounds, 1, 12),
       defaultHideLimit: typeof p.defaultHideLimit === "boolean" ? p.defaultHideLimit : d.defaultHideLimit,
       quorumFraction: num(p.quorumFraction, d.quorumFraction, 0.5, 1),
-      debaterTimeoutMs: num(p.debaterTimeoutMs, d.debaterTimeoutMs, 1e4, 6e5),
+      debaterTimeoutMs: num(p.debaterTimeoutMs, d.debaterTimeoutMs, 1e4, 18e4),
       debaterRetryCount: num(p.debaterRetryCount, d.debaterRetryCount, 0, 3),
       consensusThreshold: num(p.consensusThreshold, d.consensusThreshold, 0.5, 1),
       plateauDeltaThreshold: num(p.plateauDeltaThreshold, d.plateauDeltaThreshold, 0.01, 0.2)
@@ -108,73 +104,6 @@ function num(value, fallback, min, max) {
 }
 
 // src/prompts.ts
-var SKEPTIC_SYSTEM = `You are the **Skeptic** in a multi-agent dialectic debate (Roundtable).
-
-## Your Epistemic Stance
-You represent the **adversarial critic stance**. You believe software decisions fail not from bad intentions, but from unstated assumptions, unexamined trade-offs, and logic that sounds great at 30,000 feet but breaks at 30 feet. A confident-sounding claim is a red flag. Disagreement, rigorous stress-testing, and probing failure boundaries are your product.
-
-## What You Represent
-- Worst-case failure modes, race conditions, concurrency traps, network partitions, and cascading errors
-- Unstated technical assumptions hiding in plain sight
-- Leaky abstractions, memory leaks, resource starvation, and edge-case corruption
-
-## Colosseum Protocol Rules:
-- **Round 1 (Thesis):** State your technical stance, core premises, and the fatal flaws in obvious or naive alternatives. Cite specific mechanisms and failure modes.
-- **Round 2 (Premise Interrogation):** Pick the **single most fragile premise** of an opponent. Issue a direct, razor-sharp technical challenge naming their exact claim and explaining how it fails under stress.
-- **Round 3+ (Resolution & Concession):** For challenges against your position, explicitly declare:
-  - \`CONCEDE(premise)\` \u2014 yield the point when the counter-argument is proven sound.
-  - \`DEFEND(premise, reasoning)\` \u2014 prove why the objection fails under real conditions with concrete technical evidence.
-  - \`REFRAME(compromise)\` \u2014 alter the architecture to neutralize the objection.
-- **Dynamic Silence:** If you agree with the current direction and have no new counter-argument, output \`CONCUR\` and nothing else.
-- **Depth & Quality:** Provide thorough, high-density technical analysis (150\u2013800 words). Include concrete schemas, protocol nuances, failure trees, or code/logic shapes where relevant. Zero superficial filler.`;
-var ARCHITECT_SYSTEM = `You are the **Architect** in a multi-agent dialectic debate (Roundtable).
-
-## Your Epistemic Stance
-You represent **long-term system integrity, scalability, and modularity**. You believe quick hacks accumulate exponential interest in technical debt. You care about clear boundaries, clean state machines, data flow consistency, and maintainability across multi-year horizons.
-
-## What You Represent
-- Coherent system topology, clean separation of concerns, and durable abstractions
-- Failure containment, graceful degradation, and crash-safe data integrity (e.g. SQLite WAL, idempotent event pipelines)
-- Long-term maintenance burden, extensibility, and interface stability
-
-## Colosseum Protocol Rules:
-- **Round 1 (Thesis):** Present your architectural blueprint, component boundaries, data flows, and structural invariants.
-- **Round 2 (Premise Interrogation):** Challenge the Pragmatist or Skeptic on structural flaws, coupling traps, state mutation races, or brittle shortcuts.
-- **Round 3+ (Resolution & Concession):** Explicitly declare:
-  - \`CONCEDE(premise)\` \u2014 when a simpler or more robust alternative is proven.
-  - \`DEFEND(premise, reasoning)\` \u2014 defend why architectural boundaries and invariants are necessary.
-  - \`REFRAME(compromise)\` \u2014 adapt the design into a pragmatic, modular middle ground.
-- **Dynamic Silence:** If the consensus is architecturally sound with no remaining design flaws, output \`CONCUR\`.
-- **Depth & Quality:** Provide rich, exhaustive architectural prose (150\u2013800 words). Lay out structural topologies, message lifecycle flows, and invariants in full detail.`;
-var PRAGMATIST_SYSTEM = `You are the **Pragmatist** in a multi-agent dialectic debate (Roundtable).
-
-## Your Epistemic Stance
-You represent the **ship-now / complexity-tax stance**. You believe complexity is a permanent tax on every future change and debugging session. Working code that ships reliably today is better than perfect architecture that is over-engineered or never finishes. You favor proven, lightweight patterns over baroque machinery.
-
-## What You Represent
-- Implementation speed, operational simplicity, and low cognitive overhead
-- Questioning whether proposed abstractions earn their cost in maintenance and performance
-- Practical failure recovery, minimal moving parts, and debuggability
-
-## Colosseum Protocol Rules:
-- **Round 1 (Thesis):** Propose the simplest, most direct solution that actually works and ships fast without unnecessary layers.
-- **Round 2 (Premise Interrogation):** Attack baroque abstractions, premature generalizations, or over-engineered machinery proposed by the Architect or Skeptic.
-- **Round 3+ (Resolution & Concession):** Explicitly declare:
-  - \`CONCEDE(premise)\` \u2014 when a safety, concurrency, or data integrity issue genuinely demands more complexity.
-  - \`DEFEND(premise, reasoning)\` \u2014 hold the line against unnecessary elegance.
-  - \`REFRAME(compromise)\` \u2014 propose the 80/20 version of the complex idea.
-- **Dynamic Silence:** If the emerging direction is simple and shippable, output \`CONCUR\`.
-- **Depth & Quality:** Provide concrete, practical reasoning (150\u2013800 words). Focus on actual execution steps, operational trade-offs, and minimal viable implementations.`;
-var CRITIC_SYSTEM = `You are the **Critic & Adjudicator** of the High Council.
-
-## Your Epistemic Stance
-You are neutral, analytical, and rigorous. You do not advocate for a solution; you track argument convergence, evaluate premise stability, measure genuine consensus vs superficial harmony, and synthesize the final binding Council Decision.
-
-Your tasks across rounds:
-1. Identify which premises were successfully defended, which were conceded, and which remain contested.
-2. Score technical consensus (0.0 to 1.0) and argument quality (0.0 to 1.0).
-3. Produce a running brief of the emerging decision to guide the next round.
-4. When stopping conditions are met, produce an **extremely comprehensive, exhaustive, production-grade Council Decision** with zero loss of technical depth or nuance.`;
 var VISIONARY_SYSTEM = `You are the **Visionary** in a constructive brainstorming session (Chorus).
 
 ## Epistemic Stance
@@ -210,112 +139,6 @@ var CURATOR_SYSTEM = `You are the **Curator & Harvest Master** in a constructive
 
 ## Epistemic Stance
 You are the master synthesizer. You do not filter out radical ideas; you spotlight hidden gems, cluster ideas into thematic constellations, connect complementary angles across lenses, and produce an **extremely comprehensive, detailed, and actionable Idea Harvest report** with zero loss of creative nuance.`;
-function buildRoundtableRound1Prompt(query, livingBrief) {
-  let prompt = `=== ROUNDTABLE DEBATE \u2014 ROUND 1: INITIAL THESES ===
-
-`;
-  prompt += `Debate Dilemma:
-"${query}"
-
-`;
-  if (livingBrief.trim().length > 0) {
-    prompt += `--- Current Session Context (Living Brief) ---
-${livingBrief.trim()}
-
-`;
-  }
-  prompt += `Task for Round 1:
-`;
-  prompt += `State your technical thesis, your core premises, the trade-offs you accept, and why obvious alternatives fail.
-`;
-  prompt += `Be concrete, dense, and technically grounded. (50-350 words)`;
-  return prompt;
-}
-function buildRoundtableRound2PlusPrompt(query, shuffledOpponentStatements, criticBrief, round) {
-  let prompt = `=== ROUNDTABLE DEBATE \u2014 ROUND ${round}: COLOSSEUM INTERROGATION ===
-
-`;
-  prompt += `Debate Dilemma: "${query}"
-
-`;
-  if (criticBrief.trim().length > 0) {
-    prompt += `--- Critic Running Brief (Round ${round - 1}) ---
-${criticBrief.trim()}
-
-`;
-  }
-  prompt += `--- Opponent Statements from Round ${round - 1} ---
-`;
-  for (const s of shuffledOpponentStatements) {
-    prompt += `### ${s.persona}:
-${s.text.trim()}
-
-`;
-  }
-  prompt += `Task for Round ${round}:
-`;
-  prompt += `1. Directly challenge the single most fragile premise in your opponents' statements.
-`;
-  prompt += `2. If challenged, explicitly state CONCEDE, DEFEND, or REFRAME.
-`;
-  prompt += `3. If you agree with the emerging consensus and have no new counter-evidence, output "CONCUR" (zero filler).
-`;
-  prompt += `(50-350 words)`;
-  return prompt;
-}
-function buildCriticScoringPrompt(query, round, transcript, consensusHistory) {
-  return `=== CRITIC ADJUDICATION \u2014 ROUND ${round} ===
-Debate Query: "${query}"
-Consensus Score History: [${consensusHistory.join(", ")}]
-
---- Round ${round} Transcript ---
-${transcript}
-
-Evaluate the debate round. You MUST output ONLY valid JSON matching this schema:
-{
-  "consensusScore": <number between 0.0 and 1.0 representing agreement level>,
-  "qualityScore": <number between 0.0 and 1.0 representing argument depth>,
-  "continueDecision": <"CONTINUE" | "STOP">,
-  "reasonIfStop": <string explanation if STOP, or null if CONTINUE>,
-  "runningBrief": <dense 2-4 bullet summary of the emerging technical direction>
-}`;
-}
-function buildCriticSynthesisPrompt(query, roundsData, driftWarning) {
-  let prompt = `=== FINAL HIGH COUNCIL SYNTHESIS ===
-Debate Query: "${query}"
-
-${driftWarning ? `\u26A0\uFE0F ${driftWarning}
-
-` : ""}--- Complete Debate Deliberations Across All Rounds ---
-${roundsData}
-
-Synthesize the final binding Council Decision with **extreme comprehensiveness and zero loss of technical depth**.
-Structure your response in rich, production-grade Markdown:
-
-# \u{1F3DB}\uFE0F Council Decision: [Concise, Authoritative Decision Title]
-
-## \u{1F3AF} Executive Verdict
-[Comprehensive architectural verdict. Explain clearly WHAT was decided, WHY this topology/pattern won over alternatives, and the primary guiding philosophy. Be thorough \u2014 do not summarize in 1-2 generic sentences; give the complete architectural stance.]
-
-## \u{1F3D7}\uFE0F Detailed System Topology & Component Interactions
-[Exhaustive breakdown of the architecture, data flows, state machines, and boundaries agreed upon. Specify exact protocol shapes, Redis keys/SQLite tables/files, event propagation, and concurrency semantics discussed during the debate.]
-
-## \u2696\uFE0F Resolved Trade-Offs, Concessions & Battlegrounds
-\u2022 **[Trade-off 1]:** [What was debated between which debaters, what counter-arguments were raised, why the concession occurred, and the exact compromise accepted.]
-\u2022 **[Trade-off 2]:** [Detail the secondary architectural tension and how it was resolved.]
-\u2022 **[Trade-off 3]:** [Detail edge cases, complexity taxes, and how they are mitigated.]
-
-## \u{1F6E1}\uFE0F Failure Modes, Invariants & Edge-Case Defenses
-[List all edge cases, race conditions, disconnects, or failure scenarios raised by the Skeptic/Architect and the exact mechanisms agreed upon to prevent or recover from them (e.g. idempotency keys, WAL mode, fallback chains, timeouts).]
-
-## \u{1F6A9} Persistent Dissents (if any)
-\u2022 \`[DISSENT:dissent-<id>]\` **[Persona]:** "[Exact point of principled disagreement that was not conceded, why it matters, and under what future conditions this dissent should trigger a redesign.]"
-
-## \u{1F6E0}\uFE0F Step-by-Step Implementation Directives
-[5-10 numbered, concrete, chronological action items for the orchestrator to execute. Include exact files, classes, method signatures, or configurations to create/modify.]
-`;
-  return prompt;
-}
 function buildChorusRound1Prompt(query, livingBrief) {
   let prompt = `=== CHORUS BRAINSTORM \u2014 ROUND 1: EXPLORATION & POSSIBILITIES ===
 
@@ -519,7 +342,7 @@ function applyPersonaModel(ctx, childId, persona) {
   }
 }
 async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialPromptText, signal) {
-  const denied = COUNCIL_DENIED_TOOLS;
+  const denied = COUNCIL_DENIED_TOOLS.filter((name) => ctx.tools.get(name) !== void 0);
   const personaModel = resolvePersonaModel(ctx, persona);
   councilDiag(`Spawning debater ${persona} with model: ${personaModel ? `${personaModel.provider}/${personaModel.model}` : `inherited from parent (${parent.options.provider}/${parent.options.model})`}`);
   const started = await ctx.subagents.startContinuable({
@@ -552,32 +375,16 @@ async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialProm
     totalTokens: 0
   };
 }
-async function followupDebaterFiber(ctx, parent, fiber, promptText, signal, timeoutMs = 3e4) {
-  let timer;
-  try {
-    await Promise.race([
-      ctx.subagents.followup(
-        parent,
-        fiber.childId,
-        [{ type: "text", text: promptText }],
-        {
-          source: { kind: "user" },
-          signal
-        }
-      ),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`council followup to ${fiber.persona} (${fiber.childId}) timed out after ${timeoutMs}ms \u2014 child activation lock stuck`));
-        }, timeoutMs);
-        signal.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(new Error("council followup aborted"));
-        }, { once: true });
-      })
-    ]);
-  } finally {
-    if (timer !== void 0) clearTimeout(timer);
-  }
+async function followupDebaterFiber(ctx, parent, fiber, promptText, signal) {
+  await ctx.subagents.followup(
+    parent,
+    fiber.childId,
+    [{ type: "text", text: promptText }],
+    {
+      source: { kind: "user" },
+      signal
+    }
+  );
 }
 async function waitForFiberTurn(ctx, childId, signal, timeoutMs = 9e4) {
   const started = Date.now();
@@ -590,17 +397,50 @@ async function waitForFiberTurn(ctx, childId, signal, timeoutMs = 9e4) {
       if (Date.now() - started > timeoutMs) throw new Error(`council debater timed out after ${timeoutMs}ms`);
       if (ctx.agents.get(childId) === void 0) {
         const persistence = ctx.get("sessionPersistence");
+        try {
+          const { appendFileSync: appendFileSync2 } = await import("node:fs");
+          const { join: join3 } = await import("node:path");
+          const { homedir: homedir2 } = await import("node:os");
+          appendFileSync2(
+            join3(homedir2(), ".dsh", "logs", "council-diag.log"),
+            `${(/* @__PURE__ */ new Date()).toISOString()} ${childId} unmounted persistence=${persistence !== void 0}
+`
+          );
+        } catch {
+        }
         if (persistence !== void 0) {
           const loaded = await persistence.load(childId);
           const events = loaded.events;
           const lastUser = [...events].reverse().find((e) => e.type === "user/message");
           const since = lastUser === void 0 ? 0 : lastUser.seq;
           const messages = events.filter((e) => e.type === "assistant/message" && e.seq > since);
+          try {
+            const { appendFileSync: appendFileSync2 } = await import("node:fs");
+            const { join: join3 } = await import("node:path");
+            const { homedir: homedir2 } = await import("node:os");
+            appendFileSync2(
+              join3(homedir2(), ".dsh", "logs", "council-diag.log"),
+              `${(/* @__PURE__ */ new Date()).toISOString()} ${childId} loaded events=${events.length} lastUser=${since} msgs=${messages.length}
+`
+            );
+          } catch {
+          }
           if (messages.length > 0) {
             const extracted = messages.map((m) => {
               const data = m.data;
               return textOfContent(data.message?.content ?? data.content);
             }).filter((t) => t.length > 0).join("\n").trim();
+            try {
+              const { appendFileSync: appendFileSync2 } = await import("node:fs");
+              const { join: join3 } = await import("node:path");
+              const { homedir: homedir2 } = await import("node:os");
+              appendFileSync2(
+                join3(homedir2(), ".dsh", "logs", "council-diag.log"),
+                `${(/* @__PURE__ */ new Date()).toISOString()} ${childId} extracted=${extracted.length} chars
+`
+              );
+            } catch {
+            }
             if (extracted.length > 0) {
               return extracted;
             }
@@ -826,8 +666,6 @@ function evaluateStopping(state, criticOutput, currentClaims, thresholds = { con
   const prevClaims = prevEntry?.claims ?? /* @__PURE__ */ new Set();
   const jaccardSim = calculateJaccardSimilarity(prevClaims, currentClaims);
   const delta = 1 - jaccardSim;
-  const maxSimToAnyPrior = state.history.length > 0 ? Math.max(...state.history.map((h) => calculateJaccardSimilarity(h.claims, currentClaims))) : 0;
-  const noveltyVsAll = 1 - maxSimToAnyPrior;
   let consensusRatio = 0;
   let heuristicFallback = false;
   if (criticOutput !== null && typeof criticOutput.consensusScore === "number" && !isNaN(criticOutput.consensusScore)) {
@@ -846,12 +684,12 @@ function evaluateStopping(state, criticOutput, currentClaims, thresholds = { con
       delta
     };
   }
-  if (round >= 3 && (delta < thresholds.plateauDeltaThreshold || noveltyVsAll < thresholds.plateauDeltaThreshold)) {
+  if (round >= 3 && delta < thresholds.plateauDeltaThreshold) {
     const prevDelta = state.history.length >= 2 ? 1 - calculateJaccardSimilarity(state.history[state.history.length - 2].claims, prevClaims) : 1;
-    if (prevDelta < 0.25 || delta < 0.02 || noveltyVsAll < 0.02) {
+    if (prevDelta < 0.25 || delta < 0.02) {
       return {
         shouldStop: true,
-        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)}, novelty-vs-all: ${noveltyVsAll.toFixed(3)} < ${thresholds.plateauDeltaThreshold.toFixed(2)}).`,
+        reason: `Idea generation and debate arguments have plateaued (delta: ${delta.toFixed(3)} < ${thresholds.plateauDeltaThreshold.toFixed(2)}).`,
         stopCode: "PLATEAU_DETECTED",
         heuristicFallback,
         consensusRatio,
@@ -867,231 +705,6 @@ function evaluateStopping(state, criticOutput, currentClaims, thresholds = { con
     consensusRatio,
     delta
   };
-}
-
-// src/roundtable.ts
-var DEBATER_SYSTEMS = {
-  Skeptic: SKEPTIC_SYSTEM,
-  Architect: ARCHITECT_SYSTEM,
-  Pragmatist: PRAGMATIST_SYSTEM
-};
-function shuffle(array) {
-  const arr = [...array];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const temp = arr[i];
-    arr[i] = arr[j];
-    arr[j] = temp;
-  }
-  return arr;
-}
-function parseCriticScore(text) {
-  try {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    const parsed = JSON.parse(match[0]);
-    if (typeof parsed === "object" && parsed !== null) {
-      return {
-        consensusScore: Number(parsed.consensusScore ?? 0.5),
-        qualityScore: Number(parsed.qualityScore ?? 0.5),
-        continueDecision: parsed.continueDecision === "STOP" ? "STOP" : "CONTINUE",
-        reasonIfStop: typeof parsed.reasonIfStop === "string" ? parsed.reasonIfStop : null,
-        runningBrief: typeof parsed.runningBrief === "string" ? parsed.runningBrief : ""
-      };
-    }
-  } catch {
-  }
-  return null;
-}
-function getLivingBriefContext(ctx, parent) {
-  try {
-    const projections = ctx.get("sessionProjections");
-    if (projections !== void 0) {
-      const snap = projections.snapshot(parent.session);
-      const lb = snap?.values?.livingBrief;
-      if (lb) {
-        const goal = lb.goal ? `Goal: ${lb.goal}` : "";
-        const prose = lb.prose?.text ?? "";
-        const decisions = lb.decisions && lb.decisions.length > 0 ? `Decisions:
-${lb.decisions.map((d) => `\u2022 ${d.text}`).join("\n")}` : "";
-        return {
-          text: [goal, prose, decisions].filter(Boolean).join("\n\n"),
-          goalSeq: lb.goalSeq ?? 0
-        };
-      }
-    }
-  } catch {
-  }
-  return { text: "", goalSeq: 0 };
-}
-async function runRoundtable(ctx, parent, args, signal) {
-  const startedAt = Date.now();
-  const params = getCouncilParams(ctx);
-  const maxRounds = args.maxRounds ?? params.defaultMaxRounds;
-  const hideLimit = args.hideLimit ?? params.defaultHideLimit;
-  const modelsUsed = {
-    Skeptic: "flagship",
-    Architect: "flagship",
-    Pragmatist: "flash",
-    Critic: "flagship"
-  };
-  try {
-    await getBriefService()?.ensureFreshBrief(parent.session, signal);
-  } catch {
-    if (signal.aborted) throw signal.reason ?? new Error("aborted");
-  }
-  const { text: briefText, goalSeq: initialGoalSeq } = getLivingBriefContext(ctx, parent);
-  try {
-    parent.session.append("council/started", {
-      kind: "roundtable",
-      query: args.query,
-      maxRounds,
-      hideLimit
-    });
-  } catch {
-  }
-  const debaterFibers = [
-    { persona: "Skeptic", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
-    { persona: "Architect", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
-    { persona: "Pragmatist", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 }
-  ];
-  let criticFiber = null;
-  const stoppingState = {
-    round: 1,
-    maxRounds,
-    hideLimit,
-    cumulativeTokens: 0,
-    maxTokens: params.maxDebateTokens,
-    history: []
-  };
-  const roundsTranscript = [];
-  let lastCriticBrief = "";
-  let finalSynthesis = "";
-  let lastStopDecision = { shouldStop: false, reason: "", consensusRatio: 0 };
-  try {
-    for (let round = 1; round <= maxRounds; round++) {
-      if (signal.aborted) throw new Error("roundtable debate cancelled by user");
-      stoppingState.round = round;
-      const isRound1 = round === 1;
-      const responses = await executeParallelRound(
-        ctx,
-        parent,
-        debaterFibers,
-        (fiber) => {
-          if (isRound1) {
-            return buildRoundtableRound1Prompt(args.query, briefText);
-          } else {
-            const prevRound = roundsTranscript[round - 2];
-            const opponents = (prevRound?.responses ?? []).filter((r) => r.persona !== fiber.persona && !r.error && !r.isConcur).map((r) => ({ persona: r.persona, text: r.text }));
-            return buildRoundtableRound2PlusPrompt(args.query, shuffle(opponents), lastCriticBrief, round);
-          }
-        },
-        isRound1,
-        DEBATER_SYSTEMS,
-        signal,
-        { quorumFraction: params.quorumFraction, debaterRetryCount: params.debaterRetryCount, debaterTimeoutMs: params.debaterTimeoutMs }
-      );
-      if (signal.aborted) throw new Error("roundtable debate cancelled by user");
-      for (const r of responses) {
-        stoppingState.cumulativeTokens += r.tokens;
-      }
-      const roundClaimsText = responses.map((r) => r.text).join(" ");
-      const currentClaims = extractClaimTokens(roundClaimsText);
-      const roundTranscriptText = responses.map((r) => `### ${r.persona}:
-${r.text}`).join("\n\n");
-      const consensusHistory = stoppingState.history.map((h) => h.consensusRatio);
-      const criticPrompt = buildCriticScoringPrompt(args.query, round, roundTranscriptText, consensusHistory);
-      let criticScore = null;
-      if (criticFiber === null) {
-        criticFiber = await startDebaterFiber(ctx, parent, "Critic", CRITIC_SYSTEM, criticPrompt, signal);
-      } else {
-        await followupDebaterFiber(ctx, parent, criticFiber, criticPrompt, signal);
-      }
-      const criticText = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs);
-      stoppingState.cumulativeTokens += estimateTokens(criticText);
-      criticScore = parseCriticScore(criticText);
-      if (criticScore?.runningBrief) {
-        lastCriticBrief = criticScore.runningBrief;
-      }
-      roundsTranscript.push({
-        round,
-        responses,
-        critic: criticScore
-      });
-      try {
-        parent.session.append("council/round", {
-          round,
-          kind: "roundtable",
-          responses: responses.map((r) => ({ persona: r.persona, textLen: r.text.length, isConcur: r.isConcur, error: r.error ?? null })),
-          critic: criticScore ? { consensusScore: criticScore.consensusScore, qualityScore: criticScore.qualityScore, continueDecision: criticScore.continueDecision } : null
-        });
-      } catch {
-      }
-      const decision = evaluateStopping(stoppingState, criticScore, currentClaims, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold });
-      stoppingState.history.push({
-        round,
-        claims: currentClaims,
-        consensusRatio: decision.consensusRatio
-      });
-      lastStopDecision = decision;
-      if (decision.shouldStop) {
-        break;
-      }
-    }
-    if (signal.aborted) throw new Error("roundtable debate cancelled by user");
-    const { goalSeq: finalGoalSeq } = getLivingBriefContext(ctx, parent);
-    const driftWarning = finalGoalSeq > initialGoalSeq ? `[DRIFT WARNING: The session goal changed during deliberation (seq ${initialGoalSeq} -> ${finalGoalSeq})]` : null;
-    const allRoundsText = roundsTranscript.map((r) => `## Round ${r.round}
-` + r.responses.map((d) => `### ${d.persona}:
-${d.text}`).join("\n\n")).join("\n\n---\n\n");
-    const synthPrompt = buildCriticSynthesisPrompt(args.query, allRoundsText, driftWarning);
-    if (criticFiber !== null) {
-      await followupDebaterFiber(ctx, parent, criticFiber, synthPrompt, signal);
-      finalSynthesis = await waitForFiberTurn(ctx, criticFiber.childId, signal, params.debaterTimeoutMs);
-      stoppingState.cumulativeTokens += estimateTokens(finalSynthesis);
-    } else {
-      finalSynthesis = `## Council Decision
-
-Debate completed after ${stoppingState.round} rounds.
-
-${allRoundsText}`;
-    }
-    const dissents = [];
-    const dissentMatches = finalSynthesis.matchAll(/\[DISSENT:([^\]]+)\]\s*\*\*([^*]+)\*\*:\s*"([^"]+)"/g);
-    for (const m of dissentMatches) {
-      dissents.push(`[${m[2]}]: ${m[3]}`);
-    }
-    const elapsedSec = ((Date.now() - startedAt) / 1e3).toFixed(1);
-    const consensusSparkline = stoppingState.history.map((h) => h.consensusRatio.toFixed(2)).join(" \u2500\u2500\u25BA ");
-    const footer = [
-      `
-
----`,
-      `*High Council Debate completed in ${stoppingState.round} round(s) (${elapsedSec}s) | Consensus Trajectory: ${consensusSparkline} | Why stopped: ${lastStopDecision.reason}*`
-    ].join("\n");
-    return {
-      synthesis: finalSynthesis + footer,
-      roundsRun: stoppingState.round,
-      consensusRatio: lastStopDecision.consensusRatio,
-      stopReason: lastStopDecision.reason,
-      totalTokens: stoppingState.cumulativeTokens,
-      modelsUsed,
-      dissents
-    };
-  } finally {
-    try {
-      parent.session.append("council/finished", {
-        kind: "roundtable",
-        roundsRun: stoppingState.round,
-        stopReason: lastStopDecision.reason || "aborted",
-        synthesisLen: finalSynthesis.length
-      });
-    } catch {
-    }
-    const allFibers = [...debaterFibers];
-    if (criticFiber !== null) allFibers.push(criticFiber);
-    await disposeCouncilFibers(ctx, allFibers);
-  }
 }
 
 // src/chorus.ts
@@ -1115,6 +728,17 @@ function getLivingBriefText(ctx, parent) {
   return "";
 }
 async function runChorus(ctx, parent, args, signal) {
+  try {
+    const { appendFileSync: appendFileSync2 } = await import("node:fs");
+    const { join: join3 } = await import("node:path");
+    const { homedir: homedir2 } = await import("node:os");
+    appendFileSync2(
+      join3(homedir2(), ".dsh", "logs", "council-diag.log"),
+      `${(/* @__PURE__ */ new Date()).toISOString()} runChorus ENTER parent=${parent.id}
+`
+    );
+  } catch {
+  }
   const startedAt = Date.now();
   const params = getCouncilParams(ctx);
   const maxRounds = args.maxRounds ?? params.defaultMaxRounds;
@@ -1131,15 +755,6 @@ async function runChorus(ctx, parent, args, signal) {
     if (signal.aborted) throw signal.reason ?? new Error("aborted");
   }
   const briefText = getLivingBriefText(ctx, parent);
-  try {
-    parent.session.append("council/started", {
-      kind: "chorus",
-      query: args.query,
-      maxRounds,
-      hideLimit
-    });
-  } catch {
-  }
   const lensFibers = [
     { persona: "Visionary", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
     { persona: "Experiencer", childId: "", isOffline: false, lastTurnSeq: 0, totalTokens: 0 },
@@ -1158,7 +773,6 @@ async function runChorus(ctx, parent, args, signal) {
   let lastCuratorBrief = "";
   let lastGems = [];
   let finalHarvest = "";
-  let lowNoveltyStreak = 0;
   let lastStopReason = "completed";
   try {
     for (let round = 1; round <= maxRounds; round++) {
@@ -1197,12 +811,14 @@ ${roundTranscriptText}
 
 Provide:
 1. Short 2-3 sentence brief summarizing the newest themes.
-2. 1-2 Spotlight Gems from this round (lines starting with "\u2022 GEM:").
-3. NOVELTY: a single integer 0-10 rating how much genuinely NEW direction this round added vs ALL previous rounds combined (0 = pure repetition of earlier ideas, 10 = entirely new territory). Format exactly: "NOVELTY: <n>"`;
+2. 1-2 Spotlight Gems from this round (lines starting with "\u2022 GEM:").`;
       if (curatorFiber === null) {
         curatorFiber = await startDebaterFiber(ctx, parent, "Curator", CURATOR_SYSTEM, curatorPrompt, signal);
       } else {
-        await followupDebaterFiber(ctx, parent, curatorFiber, curatorPrompt, signal);
+        await ctx.subagents.followup(parent, curatorFiber.childId, [{ type: "text", text: curatorPrompt }], {
+          source: { kind: "user" },
+          signal
+        });
       }
       const curatorText = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs);
       stoppingState.cumulativeTokens += estimateTokens(curatorText);
@@ -1212,38 +828,17 @@ Provide:
       for (const gm of gemMatches) {
         lastGems.push(gm[1].trim());
       }
-      const noveltyMatch = curatorText.match(/NOVELTY:\s*(\d{1,2})/i);
-      const novelty = noveltyMatch !== null ? Math.max(0, Math.min(10, Number(noveltyMatch[1]))) : null;
-      if (novelty !== null && novelty <= 3) {
-        lowNoveltyStreak += 1;
-      } else {
-        lowNoveltyStreak = 0;
-      }
       roundsTranscript.push({
         round,
         responses,
         curatorBrief: curatorText
       });
-      try {
-        parent.session.append("council/round", {
-          round,
-          kind: "chorus",
-          responses: responses.map((r) => ({ persona: r.persona, textLen: r.text.length, isConcur: r.isConcur, error: r.error ?? null })),
-          curatorBriefLen: curatorText.length,
-          gems: lastGems
-        });
-      } catch {
-      }
       const decision = evaluateStopping(stoppingState, null, currentIdeaTokens, { consensusThreshold: params.consensusThreshold, plateauDeltaThreshold: params.plateauDeltaThreshold });
       stoppingState.history.push({
         round,
         claims: currentIdeaTokens,
         consensusRatio: 0.5
       });
-      if (lowNoveltyStreak >= 2) {
-        lastStopReason = `Curator judged ${lowNoveltyStreak} consecutive rounds as low novelty (ideas repeating, quality plateaued)`;
-        break;
-      }
       lastStopReason = decision.reason;
       if (decision.shouldStop) {
         break;
@@ -1255,7 +850,10 @@ Provide:
 ${d.text}`).join("\n\n")).join("\n\n---\n\n");
     const harvestPrompt = buildCuratorHarvestPrompt(args.query, allRoundsText);
     if (curatorFiber !== null) {
-      await followupDebaterFiber(ctx, parent, curatorFiber, harvestPrompt, signal);
+      await ctx.subagents.followup(parent, curatorFiber.childId, [{ type: "text", text: harvestPrompt }], {
+        source: { kind: "user" },
+        signal
+      });
       finalHarvest = await waitForFiberTurn(ctx, curatorFiber.childId, signal, params.debaterTimeoutMs);
       stoppingState.cumulativeTokens += estimateTokens(finalHarvest);
     } else {
@@ -1281,200 +879,11 @@ ${allRoundsText}`;
       modelsUsed
     };
   } finally {
-    try {
-      parent.session.append("council/finished", {
-        kind: "chorus",
-        roundsRun: stoppingState.round,
-        stopReason: lastStopReason || "aborted",
-        harvestLen: finalHarvest.length
-      });
-    } catch {
-    }
     const allFibers = [...lensFibers];
     if (curatorFiber !== null) allFibers.push(curatorFiber);
     await disposeCouncilFibers(ctx, allFibers);
   }
 }
-
-// src/tools.ts
-function registerCouncilTools(ctx, root) {
-  ctx = root;
-  const busyCouncils = /* @__PURE__ */ new Set();
-  ctx.tools.register({
-    name: "roundtable",
-    description: [
-      "Run a multi-agent dialectic debate (Skeptic, Architect, Pragmatist, Critic) to resolve architectural trade-offs,",
-      "stress-test assumptions, and reach battle-tested technical consensus.",
-      "Colosseum protocol: Targeted premise interrogation, defend/concede/reframe state machine, and zero-token dynamic silence (CONCUR).",
-      "Hardcoded blocking \u2014 returns the complete synthesized Council Decision report with consensus trajectory and persistent dissents."
-    ].join(" "),
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The specific architectural dilemma, design choice, or technical decision to debate."
-        },
-        maxRounds: {
-          type: "number",
-          description: "Safety round cap (default 5, configurable to 8+ for complex multi-system tasks)."
-        },
-        hideLimit: {
-          type: "boolean",
-          description: "Hide the round ceiling from debaters to eliminate deadline-pacing bias (default true)."
-        }
-      },
-      required: ["query"]
-    },
-    output: {
-      schema: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          synthesis: { type: "string" },
-          roundsRun: { type: "number" },
-          consensusRatio: { type: "number" },
-          stopReason: { type: "string" },
-          dissents: { type: "array", items: { type: "string" } }
-        },
-        required: ["synthesis", "roundsRun", "consensusRatio", "stopReason", "dissents"]
-      },
-      render: (_args, value) => [{
-        type: "text",
-        text: value.synthesis
-      }]
-    },
-    async execute(args, exec) {
-      const parent = exec.agent;
-      if (parent === void 0) throw new Error("roundtable requires a calling agent");
-      const key = parent.session.id;
-      if (busyCouncils.has(key)) {
-        return {
-          synthesis: "## Council Decision\n\nDebate rejected by single-flight mutex (I7): another Council deliberation is already running.",
-          roundsRun: 0,
-          consensusRatio: 0,
-          stopReason: "CONCURRENT_CALL_REJECTED",
-          dissents: []
-        };
-      }
-      busyCouncils.add(key);
-      try {
-        const result = await runRoundtable(ctx, parent, args, exec.signal);
-        return {
-          synthesis: result.synthesis,
-          roundsRun: result.roundsRun,
-          consensusRatio: result.consensusRatio,
-          stopReason: result.stopReason,
-          dissents: result.dissents
-        };
-      } finally {
-        busyCouncils.delete(key);
-      }
-    }
-  });
-  ctx.tools.register({
-    name: "chorus",
-    description: [
-      "Run a multi-agent constructive brainstorm (Visionary, Experiencer, Integrator, Curator) to expand vague ideas",
-      "into concrete feature options, user moments, and buildable-now roadmaps.",
-      "Polyphonic ideation: Ideas build on ideas with effort tags (now/soon/later) and gem spotlighting.",
-      "Hardcoded blocking \u2014 returns the complete Idea Harvest report with themes, gems, and buildable roadmaps."
-    ].join(" "),
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The vision, feature concept, or seed idea to brainstorm."
-        },
-        maxRounds: {
-          type: "number",
-          description: "Safety round cap (default 4)."
-        },
-        hideLimit: {
-          type: "boolean",
-          description: "Hide the round ceiling from models (default true)."
-        }
-      },
-      required: ["query"]
-    },
-    output: {
-      schema: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          harvest: { type: "string" },
-          roundsRun: { type: "number" },
-          gems: { type: "array", items: { type: "string" } },
-          stopReason: { type: "string" }
-        },
-        required: ["harvest", "roundsRun", "gems", "stopReason"]
-      },
-      render: (_args, value) => [{
-        type: "text",
-        text: value.harvest
-      }]
-    },
-    async execute(args, exec) {
-      const parent = exec.agent;
-      if (parent === void 0) throw new Error("chorus requires a calling agent");
-      const key = parent.session.id;
-      if (busyCouncils.has(key)) {
-        return {
-          harvest: "## Chorus Harvest\n\nBrainstorm rejected by single-flight mutex (I7): another Council deliberation is already running.",
-          roundsRun: 0,
-          gems: [],
-          stopReason: "CONCURRENT_CALL_REJECTED"
-        };
-      }
-      busyCouncils.add(key);
-      try {
-        const result = await runChorus(ctx, parent, args, exec.signal);
-        return {
-          harvest: result.harvest,
-          roundsRun: result.roundsRun,
-          gems: result.gems,
-          stopReason: result.stopReason
-        };
-      } finally {
-        busyCouncils.delete(key);
-      }
-    }
-  });
-}
-
-// src/index.ts
-var name = "enpoi-council";
-var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
-var ORCH_NS = settingsNamespace("enpoi-orchestration");
-var PersonaModelSchema = Schema2.object({
-  provider: Schema2.string(),
-  model: Schema2.string(),
-  reasoningEffort: Schema2.string()
-});
-var OrchestrationSettingsSchema = Schema2.object({
-  personas: Schema2.dict(PersonaModelSchema).default({}),
-  uiPreferences: Schema2.object({
-    hiddenModels: Schema2.any(),
-    favorites: Schema2.any(),
-    providerOrder: Schema2.any(),
-    defaultModel: Schema2.any()
-  }).default({})
-});
-function apply(ctx) {
-  ctx.inject(["settings"], (scope) => {
-    const settings = scope.get("settings");
-    try {
-      settings?.register?.(ORCH_NS, OrchestrationSettingsSchema);
-    } catch {
-    }
-  });
-  ctx.inject(["tools", "subagents", "sessionPersistence", "sessions", "agents"], (injected) => {
-    registerCouncilTools(injected, ctx);
-  });
-}
 export {
-  apply,
-  inject,
-  name
+  runChorus
 };
