@@ -436,11 +436,15 @@ export class BriefService {
 }
 
 /** Module-level singleton — set by apply(), read by consumers (oracle/council). */
+/** Cross-bundle anchor: even if a consumer bundle inlines this module, the
+ *  live service published by the keeper's own apply() stays reachable. */
+const BRIEF_SERVICE_ANCHOR = Symbol.for('enpoi.context-keeper.brief-service')
 let briefService: BriefService | null = null
 
 /** Get the mounted brief service (null before apply or if the plugin is absent). */
 export function getBriefService(): BriefService | null {
-  return briefService
+  const anchored = (globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR]
+  return (anchored as BriefService | undefined) ?? briefService
 }
 
 /** Create a standalone service (tests / headless use). */
@@ -451,6 +455,7 @@ export function createBriefService(ctx: Context, config: Config): BriefService {
 export function apply(ctx: Context, config: Config): void {
   const ownedService = createBriefService(ctx, config)
   briefService = ownedService
+  ;(globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR] = ownedService
   diag(`apply: mounted (demand-driven; prose on oracle/council use, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`)
 
   // ── Claims batched listener (P1, survives P3) ─────────────────────────────
@@ -495,6 +500,9 @@ export function apply(ctx: Context, config: Config): void {
     // Oracle Q4 nit: only null the singleton if WE own it — a second mounted
     // instance (tests + runtime) must not kill the first's service.
     if (briefService === ownedService) briefService = null
+    if ((globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR] === ownedService) {
+      delete (globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR]
+    }
   })
 }
 

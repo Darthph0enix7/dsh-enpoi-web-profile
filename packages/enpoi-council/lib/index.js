@@ -1,74 +1,8 @@
 // src/index.ts
-import Schema2 from "schemastery";
-
-// ../enpoi-context-keeper/lib/index.js
-import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
-import { deadline } from "@deepseek-ai/dsh-timeout";
-import { join as join2 } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import Schema from "schemastery";
-var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
-var Config = Schema.object({
-  provider: Schema.string().default("freellmapi"),
-  model: Schema.string().default("auto"),
-  fallbackProvider: Schema.string().default("antigravity"),
-  fallbackModel: Schema.string().default("gemini-3.7-flash-tiered"),
-  leaseMs: Schema.number().default(45e3),
-  maxInputEvents: Schema.number().default(80),
-  maxOutputTokens: Schema.number().default(2048),
-  structuralDistanceK: Schema.number().default(24),
-  minRefreshMs: Schema.number().default(6e4),
-  negativeCacheMs: Schema.number().default(12e4),
-  claimsBatchSize: Schema.number().default(8),
-  claimsBatchMinutes: Schema.number().default(5)
-});
-var PROSE_PROMPT = [
-  "You are the Enpoi Harness context keeper \u2014 the master background summarizer and architectural keeper for this coding session.",
-  "You maintain a running, concise, and highly accurate Living Brief of the session for later dispatch to the Oracle and Council debaters.",
-  "If a [PREVIOUS SESSION BRIEF] is provided, incrementally merge it with the [RECENT SESSION EVENTS & TOOL RESULTS] (including Council/Roundtable consensus, Oracle verdicts, subagent returns, tool results, documentation paths, and user directives).",
-  "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
-  "",
-  "CRITICAL SECTION DISCIPLINE (ZERO-FILLER RULE):",
-  "- ONLY include a section if there is genuine, substantive information established in the session.",
-  '- If no documentation files were created or referenced, DO NOT emit the \u{1F4DA} section and NEVER write "No documentation...".',
-  '- If no approaches were debated/rejected, DO NOT emit the \u{1F6AB} section and NEVER write "No alternative approaches...".',
-  '- If there are no open blockers, DO NOT emit the \u26A1 section and NEVER write "No blockers remain...".',
-  "- For simple queries, greetings, or health-checks (e.g. ping), emit ONLY a single-line \u{1F3AF} ACTIVE GOAL or keep the brief empty. NEVER invent placeholder bullets.",
-  "",
-  "Output ONLY the relevant section headers from below (omit any section with no substantive content):",
-  "",
-  "\u{1F3AF} ACTIVE GOAL & CORE TRAJECTORY:",
-  "- Current active objective, user directives, and high-level technical paradigms.",
-  "",
-  "\u{1F4DA} DOCUMENTATION & SPECIFICATIONS INVENTORY:",
-  "- List documentation, plans, architectures, and spec files written, modified, or referenced in the session with a 1-line summary.",
-  "",
-  "\u{1F3DB}\uFE0F ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:",
-  "- Concrete technical decisions established in the session: exact component boundaries, protocols (IPC/HTTP/WS/Redis), data keys/schemas, state machines, and concurrency rules.",
-  "",
-  "\u{1F6AB} REJECTED APPROACHES & EDGE CASES:",
-  "- Approaches debated and explicitly ruled out (and reasons why), edge cases handled, and failure modes defended.",
-  "",
-  "\u26A1 ACTIVE BLOCKERS & OPEN QUESTIONS:",
-  "- Unresolved technical questions, pending implementation tasks, or immediate next steps.",
-  "",
-  "No other text at all \u2014 no preamble, no CLAIMS block, no JSON."
-].join("\n");
-var CLAIMS_PROMPT = [
-  "You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about Adam's environment, infrastructure, and architecture.",
-  "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
-  "",
-  'Output EXACTLY one line: "CLAIMS:" followed by a JSON array: [{"fact":"...","category":"ARCHITECTURE","tags":"...","source":"tool"}]',
-  "- category limited to ARCHITECTURE, CONFIG_VALUES, or PROJECT.",
-  '- source MUST be "tool" when the fact is derived from tool results/executions (verified by execution), or "chat" when it was stated by the user or assistant in conversation.',
-  '- File 2-4 durable facts whenever the session surfaces them; else "CLAIMS: []".',
-  "- Skip transient chatter and anything already obvious from the session itself.",
-  "No other text at all."
-].join("\n");
-var briefService = null;
-function getBriefService() {
-  return briefService;
-}
+
+// src/roundtable.ts
+import { getBriefService } from "dsh-enpoi-context-keeper";
 
 // src/params.ts
 var COUNCIL_PARAM_DEFAULTS = {
@@ -1099,6 +1033,7 @@ ${allRoundsText}`;
 }
 
 // src/chorus.ts
+import { getBriefService as getBriefService2 } from "dsh-enpoi-context-keeper";
 var CHORUS_SYSTEMS = {
   Visionary: VISIONARY_SYSTEM,
   Experiencer: EXPERIENCER_SYSTEM,
@@ -1130,7 +1065,7 @@ async function runChorus(ctx, parent, args, signal) {
     Curator: "flagship"
   };
   try {
-    await getBriefService()?.ensureFreshBrief(parent.session, signal);
+    await getBriefService2()?.ensureFreshBrief(parent.session, signal);
   } catch {
     if (signal.aborted) throw signal.reason ?? new Error("aborted");
   }
@@ -1450,29 +1385,21 @@ function registerCouncilTools(ctx, root) {
 // src/index.ts
 var name = "enpoi-council";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
-var ORCH_NS = "enpoi-orchestration";
-var PersonaModelSchema = Schema2.object({
-  provider: Schema2.string(),
-  model: Schema2.string(),
-  reasoningEffort: Schema2.string()
+var PersonaModelSchema = Schema.object({
+  provider: Schema.string(),
+  model: Schema.string(),
+  reasoningEffort: Schema.string()
 });
-var OrchestrationSettingsSchema = Schema2.object({
-  personas: Schema2.dict(PersonaModelSchema).default({}),
-  uiPreferences: Schema2.object({
-    hiddenModels: Schema2.any(),
-    favorites: Schema2.any(),
-    providerOrder: Schema2.any(),
-    defaultModel: Schema2.any()
+var OrchestrationSettingsSchema = Schema.object({
+  personas: Schema.dict(PersonaModelSchema).default({}),
+  uiPreferences: Schema.object({
+    hiddenModels: Schema.any(),
+    favorites: Schema.any(),
+    providerOrder: Schema.any(),
+    defaultModel: Schema.any()
   }).default({})
 });
 function apply(ctx) {
-  ctx.inject(["settings"], (scope) => {
-    const settings = scope.get("settings");
-    try {
-      settings?.register?.(ORCH_NS, OrchestrationSettingsSchema);
-    } catch {
-    }
-  });
   ctx.inject(["tools", "subagents", "sessionPersistence", "sessions", "agents"], (injected) => {
     registerCouncilTools(injected, ctx);
   });

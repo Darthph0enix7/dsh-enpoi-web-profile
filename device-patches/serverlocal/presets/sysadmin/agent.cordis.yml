@@ -152,13 +152,9 @@
   group: true
   isolate:
     enpoiOracle: true
-    enpoiDispatcher: true
   config:
     - id: enpoi-oracle
       name: 'dsh-enpoi-oracle'
-
-    - id: enpoi-dispatcher
-      name: 'dsh-enpoi-dispatcher'
 
 # ── compaction ──────────────────────────────────────────────────────────────
 

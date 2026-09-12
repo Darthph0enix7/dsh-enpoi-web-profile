@@ -34,14 +34,6 @@ const OrchestrationSettingsSchema = Schema.object({
 })
 
 export function apply(ctx: Context): void {
-  // Register the orchestration settings namespace so persona assignments persist & hot-publish
-  ctx.inject(['settings'], (scope) => {
-    const settings = scope.get('settings') as { register?: (ns: unknown, schema: unknown) => void } | undefined
-    try {
-      settings?.register?.(ORCH_NS, OrchestrationSettingsSchema)
-    } catch {}
-  })
-
   ctx.inject(['tools', 'subagents', 'sessionPersistence', 'sessions', 'agents'], (injected) => {
     registerCouncilTools(injected, ctx)
   })

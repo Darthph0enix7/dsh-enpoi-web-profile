@@ -14,7 +14,7 @@ for dir in enpoi-*/; do
   [ -f "$pkg/src/index.ts" ] || { echo "SKIP (no src/index.ts): $pkg"; continue; }
   if pnpm --dir "$pkg" exec esbuild src/index.ts \
       --bundle --format=esm --platform=node --target=node22 \
-      --external:@deepseek-ai/* --external:schemastery \
+      --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* \
       --outfile=lib/index.js --log-level=warning 2>"/tmp/opencode/build-$pkg.err"; then
     echo "OK   $pkg  ($(du -h "$pkg/lib/index.js" | cut -f1))"
   else
