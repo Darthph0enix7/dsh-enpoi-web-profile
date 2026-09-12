@@ -377,7 +377,7 @@ function registerOracleTools(ctx, root) {
       let stopWatch = null;
       let handedOff = false;
       try {
-        const lastUserSeq = lastHumanUserMessageSeq(parent.session.events);
+        const lastUserSeq = lastHumanUserMessageSeq(parent.session.snapshotEvents());
         let fiber = fibers.get(key);
         let rolloverScorecard = null;
         if (fiber !== void 0 && (fiber.lastParentUserSeq !== lastUserSeq || fiber.childId === null)) {

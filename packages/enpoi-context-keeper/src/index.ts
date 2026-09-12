@@ -162,7 +162,7 @@ const STRUCTURAL_TYPES = new Set(['user/message', 'turn/end', 'tool/call', 'tool
 /** Count structural events with seq > fromSeq (backwards scan, O(distance)). */
 function countStructuralAfter(session: Session, fromSeq: number): number {
   let count = 0
-  const events = session.events
+  const events = session.snapshotEvents()
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]
     if (event.seq <= fromSeq) break
@@ -174,7 +174,7 @@ function countStructuralAfter(session: Session, fromSeq: number): number {
 /** Count structural events with seq <= toSeq (forward scan). */
 function countStructuralUpTo(session: Session, toSeq: number): number {
   let count = 0
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     if (event.seq > toSeq) break
     if (STRUCTURAL_TYPES.has(event.type)) count += 1
   }
@@ -359,7 +359,7 @@ export class BriefService {
     }
 
     // 5. Distill (snapshot the seq BEFORE the async call — I3 causal ordering).
-    const snapshotSeq = session.events.at(-1)?.seq ?? session.seq
+    const snapshotSeq = session.snapshotEvents().at(-1)?.seq ?? session.seq
     const promise = this.distill(session, signal, snapshotSeq, cfg)
     this.cache.set(key, {
       ...(entry ?? emptyEntry()),
@@ -624,7 +624,7 @@ export function splitClaims(text: string): Array<{ fact: string; category: strin
 
 /** Frame the recent turn's events into a compact summarizer input with rolling merge. */
 function frameInput(session: Session, maxEvents: number): string {
-  const events = session.events
+  const events = session.snapshotEvents()
 
   // 1. Recover the most recent previous brief prose for rolling merge.
   let previousProse = ''

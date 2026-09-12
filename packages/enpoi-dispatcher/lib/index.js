@@ -228,7 +228,7 @@ var PERSONAS = {
   ].join("\n")
 };
 function parentAborted(session) {
-  const events = session.events;
+  const events = session.snapshotEvents();
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (e.type !== "turn/end") continue;

@@ -102,13 +102,12 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
     let s = sessionStates.get(session.id)
     if (s === undefined) {
       let recoveredBoundary: number | null = null
-      if (session.events !== undefined) {
-        for (let i = session.events.length - 1; i >= 0; i--) {
-          const ev = session.events[i]
-          if (ev?.type === 'revert/state') {
-            recoveredBoundary = (ev.data as { fromSeq: number | null }).fromSeq
-            break
-          }
+      const events = session.snapshotEvents()
+      for (let i = events.length - 1; i >= 0; i--) {
+        const ev = events[i]
+        if (ev?.type === 'revert/state') {
+          recoveredBoundary = (ev.data as { fromSeq: number | null }).fromSeq
+          break
         }
       }
       s = { boundary: recoveredBoundary, initialized: true, flight: Promise.resolve() }
@@ -447,7 +446,7 @@ async function applyConflictResolution(
   const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
   const session = sessions?.get?.(request.sessionId)
   if (session === undefined) throw new Error('session not found')
-  const conflictEvent = [...session.events].reverse().find(e =>
+  const conflictEvent = [...session.snapshotEvents()].reverse().find(e =>
     (e as unknown as { type: string }).type === 'revert/file-conflict'
     && (e.data as { conflictId?: string }).conflictId === request.conflictId)
   if (conflictEvent === undefined) throw new Error(`conflict ${request.conflictId} not found`)
@@ -666,7 +665,7 @@ async function findActiveChildren(ctx: Context, parentId: string): Promise<strin
   const parent = sessions?.get?.(parentId)
   if (parent === undefined) return []
   const children: string[] = []
-  for (const event of parent.events) {
+  for (const event of parent.snapshotEvents()) {
     const e = event as unknown as { type: string; data: { childSessionId?: string } }
     if (e.type !== 'subagent/descriptor') continue
     if (e.data.childSessionId !== undefined && ctx.agents.get(e.data.childSessionId as SessionId) !== undefined) {

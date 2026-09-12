@@ -119,8 +119,9 @@ export async function capturePost(
 
   // Look up the tool/call event seq from the session log (never mint our own).
   let toolSeq = -1
-  for (let i = session.events.length - 1; i >= 0; i--) {
-    const e = session.events[i]
+  const events = session.snapshotEvents()
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]
     if (e.type === 'tool/call' && (e.data as { callId?: string }).callId === exec.callId) {
       toolSeq = e.seq
       break

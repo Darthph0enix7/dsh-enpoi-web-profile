@@ -58,7 +58,7 @@ const PERSONAS: Record<string, string> = {
 /** Tool-surface gating per role (I14). Mutations + orchestration removed for research roles. */
 /** True if the parent session's last turn ended aborted+user (I11 CAS gate). */
 function parentAborted(session: Session): boolean {
-  const events = session.events
+  const events = session.snapshotEvents()
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]
     if (e.type !== 'turn/end') continue

@@ -412,6 +412,9 @@ for i in idents:
             if test -d "$g_dsh_home/skin-center"
                 rsync -a --delete --exclude .cache "$g_dsh_home/skin-center/" "$g_dotfiles/skin-center/" 2>/dev/null; or true
             end
+            if test -d "$g_dsh_home/skins"
+                rsync -a --delete --exclude .cache "$g_dsh_home/skins/" "$g_dotfiles/skins/" 2>/dev/null; or true
+            end
             __ds_sync_file "$g_dsh_home/skin-center-active.json" "skin-center-active.json"
             echo "  ✔ Skin synced"
 
@@ -639,6 +642,10 @@ case "pull"
             if test -d "$g_dotfiles/skin-center"
                 mkdir -p "$g_dsh_home/skin-center"
                 rsync -a --delete --exclude .cache "$g_dotfiles/skin-center/" "$g_dsh_home/skin-center/" 2>/dev/null; or true
+            end
+            if test -d "$g_dotfiles/skins"
+                mkdir -p "$g_dsh_home/skins"
+                rsync -a --delete --exclude .cache "$g_dotfiles/skins/" "$g_dsh_home/skins/" 2>/dev/null; or true
             end
             __ds_apply_file "skin-center-active.json" ~/.dsh/skin-center-active.json
 

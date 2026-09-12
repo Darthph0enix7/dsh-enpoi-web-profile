@@ -603,8 +603,9 @@ async function capturePost(ctx, exec, result, pendingCaptures, manifestFor, blob
     }
   }
   let toolSeq = -1;
-  for (let i = session.events.length - 1; i >= 0; i--) {
-    const e = session.events[i];
+  const events = session.snapshotEvents();
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
     if (e.type === "tool/call" && e.data.callId === exec.callId) {
       toolSeq = e.seq;
       break;
@@ -684,13 +685,12 @@ function apply(ctx, config) {
     let s = sessionStates.get(session.id);
     if (s === void 0) {
       let recoveredBoundary = null;
-      if (session.events !== void 0) {
-        for (let i = session.events.length - 1; i >= 0; i--) {
-          const ev = session.events[i];
-          if (ev?.type === "revert/state") {
-            recoveredBoundary = ev.data.fromSeq;
-            break;
-          }
+      const events = session.snapshotEvents();
+      for (let i = events.length - 1; i >= 0; i--) {
+        const ev = events[i];
+        if (ev?.type === "revert/state") {
+          recoveredBoundary = ev.data.fromSeq;
+          break;
         }
       }
       s = { boundary: recoveredBoundary, initialized: true, flight: Promise.resolve() };
@@ -918,7 +918,7 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, st
   const sessions = ctx.get("sessions");
   const session = sessions?.get?.(request.sessionId);
   if (session === void 0) throw new Error("session not found");
-  const conflictEvent = [...session.events].reverse().find((e) => e.type === "revert/file-conflict" && e.data.conflictId === request.conflictId);
+  const conflictEvent = [...session.snapshotEvents()].reverse().find((e) => e.type === "revert/file-conflict" && e.data.conflictId === request.conflictId);
   if (conflictEvent === void 0) throw new Error(`conflict ${request.conflictId} not found`);
   const conflict = conflictEvent.data;
   const state = stateFor(session);
@@ -1070,7 +1070,7 @@ async function findActiveChildren(ctx, parentId) {
   const parent = sessions?.get?.(parentId);
   if (parent === void 0) return [];
   const children = [];
-  for (const event of parent.events) {
+  for (const event of parent.snapshotEvents()) {
     const e = event;
     if (e.type !== "subagent/descriptor") continue;
     if (e.data.childSessionId !== void 0 && ctx.agents.get(e.data.childSessionId) !== void 0) {

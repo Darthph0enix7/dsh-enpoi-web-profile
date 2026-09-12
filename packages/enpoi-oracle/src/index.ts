@@ -389,7 +389,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
       let stopWatch: (() => void) | null = null
       let handedOff = false
       try {
-        const lastUserSeq = lastHumanUserMessageSeq(parent.session.events)
+        const lastUserSeq = lastHumanUserMessageSeq(parent.session.snapshotEvents())
         let fiber = fibers.get(key)
 
         // Query-bound (I13): the oracle fiber is persistent within ONE user query / task.

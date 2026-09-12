@@ -329,7 +329,7 @@ var CLAIMS_PROMPT = [
 var STRUCTURAL_TYPES = /* @__PURE__ */ new Set(["user/message", "turn/end", "tool/call", "tool/result"]);
 function countStructuralAfter(session, fromSeq) {
   let count = 0;
-  const events = session.events;
+  const events = session.snapshotEvents();
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
     if (event.seq <= fromSeq) break;
@@ -339,7 +339,7 @@ function countStructuralAfter(session, fromSeq) {
 }
 function countStructuralUpTo(session, toSeq) {
   let count = 0;
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     if (event.seq > toSeq) break;
     if (STRUCTURAL_TYPES.has(event.type)) count += 1;
   }
@@ -447,7 +447,7 @@ var BriefService = class {
         }
       }
     }
-    const snapshotSeq = session.events.at(-1)?.seq ?? session.seq;
+    const snapshotSeq = session.snapshotEvents().at(-1)?.seq ?? session.seq;
     const promise = this.distill(session, signal, snapshotSeq, cfg);
     this.cache.set(key, {
       ...entry ?? emptyEntry(),
@@ -650,7 +650,7 @@ function splitClaims(text) {
   }
 }
 function frameInput(session, maxEvents) {
-  const events = session.events;
+  const events = session.snapshotEvents();
   let previousProse = "";
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
