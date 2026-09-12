@@ -21,7 +21,6 @@
 import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from 'schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
@@ -60,7 +59,7 @@ interface LiveModel {
 }
 
 /** The llm-pi-ai namespace (branded through the settings seam). */
-const LLM_NS = settingsNamespace('llm-pi-ai')
+const LLM_NS = 'llm-pi-ai'
 
 interface CredentialsSeam {
   resolve(ref: string): Promise<{ value?: string } | undefined>

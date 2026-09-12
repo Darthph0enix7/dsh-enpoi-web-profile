@@ -1,7 +1,7 @@
-// packages/enpoi-memory/src/index.ts
+// src/index.ts
 import { join as join2 } from "node:path";
 
-// packages/enpoi-memory/src/db.ts
+// src/db.ts
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -51,7 +51,7 @@ function openMemoryDb() {
   return db;
 }
 
-// packages/enpoi-memory/src/pipeline.ts
+// src/pipeline.ts
 import { createHash } from "node:crypto";
 var FACT_CAP = 400;
 function claimHash(fact, category) {
@@ -197,7 +197,7 @@ function makePipeline(db) {
   return { intake, graduate, confirm, rescind, reconcileBoot, list, get, stateOf };
 }
 
-// packages/enpoi-memory/src/retriever.ts
+// src/retriever.ts
 var MEMORY_PARAM_DEFAULTS = {
   retrieverTopK: 10,
   retrieverCharBudget: 1200
@@ -262,7 +262,7 @@ function searchMemory(db, query, limit = 10) {
   })).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-// packages/enpoi-memory/src/tools.ts
+// src/tools.ts
 function registerMemoryTools(ctx, db, pipeline) {
   ctx.tools.register({
     name: "memory_save",
@@ -389,7 +389,7 @@ function registerMemoryTools(ctx, db, pipeline) {
   });
 }
 
-// packages/enpoi-memory/src/index.ts
+// src/index.ts
 var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 var name = "enpoi-memory";
 var inject = ["tools"];

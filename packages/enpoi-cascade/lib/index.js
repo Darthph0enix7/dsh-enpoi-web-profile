@@ -1,4 +1,4 @@
-// packages/enpoi-cascade/src/index.ts
+// src/index.ts
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 var name = "enpoi-cascade";

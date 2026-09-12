@@ -21,6 +21,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Session, SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { getBriefService } from 'dsh-enpoi-context-keeper'
 
@@ -246,10 +248,15 @@ async function waitForChildTurn(ctx: Context, childId: SessionId, signal: AbortS
       if (Date.now() - started > timeoutMs) throw new Error(`oracle consultation timed out after ${timeoutMs}ms`)
       // The child parks when its turn settles (cold-resume model, Spike A).
       if (ctx.agents.get(childId) === undefined) {
-        const persistence = ctx.get('sessionPersistence')
+        const persistence = ctx.get('sessionPersistence') as SessionPersistence | undefined
         if (persistence !== undefined) {
-          const loaded = await persistence.load(childId)
-          const events = loaded.events as SessionEvent[]
+          const handle = await persistence.open(childId, 'read')
+          let events: readonly SessionEvent[]
+          try {
+            events = (await handle.read(0, undefined)).events
+          } finally {
+            await handle.close()
+          }
           // Slice to the CURRENT turn: only assistant messages after the last
           // user message (delta followups must not re-read older verdicts).
           const lastUser = [...events].reverse().find(e => e.type === 'user/message')
@@ -483,10 +490,14 @@ function registerOracleTools(ctx: Context, root: Context): void {
             throw err
           }
         } else {
-          await ctx.subagents.followup(parent, fiber.childId!, prompt, {
-            source: { kind: 'user' },
-            signal: bg?.signal ?? exec.signal,
-          })
+          await queueHostSubagentPrompt(
+            ctx.subagents,
+            parent,
+            fiber.childId!,
+            prompt,
+            { kind: 'user' },
+            bg?.signal ?? exec.signal,
+          )
         }
 
         if (bg !== null) {

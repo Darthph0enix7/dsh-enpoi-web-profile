@@ -2,10 +2,9 @@
   "name": "dsh-profile-web",
   "private": true,
   "dependencies": {
-    "@linxin666/dsh-client-ui-skin-center": "^0.2.7",
+    "@linxin666/dsh-client-ui-skin-center": "^0.3.21",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "dsh-better-sidebar": "0.14.0",
     "dsh-enpoi-capabilities": "workspace:*",
     "dsh-enpoi-cascade": "workspace:*",
     "dsh-enpoi-context-keeper": "workspace:*",
@@ -29,7 +28,6 @@
       "bundles": [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app",
-        "dsh-better-sidebar",
         "@linxin666/dsh-client-ui-skin-center",
         "dsh-enpoi-provider-sync",
         "dsh-enpoi-living-brief",

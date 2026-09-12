@@ -1,10 +1,9 @@
+// ../enpoi-contracts/lib/index.js
 var __defProp = Object.defineProperty;
 var __export = (target, all) => {
   for (var name2 in all)
     __defProp(target, name2, { get: all[name2], enumerable: true });
 };
-
-// node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -115,8 +114,6 @@ __export(external_exports, {
   util: () => util,
   void: () => voidType
 });
-
-// node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -249,8 +246,6 @@ var getParsedType = (data) => {
       return ZodParsedType.unknown;
   }
 };
-
-// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -367,8 +362,6 @@ ZodError.create = (issues) => {
   const error = new ZodError(issues);
   return error;
 };
-
-// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -470,8 +463,6 @@ var errorMap = (issue, _ctx) => {
   return { message };
 };
 var en_default = errorMap;
-
-// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -479,8 +470,6 @@ function setErrorMap(map) {
 function getErrorMap() {
   return overrideErrorMap;
 }
-
-// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -589,15 +578,11 @@ var isAborted = (x) => x.status === "aborted";
 var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
-
-// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
-
-// node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -3832,7 +3817,7 @@ ZodNaN.create = (params) => {
     ...processCreateParams(params)
   });
 };
-var BRAND = /* @__PURE__ */ Symbol("zod_brand");
+var BRAND = Symbol("zod_brand");
 var ZodBranded = class extends ZodType {
   _parse(input) {
     const { ctx } = this._processInputParams(input);
@@ -4044,8 +4029,6 @@ var coerce = {
   date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
 };
 var NEVER = INVALID;
-
-// packages/enpoi-contracts/lib/index.js
 var traceContextSchema = external_exports.object({
   /** Root query id — one user query spans one trace. */
   traceId: external_exports.string().min(1),
@@ -4145,7 +4128,7 @@ var livingBriefViewSchema = external_exports.object({
   freshness: external_exports.union([external_exports.literal("live"), external_exports.literal("cooling"), external_exports.literal("stale")])
 }).strict();
 
-// packages/enpoi-living-brief/src/index.ts
+// src/index.ts
 var name = "enpoi-living-brief";
 var inject = ["sessionProjections"];
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["write", "edit", "str_replace_editor"]);

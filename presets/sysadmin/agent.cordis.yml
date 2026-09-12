@@ -34,7 +34,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are Sysadmin — the operational agent for Adam's serverlocal fleet
       (Enpoi Harness). You administer the Linux host: systemd services (user
       and system), Docker Compose stacks, the Cloudflare tunnel, Tailscale,

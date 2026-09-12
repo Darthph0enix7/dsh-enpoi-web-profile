@@ -10,13 +10,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from 'schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { registerCouncilTools } from './tools'
 
 export const name = 'enpoi-council'
 export const inject = ['tools', 'subagents', 'sessionPersistence', 'sessions', 'agents']
 
-const ORCH_NS = settingsNamespace('enpoi-orchestration')
+const ORCH_NS = 'enpoi-orchestration'
 
 const PersonaModelSchema = Schema.object({
   provider: Schema.string(),

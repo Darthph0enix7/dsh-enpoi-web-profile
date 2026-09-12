@@ -1,6 +1,5 @@
 // src/index.ts
 import Schema2 from "schemastery";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 
 // ../enpoi-context-keeper/lib/index.js
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -414,6 +413,7 @@ Do not compress or lose valuable ideas. Structure your response in rich, product
 }
 
 // src/engine.ts
+import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -556,14 +556,13 @@ async function followupDebaterFiber(ctx, parent, fiber, promptText, signal, time
   let timer;
   try {
     await Promise.race([
-      ctx.subagents.followup(
+      queueHostSubagentPrompt(
+        ctx.subagents,
         parent,
         fiber.childId,
         [{ type: "text", text: promptText }],
-        {
-          source: { kind: "user" },
-          signal
-        }
+        { kind: "user" },
+        signal
       ),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -591,8 +590,13 @@ async function waitForFiberTurn(ctx, childId, signal, timeoutMs = 9e4) {
       if (ctx.agents.get(childId) === void 0) {
         const persistence = ctx.get("sessionPersistence");
         if (persistence !== void 0) {
-          const loaded = await persistence.load(childId);
-          const events = loaded.events;
+          const handle = await persistence.open(childId, "read");
+          let events;
+          try {
+            events = (await handle.read(0, void 0)).events;
+          } finally {
+            await handle.close();
+          }
           const lastUser = [...events].reverse().find((e) => e.type === "user/message");
           const since = lastUser === void 0 ? 0 : lastUser.seq;
           const messages = events.filter((e) => e.type === "assistant/message" && e.seq > since);
@@ -1446,7 +1450,7 @@ function registerCouncilTools(ctx, root) {
 // src/index.ts
 var name = "enpoi-council";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
-var ORCH_NS = settingsNamespace("enpoi-orchestration");
+var ORCH_NS = "enpoi-orchestration";
 var PersonaModelSchema = Schema2.object({
   provider: Schema2.string(),
   model: Schema2.string(),

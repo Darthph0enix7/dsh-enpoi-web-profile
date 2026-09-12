@@ -1,7 +1,7 @@
-// packages/enpoi-dispatcher/src/index.ts
+// src/index.ts
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
-// packages/enpoi-memory/lib/index.js
+// ../enpoi-memory/lib/index.js
 import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as os from "node:os";
@@ -197,7 +197,7 @@ function makePipeline(db) {
 }
 var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 
-// packages/enpoi-dispatcher/src/index.ts
+// src/index.ts
 var name = "enpoi-dispatcher";
 var inject = ["tools", "subagents"];
 var PERSONAS = {

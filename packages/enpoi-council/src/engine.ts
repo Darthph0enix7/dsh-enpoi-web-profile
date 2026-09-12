@@ -10,6 +10,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, Session, SessionId } from '@deepseek-ai/dsh-agent'
+import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
@@ -247,14 +249,13 @@ export async function followupDebaterFiber(
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
-      ctx.subagents.followup(
+      queueHostSubagentPrompt(
+        ctx.subagents,
         parent,
         fiber.childId as SessionId,
         [{ type: 'text', text: promptText }],
-        {
-          source: { kind: 'user' },
-          signal,
-        },
+        { kind: 'user' },
+        signal,
       ),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -294,10 +295,15 @@ export async function waitForFiberTurn(
 
       // Child unmounts/parks when turn completes
       if (ctx.agents.get(childId as SessionId) === undefined) {
-        const persistence = ctx.get('sessionPersistence')
+        const persistence = ctx.get('sessionPersistence') as SessionPersistence | undefined
         if (persistence !== undefined) {
-          const loaded = await persistence.load(childId as SessionId)
-          const events = loaded.events as SessionEvent[]
+          const handle = await persistence.open(childId as SessionId, 'read')
+          let events: readonly SessionEvent[]
+          try {
+            events = (await handle.read(0, undefined)).events
+          } finally {
+            await handle.close()
+          }
           const lastUser = [...events].reverse().find(e => e.type === 'user/message')
           const since = lastUser === undefined ? 0 : lastUser.seq
           const messages = events.filter(e => e.type === 'assistant/message' && e.seq > since)

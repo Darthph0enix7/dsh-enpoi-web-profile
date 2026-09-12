@@ -18,9 +18,6 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from 'schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import type { CapabilitiesState } from './types'
 import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
@@ -29,7 +26,7 @@ import { evaluateToolCall, formatCapabilitiesSnapshot } from './enforcement'
 export const name = 'enpoi-capabilities'
 export const inject = ['tools', 'systemPrompt', 'settings', 'timer']
 
-const ORCH_NS = settingsNamespace('enpoi-orchestration')
+const ORCH_NS = 'enpoi-orchestration'
 
 export const CapabilitiesSchema = Schema.object({
   tools: Schema.dict(Schema.boolean()).default({}),
@@ -37,7 +34,36 @@ export const CapabilitiesSchema = Schema.object({
   mcp: Schema.dict(Schema.boolean()).default({}),
 })
 
+/**
+ * Namespace owner schema for `enpoi-orchestration` — the shared state surface
+ * every enpoi plugin reads (capabilities, MCP catalog + status, fleet
+ * personas, orchestration parameters, UI preferences). Nested records are
+ * plugin-owned vocabularies carried as opaque values so round-trips stay
+ * byte-faithful.
+ */
+export const OrchestrationSettingsSchema = Schema.object({
+  capabilities: CapabilitiesSchema,
+  mcpServers: Schema.dict(Schema.any()).default({}),
+  mcpStatus: Schema.dict(Schema.any()).default({}),
+  personas: Schema.dict(Schema.any()).default({}),
+  parameters: Schema.any(),
+  uiPreferences: Schema.any(),
+})
+
 export function apply(ctx: Context): void {
+  // 0. Namespace ownership: without a registering owner,
+  //    `settings.get('enpoi-orchestration')` returns undefined and every
+  //    enpoi reader silently falls back to its built-in defaults (fleet
+  //    routing assignments, MCP catalog, orchestration parameters).
+  try {
+    const settingsApi = ctx.get('settings') as {
+      register?: (ns: string, schema: unknown, opts?: { base?: unknown }) => unknown
+    } | undefined
+    settingsApi?.register?.(ORCH_NS, OrchestrationSettingsSchema, { base: { capabilities: {} } })
+  } catch (error) {
+    process.stderr.write(`[enpoi-capabilities] namespace registration failed: ${String(error)}\n`)
+  }
+
   function getGlobalDefaults(): Partial<CapabilitiesState> | undefined {
     try {
       const settings = ctx.get('settings') as { get?: (ns: unknown) => { capabilities?: Partial<CapabilitiesState> } } | undefined
@@ -113,14 +139,20 @@ export function apply(ctx: Context): void {
       }
     }
 
-    /** Resolve apiKeyEnv: process.env first, then ~/.dsh/.credentials.yaml refs (never logged). */
-    function resolveCredential(name: string | undefined): string | undefined {
+    /**
+     * Resolve an apiKeyEnv reference through the deployment credential
+     * provider (process env + ~/.dsh/.credentials.yaml sources); values are
+     * never logged.
+     */
+    async function resolveCredential(name: string | undefined): Promise<string | undefined> {
       if (!name) return undefined
-      if (process.env[name]) return process.env[name]
+      const seam = ctx.get('credentials') as
+        | { resolve?: (ref: string) => Promise<{ value: string } | undefined> }
+        | undefined
+      if (seam?.resolve === undefined) return undefined
       try {
-        const raw = readFileSync(`${homedir()}/.dsh/.credentials.yaml`, 'utf8')
-        const m = raw.match(new RegExp(`^\\s{2}${name}:\\s*(.+)$`, 'm'))
-        return m?.[1]?.trim()
+        const hit = await seam.resolve(name)
+        return hit?.value
       } catch {
         return undefined
       }
@@ -152,7 +184,7 @@ export function apply(ctx: Context): void {
         if (!def.url) continue
         mountedPending.add(id)
         try {
-          const apiKey = resolveCredential(def.apiKeyEnv)
+          const apiKey = await resolveCredential(def.apiKeyEnv)
           const headers: Record<string, string> = { ...(def.headers ?? {}) }
           if (apiKey) headers.Authorization = `Bearer ${apiKey}`
           const fiber = ctx.plugin(mcpClient.apply, {
@@ -198,7 +230,7 @@ export function apply(ctx: Context): void {
           Accept: 'application/json, text/event-stream',
           ...(def.headers ?? {}),
         }
-        const apiKey = resolveCredential(def.apiKeyEnv)
+        const apiKey = await resolveCredential(def.apiKeyEnv)
         if (apiKey && !headers.Authorization) headers.Authorization = `Bearer ${apiKey}`
         // Minimal Streamable-HTTP liveness: a JSON-RPC initialize handshake.
         const res = await fetch(def.url, {

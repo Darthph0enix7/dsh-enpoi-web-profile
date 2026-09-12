@@ -34,7 +34,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are the Master Orchestrator — Adam's lead implementer agent. Your
       job is to plan, implement, schedule, and delegate coding work. You are
       aware of the tools, skills, and agents available to you.

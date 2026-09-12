@@ -1,11 +1,14 @@
-// packages/enpoi-oracle/src/index.ts
+// src/index.ts
+import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 import { createUserMessage as createUserMessage2 } from "@deepseek-ai/dsh-llm";
 
-// packages/enpoi-context-keeper/lib/index.js
+// ../enpoi-context-keeper/lib/index.js
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
+import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import Schema from "schemastery";
+var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
 var Config = Schema.object({
   provider: Schema.string().default("freellmapi"),
   model: Schema.string().default("auto"),
@@ -68,7 +71,7 @@ function getBriefService() {
   return briefService;
 }
 
-// packages/enpoi-oracle/src/index.ts
+// src/index.ts
 var name = "enpoi-oracle";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var ORACLE_PERSONA = [
@@ -250,8 +253,13 @@ async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4) {
       if (ctx.agents.get(childId) === void 0) {
         const persistence = ctx.get("sessionPersistence");
         if (persistence !== void 0) {
-          const loaded = await persistence.load(childId);
-          const events = loaded.events;
+          const handle = await persistence.open(childId, "read");
+          let events;
+          try {
+            events = (await handle.read(0, void 0)).events;
+          } finally {
+            await handle.close();
+          }
           const lastUser = [...events].reverse().find((e) => e.type === "user/message");
           const since = lastUser === void 0 ? 0 : lastUser.seq;
           const messages = events.filter((e) => e.type === "assistant/message" && e.seq > since);
@@ -442,10 +450,14 @@ function registerOracleTools(ctx, root) {
             throw err;
           }
         } else {
-          await ctx.subagents.followup(parent, fiber.childId, prompt, {
-            source: { kind: "user" },
-            signal: bg?.signal ?? exec.signal
-          });
+          await queueHostSubagentPrompt(
+            ctx.subagents,
+            parent,
+            fiber.childId,
+            prompt,
+            { kind: "user" },
+            bg?.signal ?? exec.signal
+          );
         }
         if (bg !== null) {
           handedOff = true;

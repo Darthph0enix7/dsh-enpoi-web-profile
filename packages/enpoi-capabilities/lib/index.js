@@ -1,8 +1,5 @@
 // src/index.ts
 import Schema from "schemastery";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 
 // src/types.ts
 var PROTECTED_CAPABILITIES = /* @__PURE__ */ new Set([
@@ -117,13 +114,28 @@ function formatCapabilitiesSnapshot(state) {
 // src/index.ts
 var name = "enpoi-capabilities";
 var inject = ["tools", "systemPrompt", "settings", "timer"];
-var ORCH_NS = settingsNamespace("enpoi-orchestration");
+var ORCH_NS = "enpoi-orchestration";
 var CapabilitiesSchema = Schema.object({
   tools: Schema.dict(Schema.boolean()).default({}),
   skills: Schema.dict(Schema.boolean()).default({}),
   mcp: Schema.dict(Schema.boolean()).default({})
 });
+var OrchestrationSettingsSchema = Schema.object({
+  capabilities: CapabilitiesSchema,
+  mcpServers: Schema.dict(Schema.any()).default({}),
+  mcpStatus: Schema.dict(Schema.any()).default({}),
+  personas: Schema.dict(Schema.any()).default({}),
+  parameters: Schema.any(),
+  uiPreferences: Schema.any()
+});
 function apply(ctx) {
+  try {
+    const settingsApi = ctx.get("settings");
+    settingsApi?.register?.(ORCH_NS, OrchestrationSettingsSchema, { base: { capabilities: {} } });
+  } catch (error) {
+    process.stderr.write(`[enpoi-capabilities] namespace registration failed: ${String(error)}
+`);
+  }
   function getGlobalDefaults() {
     try {
       const settings = ctx.get("settings");
@@ -173,13 +185,13 @@ function apply(ctx) {
         return {};
       }
     }
-    function resolveCredential(name2) {
+    async function resolveCredential(name2) {
       if (!name2) return void 0;
-      if (process.env[name2]) return process.env[name2];
+      const seam = ctx.get("credentials");
+      if (seam?.resolve === void 0) return void 0;
       try {
-        const raw = readFileSync(`${homedir()}/.dsh/.credentials.yaml`, "utf8");
-        const m = raw.match(new RegExp(`^\\s{2}${name2}:\\s*(.+)$`, "m"));
-        return m?.[1]?.trim();
+        const hit = await seam.resolve(name2);
+        return hit?.value;
       } catch {
         return void 0;
       }
@@ -208,7 +220,7 @@ function apply(ctx) {
         if (!def.url) continue;
         mountedPending.add(id);
         try {
-          const apiKey = resolveCredential(def.apiKeyEnv);
+          const apiKey = await resolveCredential(def.apiKeyEnv);
           const headers = { ...def.headers ?? {} };
           if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
           const fiber = ctx.plugin(mcpClient.apply, {
@@ -246,7 +258,7 @@ function apply(ctx) {
           Accept: "application/json, text/event-stream",
           ...def.headers ?? {}
         };
-        const apiKey = resolveCredential(def.apiKeyEnv);
+        const apiKey = await resolveCredential(def.apiKeyEnv);
         if (apiKey && !headers.Authorization) headers.Authorization = `Bearer ${apiKey}`;
         const res = await fetch(def.url, {
           method: "POST",
@@ -321,6 +333,7 @@ function apply(ctx) {
 export {
   CapabilitiesSchema,
   KNOWN_CAPABILITIES,
+  OrchestrationSettingsSchema,
   PROTECTED_CAPABILITIES,
   apply,
   evaluateToolCall,
