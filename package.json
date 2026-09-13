@@ -12,6 +12,7 @@
     "dsh-enpoi-council": "workspace:*",
     "dsh-enpoi-file-revert": "workspace:*",
     "dsh-enpoi-fs-ops": "workspace:*",
+    "dsh-enpoi-git": "workspace:*",
     "dsh-enpoi-living-brief": "workspace:*",
     "dsh-enpoi-memory": "workspace:*",
     "dsh-enpoi-oracle": "workspace:*",
@@ -38,7 +39,8 @@
         "dsh-enpoi-council",
         "dsh-enpoi-capabilities",
         "dsh-enpoi-file-revert",
-        "dsh-enpoi-fs-ops"
+        "dsh-enpoi-fs-ops",
+        "dsh-enpoi-git"
       ]
     }
   },
