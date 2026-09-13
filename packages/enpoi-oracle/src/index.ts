@@ -43,10 +43,21 @@ const ORACLE_PERSONA = [
 
 /** Read-only surface for the oracle fiber. */
 const ORACLE_TOOL_FILTER = {
+  // Read-only review surface. Passed UNCONDITIONALLY: the fork's
+  // `tools.restrict()` skips unknown deny names, while the previous
+  // `.filter(name => ctx.tools.get(name) !== undefined)` guard dropped every
+  // tool registered outside this plugin's context and silently left the child
+  // with the full main surface (verified live: 29 tools).
+  // NOTE: `run_code` is never named — the PTC presentation transport is
+  // reserved and `tools.restrict()` throws when a filter names it.
   deny: [
     'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
-    'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
-    'todo_write', 'plan_mode', 'goal', 'send_message',
+    'subagent_claude_code', 'roundtable', 'chorus',
+    'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal',
+    'ralph', 'workflow', 'job_output', 'job_list', 'job_kill',
+    'bash', 'edit', 'write', 'str_replace_editor', 'skill', 'ask_user_question',
+    'todo_write', 'memory_save', 'memory_rescind', 'memory_confirm', 'memory_search',
+    'send_message', 'interrupt_agent', 'list_agents',
   ],
 }
 
@@ -479,7 +490,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
 
         if (fresh) {
           try {
-            const denied = ORACLE_TOOL_FILTER.deny.filter(name => ctx.tools.get(name) !== undefined)
+            const denied = ORACLE_TOOL_FILTER.deny
             const personaModel = resolvePersonaModel(ctx, 'oracle')
             const started = await ctx.subagents.startContinuable({
               provider: 'spawn',

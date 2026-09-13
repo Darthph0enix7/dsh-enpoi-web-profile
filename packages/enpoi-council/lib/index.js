@@ -361,7 +361,7 @@ function councilDiag(msg) {
 var BRIEF_WAIT_MS = 4e3;
 async function ensureBriefWithin(parent, signal, waitMs = BRIEF_WAIT_MS) {
   const brief = getBriefService();
-  if (brief === void 0) return;
+  if (brief === null || brief === void 0) return;
   const pending = brief.ensureFreshBrief(parent.session, signal).catch((error) => {
     councilDiag(`brief wait degraded: ${String(error)}`);
     return null;
@@ -425,7 +425,25 @@ var COUNCIL_DENIED_TOOLS = [
   "memory_save",
   "memory_search",
   "memory_rescind",
-  "memory_confirm"
+  "memory_confirm",
+  // Code/execution escapes (NOTE: `run_code` is deliberately absent — the PTC
+  // presentation transport is reserved and `tools.restrict()` throws when a
+  // filter names it; a seat holding it can only orchestrate tools it can
+  // already see, which this list bounds)
+  "workflow",
+  "ralph",
+  // Goal & plan-mode orchestration
+  "create_goal",
+  "get_goal",
+  "update_goal",
+  "exit_plan_mode",
+  // Background job control
+  "job_output",
+  "job_list",
+  "job_kill",
+  // Harness surfaces that are neither research nor reasoning
+  "skill",
+  "ask_user_question"
 ];
 function resolvePersonaModel(ctx, persona) {
   try {

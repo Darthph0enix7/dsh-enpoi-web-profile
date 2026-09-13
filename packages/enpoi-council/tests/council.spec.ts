@@ -1,8 +1,11 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   estimateTokens,
   textOfContent,
   createTraceContext,
+  startDebaterFiber,
+  COUNCIL_DENIED_TOOLS,
+  COUNCIL_KEPT_TOOLS,
 } from '../src/engine'
 import {
   buildRoundtableRound1Prompt,
@@ -21,6 +24,74 @@ import {
   INTEGRATOR_SYSTEM,
   CURATOR_SYSTEM,
 } from '../src/prompts'
+
+describe('enpoi-council / engine — I14 pure-reasoning tool filter', () => {
+  const NEWLY_DENIED = [
+    'workflow', 'ralph',
+    'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal',
+    'job_output', 'job_list', 'job_kill',
+    'skill', 'ask_user_question',
+  ]
+
+  it('denies every execution/orchestration escape (live-inventory regression)', () => {
+    for (const name of NEWLY_DENIED) {
+      expect(COUNCIL_DENIED_TOOLS).toContain(name)
+    }
+    // Historical denials must remain.
+    for (const name of ['send_message', 'subagent', 'dispatch_task', 'bash', 'edit', 'write']) {
+      expect(COUNCIL_DENIED_TOOLS).toContain(name)
+    }
+  })
+
+  it('keeps the read-only research surface: no kept tool is denied', () => {
+    expect(COUNCIL_KEPT_TOOLS).toEqual([
+      'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch',
+    ])
+    for (const name of COUNCIL_KEPT_TOOLS) {
+      expect(COUNCIL_DENIED_TOOLS).not.toContain(name)
+    }
+  })
+
+  it('emits the full deny list unconditionally in the spawned fiber toolFilter', async () => {
+    let emitted: { deny?: string[] } | undefined
+    const ctx = {
+      get: (ns: string) => {
+        if (ns === 'settings') return { get: () => ({ personas: {} }) }
+        if (ns === 'sessions') return { get: () => ({ append: vi.fn() }) }
+        return undefined
+      },
+      subagents: {
+        startContinuable: async (opts: { request: { toolFilter?: { deny?: string[] } } }) => {
+          emitted = opts.request.toolFilter
+          return { childId: 'child-00000000-0000-4000-8000-000000000001' }
+        },
+      },
+      logger: { warn: vi.fn(), info: vi.fn() },
+    }
+    const parent = {
+      session: { id: 'parent-session', seq: 10, events: [], append: vi.fn() },
+      options: { provider: 'antigravity', model: 'gemini-3.7-flash-tiered' },
+    }
+
+    await startDebaterFiber(
+      ctx as never,
+      parent as never,
+      'Skeptic',
+      'system prompt',
+      'initial prompt',
+      new AbortController().signal,
+    )
+
+    expect(emitted).toBeDefined()
+    expect(emitted?.deny).toEqual(COUNCIL_DENIED_TOOLS)
+    for (const name of NEWLY_DENIED) {
+      expect(emitted?.deny).toContain(name)
+    }
+    for (const name of COUNCIL_KEPT_TOOLS) {
+      expect(emitted?.deny).not.toContain(name)
+    }
+  })
+})
 
 describe('enpoi-council / engine — Token & Text Helpers', () => {
   it('estimates token counts conservatively (~4 chars/token)', () => {
@@ -118,5 +189,11 @@ describe('enpoi-council / prompts — Colosseum Protocol & Prompts', () => {
     const harvest = buildCuratorHarvestPrompt('Design a voice assistant', 'Rounds data')
     expect(harvest).toContain('## 🌟 Spotlight Gems')
     expect(harvest).toContain('## 🚀 Execution Matrix: Buildable Now vs. Horizon Moonshots')
+  })
+})
+
+describe('reserved PTC transport', () => {
+  it('never names run_code in the deny list (tools.restrict() throws on it)', () => {
+    expect(COUNCIL_DENIED_TOOLS).not.toContain('run_code')
   })
 })

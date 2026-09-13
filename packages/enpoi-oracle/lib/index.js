@@ -15,6 +15,13 @@ var ORACLE_PERSONA = [
   '{"approved":true|false,"concerns":["..."],"unverified":["..."],"blockers":["..."]}'
 ].join("\n");
 var ORACLE_TOOL_FILTER = {
+  // Read-only review surface. Passed UNCONDITIONALLY: the fork's
+  // `tools.restrict()` skips unknown deny names, while the previous
+  // `.filter(name => ctx.tools.get(name) !== undefined)` guard dropped every
+  // tool registered outside this plugin's context and silently left the child
+  // with the full main surface (verified live: 29 tools).
+  // NOTE: `run_code` is never named — the PTC presentation transport is
+  // reserved and `tools.restrict()` throws when a filter names it.
   deny: [
     "oracle_review",
     "dispatch_task",
@@ -22,14 +29,33 @@ var ORACLE_TOOL_FILTER = {
     "subagent_fork",
     "subagent_codex",
     "subagent_claude_code",
+    "roundtable",
+    "chorus",
+    "create_goal",
+    "get_goal",
+    "update_goal",
+    "exit_plan_mode",
+    "plan_mode",
+    "goal",
+    "ralph",
+    "workflow",
+    "job_output",
+    "job_list",
+    "job_kill",
     "bash",
     "edit",
     "write",
     "str_replace_editor",
+    "skill",
+    "ask_user_question",
     "todo_write",
-    "plan_mode",
-    "goal",
-    "send_message"
+    "memory_save",
+    "memory_rescind",
+    "memory_confirm",
+    "memory_search",
+    "send_message",
+    "interrupt_agent",
+    "list_agents"
   ]
 };
 function lastHumanUserMessageSeq(events) {
@@ -365,7 +391,7 @@ function registerOracleTools(ctx, root) {
         }];
         if (fresh) {
           try {
-            const denied = ORACLE_TOOL_FILTER.deny.filter((name2) => ctx.tools.get(name2) !== void 0);
+            const denied = ORACLE_TOOL_FILTER.deny;
             const personaModel = resolvePersonaModel(ctx, "oracle");
             const started = await ctx.subagents.startContinuable({
               provider: "spawn",

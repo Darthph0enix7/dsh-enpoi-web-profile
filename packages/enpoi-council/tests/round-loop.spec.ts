@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 
 import { runChorus } from '../src/chorus'
 import { runRoundtable } from '../src/roundtable'
@@ -26,12 +27,16 @@ function makeCtx(overrides: {
       if (ns === 'sessionProjections') return { snapshot: () => ({ values: {} }) }
       if (ns === 'agents') return { get: () => undefined } // child always parked
       if (ns === 'sessionPersistence') {
+        const events = [
+          { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: turnText }] } } },
+          { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
+        ]
         return {
-          load: async () => ({
-            events: [
-              { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: turnText }] } } },
-              { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
-            ],
+          // Matches the live SessionPersistence API: open(id, 'read') →
+          // handle.read(from, to) → handle.close().
+          open: async () => ({
+            read: async () => ({ events }),
+            close: async () => undefined,
           }),
         }
       }
@@ -43,6 +48,9 @@ function makeCtx(overrides: {
     subagents: {
       startContinuable: async () => ({ childId }),
       followup: async () => undefined,
+      // The engine's follow-up path calls queueHostSubagentPrompt, which is
+      // symbol-keyed on the subagent runtime (host delivery adapter).
+      [deliverSubagentPrompt]: async () => undefined,
     },
     logger: { warn: vi.fn(), info: vi.fn() },
   }

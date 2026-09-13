@@ -49,7 +49,7 @@ export const BRIEF_WAIT_MS = 4_000
  */
 export async function ensureBriefWithin(parent: Agent, signal: AbortSignal, waitMs = BRIEF_WAIT_MS): Promise<void> {
   const brief = getBriefService()
-  if (brief === undefined) return
+  if (brief === null || brief === undefined) return
   const pending = brief.ensureFreshBrief(parent.session, signal).catch((error: unknown) => {
     councilDiag(`brief wait degraded: ${String(error)}`)
     return null
@@ -148,12 +148,34 @@ export function createTraceContext(
 // tool's final synthesis may reach the parent session. `send_message` is denied
 // so a debater cannot relay its raw output into the parent inbox (the old
 // report-tool leak this plugin was built to avoid).
-const COUNCIL_DENIED_TOOLS = [
+//
+// The deny list is passed UNCONDITIONALLY (no length guard beyond emptiness):
+// the fork's `tools.restrict()` skips unknown deny names safely, so names that
+// only exist in some harness builds are harmless here and future-proof.
+export const COUNCIL_DENIED_TOOLS = [
   'send_message',
   'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
   'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
   'todo_write', 'plan_mode', 'goal', 'roundtable', 'chorus',
   'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
+  // Code/execution escapes (NOTE: `run_code` is deliberately absent — the PTC
+  // presentation transport is reserved and `tools.restrict()` throws when a
+  // filter names it; a seat holding it can only orchestrate tools it can
+  // already see, which this list bounds)
+  'workflow', 'ralph',
+  // Goal & plan-mode orchestration
+  'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode',
+  // Background job control
+  'job_output', 'job_list', 'job_kill',
+  // Harness surfaces that are neither research nor reasoning
+  'skill', 'ask_user_question',
+]
+
+// The intended remaining surface for council seats: read-only research tools
+// for grounded evidence. Asserted against COUNCIL_DENIED_TOOLS in tests so the
+// deny list can never grow over the research seats.
+export const COUNCIL_KEPT_TOOLS = [
+  'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch',
 ]
 
 export interface PersonaModelConfig {
