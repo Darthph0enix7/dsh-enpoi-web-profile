@@ -29,13 +29,13 @@
     "backgroundMedia": {
       "light": {
         "type": "image",
-        "src": "assets/enpoi-dark-city.webp",
-        "scrim": "linear-gradient(rgba(5, 12, 24, 0.20) 0%, rgba(5, 12, 24, 0.14) 45%, rgba(5, 12, 24, 0.26) 100%)"
+        "src": "assets/dark-liquid-flow.jpg",
+        "scrim": "linear-gradient(rgba(7, 19, 33, 0.25) 0%, rgba(7, 19, 33, 0.18) 45%, rgba(7, 19, 33, 0.30) 100%)"
       },
       "dark": {
         "type": "image",
-        "src": "assets/enpoi-dark-city.webp",
-        "scrim": "linear-gradient(rgba(4, 10, 20, 0.24) 0%, rgba(4, 10, 20, 0.18) 45%, rgba(4, 10, 20, 0.30) 100%)"
+        "src": "assets/dark-liquid-flow.jpg",
+        "scrim": "linear-gradient(rgba(7, 19, 33, 0.30) 0%, rgba(7, 19, 33, 0.22) 45%, rgba(7, 19, 33, 0.35) 100%)"
       }
     }
   }
