@@ -148,23 +148,38 @@ export async function runCouncil(
       'If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary — conclude your arguments conditionally.',
     ].filter(Boolean).join('\n\n')
 
-    if (spec.opening === 'blind') {
-      councilDiag(`[council ${spec.id}] blind epoch 0: ${spec.seats.length} seats formulating independently`)
+    {
+      councilDiag(`[council ${spec.id}] ${spec.opening} epoch 0: ${spec.seats.length} seats formulating`)
       const blindTurns = await generateParallel(ctx, parent, spec, {
         promptBuilder: seat => openingPrompt(seatPersona(spec, seat)),
         fibers, deny: true, epoch: 0, signal, params,
       })
       totalTokens += blindTurns.tokens
       runtime.tokens = totalTokens
-      for (const t of blindTurns.turns) audit.push(`blind: ${t.seatId} ${t.tokens}t`)
+      for (const t of blindTurns.turns) {
+        audit.push(`opening: ${t.seatId} ${t.tokens}t`)
+        lastActive.set(t.seatId, 0)
+      }
 
-      // Dispute Ledger Ingest: the referee admits blind proposals (epoch 1).
+      // Evidence requested during formulation is brokered BEFORE the ingest
+      // pass (Oracle gate: blind-epoch requests were silently dropped).
+      if (params.evidenceBroker) {
+        for (const t of blindTurns.turns) queue.push(extractEvidenceRequests(t.seatId, 1, t.text), vault)
+        if (queue.size > 0) {
+          const served = await serviceEvidenceQueue(ctx, parent, queue.drain(), vault, 1, signal, params.evidenceTimeoutMs)
+          audit.push(`opening broker: ${served.sheets} sheet(s)`)
+        }
+      }
+
+      // Dispute Ledger Ingest: the referee admits opening proposals (epoch 1).
+      // Runs for BOTH opening modes — a 'open' spec must never reach the
+      // deliberation loop over an empty ledger.
       ledger.setEpoch(1)
       const ingest = await runRefereePass(ctx, parent, {
         spec,
         ledgerText: renderLedger(ledger, spec),
         roundTranscript: blindTurns.turns.map(t => `── ${t.seatId} ──\n${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join('\n\n'),
-        vaultDeltaText: '',
+        vaultDeltaText: vault.all().length > 0 ? vault.render() : '',
         epoch: 1,
         previousDirectives: {},
       }, ledger, signal, params.debaterTimeoutMs)

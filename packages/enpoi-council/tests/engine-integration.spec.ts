@@ -227,6 +227,67 @@ describe('council engine — scripted full runs', () => {
     expect(result.stopReason).toMatch(/max rounds/)
   })
 
+  it('opening-phase evidence requests are brokered BEFORE the ingest referee pass', async () => {
+    const blindWithNeed = 'PROPOSE_CRUX: The claim format needs a lease TTL.\nNEED_EVIDENCE(target: queue scheduler, question: does claim_next use a lock or a row update?)'
+    const script = [
+      BLIND, BLIND, blindWithNeed,                     // blind epoch 0 (one seat requests evidence)
+      SHEET,                                           // broker flush BEFORE ingest
+      refereeJson({ admissions: [
+        { kind: 'crux', assertion: 'The claim format needs a lease TTL.', author: 'skeptic' },
+      ], evidenceNote: 'vault has F-1' }),
+      ARGUE, ARGUE, ARGUE,                             // epoch 2
+      refereeJson({ flips: [{ id: 'C-1', to: 'contested', reason: 'open dispute' }] }),
+      ARGUE, ARGUE, ARGUE,                             // epoch 3
+      refereeJson({}),                                 // run=1
+      ARGUE, ARGUE, ARGUE,                             // epoch 4
+      refereeJson({}),                                 // run=2 → challenge
+      CONCUR, CONCUR, CONCUR,                          // epoch 5 challenge
+      refereeJson({}),                                 // silent → terminate
+      CHAIR,
+    ]
+    const { ctx, parent, spawnedLabels } = makeCtx(script)
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    })
+    // The broker child spawned BEFORE the ingest referee child (vault commit precedes ingest).
+    const brokerIdx = spawnedLabels.findIndex(l => l.startsWith('council broker:'))
+    const ingestIdx = spawnedLabels.findIndex(l => l.includes('referee: epoch 1'))
+    expect(brokerIdx).toBeGreaterThanOrEqual(0)
+    expect(ingestIdx).toBeGreaterThan(brokerIdx)
+    expect(result.vaultAdditions).toBe(1)
+  })
+
+  it("opening: 'open' runs formulation + ingest and never aborts on an empty ledger", async () => {
+    const openSpec = { ...ROUNDTABLE_SPEC, opening: 'open' as const }
+    const script = [
+      ARGUE + ' PROPOSE_CRUX: Open-mode positions land as ledger entries.',   // epoch-1 formulation (open, 3 seats)
+      ARGUE, ARGUE,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'Open-mode positions land as ledger entries.', author: 'skeptic' }] }),
+      ARGUE, ARGUE, ARGUE,                             // epoch 2
+      refereeJson({ flips: [{ id: 'C-1', to: 'contested', reason: 'disputed' }] }),
+      ARGUE, ARGUE, ARGUE,                             // epoch 3
+      refereeJson({}),                                 // run=1
+      ARGUE, ARGUE, ARGUE,                             // epoch 4
+      refereeJson({}),                                 // run=2 → challenge
+      CONCUR, CONCUR, CONCUR,                          // epoch 5 challenge
+      refereeJson({}),                                 // silent → terminate
+      CHAIR,
+    ]
+    const { ctx, parent } = makeCtx(script)
+    const result = await runCouncil(ctx, parent, {
+      spec: openSpec,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    })
+    expect(result.stopReason).not.toBe('no ledger entries were ever admitted')
+    expect(result.ledgerState.entries.length).toBeGreaterThanOrEqual(1)
+    expect(result.deliverable).toContain('Decision')
+  })
+
   it('chorus runs in forest mode and terminates on saturation', async () => {
     const sprout = 'SPROUT: Ambient dock | A glanceable strip summarizing fleet state.'
     const script = [
