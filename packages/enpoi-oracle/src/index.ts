@@ -163,6 +163,33 @@ export interface PersonaModelConfig {
 }
 
 /** Doc 38: oracle consultation timeout — resolved fresh per call (hot-swap). */
+/** Bounded wait for the demand-driven Living Brief before an oracle consultation, in ms. */
+const ORACLE_BRIEF_WAIT_MS = 4_000
+
+/**
+ * Materialize the demand-driven brief without letting a slow keeper call delay
+ * the consultation. The generation keeps running single-flight in the keeper,
+ * so a later call consumes the fresh prose from cache.
+ * @param parent - live parent agent whose session owns the brief.
+ * @param signal - caller-owned cancellation.
+ */
+async function ensureBriefWithin(parent: Agent, signal: AbortSignal): Promise<void> {
+  const brief = getBriefService()
+  if (brief === undefined) return
+  const pending = brief.ensureFreshBrief(parent.session, signal).catch(() => {
+    // A failed brief is optional context; the deterministic package still goes.
+    return null
+  })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, ORACLE_BRIEF_WAIT_MS) })
+  try {
+    await Promise.race([pending.then(() => undefined), timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+  if (signal.aborted) throw signal.reason ?? new Error('aborted')
+}
+
 export function resolveOracleTimeoutMs(ctx: Context): number {
   try {
     const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { oracle?: { timeoutMs?: number } } } } | undefined
@@ -418,16 +445,9 @@ function registerOracleTools(ctx: Context, root: Context): void {
 
         if (fresh) {
           // Demand-driven cognition: materialize the prose brief for this
-          // query's first consultation (Oracle amendment 3 — blocking is
-          // proportionate for a minutes-long tool). Soft-degrading: on
-          // failure the oracle proceeds with the deterministic brief.
-          try {
-            await getBriefService()?.ensureFreshBrief(parent.session, exec.signal)
-          } catch {
-            // Oracle nit: a cancelled caller must not spawn a child on a
-            // dead signal — propagate the abort.
-            if (exec.signal.aborted) throw exec.signal.reason ?? new Error('aborted')
-          }
+          // query's first consultation (Oracle amendment 3). Bounded: a
+          // hanging keeper route degrades to the deterministic brief.
+          await ensureBriefWithin(parent, exec.signal)
           fiber = {
             childId: null,
             consultations: 0,

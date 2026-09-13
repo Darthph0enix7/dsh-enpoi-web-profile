@@ -1,9 +1,6 @@
 // src/index.ts
 import Schema from "schemastery";
 
-// src/roundtable.ts
-import { getBriefService } from "dsh-enpoi-context-keeper";
-
 // src/params.ts
 var COUNCIL_PARAM_DEFAULTS = {
   maxDebateTokens: 18e4,
@@ -348,6 +345,7 @@ Do not compress or lose valuable ideas. Structure your response in rich, product
 
 // src/engine.ts
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
+import { getBriefService } from "dsh-enpoi-context-keeper";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -359,6 +357,25 @@ function councilDiag(msg) {
 `);
   } catch {
   }
+}
+var BRIEF_WAIT_MS = 4e3;
+async function ensureBriefWithin(parent, signal, waitMs = BRIEF_WAIT_MS) {
+  const brief = getBriefService();
+  if (brief === void 0) return;
+  const pending = brief.ensureFreshBrief(parent.session, signal).catch((error) => {
+    councilDiag(`brief wait degraded: ${String(error)}`);
+    return null;
+  });
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, waitMs);
+  });
+  try {
+    await Promise.race([pending.then(() => void 0), timeout]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+  if (signal.aborted) throw signal.reason ?? new Error("aborted");
 }
 function estimateTokens(text) {
   return Math.ceil(text.length / 4);
@@ -878,11 +895,7 @@ async function runRoundtable(ctx, parent, args, signal) {
     Pragmatist: "flash",
     Critic: "flagship"
   };
-  try {
-    await getBriefService()?.ensureFreshBrief(parent.session, signal);
-  } catch {
-    if (signal.aborted) throw signal.reason ?? new Error("aborted");
-  }
+  await ensureBriefWithin(parent, signal);
   const { text: briefText, goalSeq: initialGoalSeq } = getLivingBriefContext(ctx, parent);
   try {
     parent.session.append("council/started", {
@@ -1038,7 +1051,6 @@ ${allRoundsText}`;
 }
 
 // src/chorus.ts
-import { getBriefService as getBriefService2 } from "dsh-enpoi-context-keeper";
 var CHORUS_SYSTEMS = {
   Visionary: VISIONARY_SYSTEM,
   Experiencer: EXPERIENCER_SYSTEM,
@@ -1069,11 +1081,7 @@ async function runChorus(ctx, parent, args, signal) {
     Integrator: "flash",
     Curator: "flagship"
   };
-  try {
-    await getBriefService2()?.ensureFreshBrief(parent.session, signal);
-  } catch {
-    if (signal.aborted) throw signal.reason ?? new Error("aborted");
-  }
+  await ensureBriefWithin(parent, signal);
   const briefText = getLivingBriefText(ctx, parent);
   try {
     parent.session.append("council/started", {

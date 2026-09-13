@@ -20,7 +20,11 @@ import Schema from 'schemastery'
 import type { CapabilitiesState } from './types'
 import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
+import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
+
+/** Last published catalog entry names per session (dedupe of no-op updates). */
+const publishedCatalog = new Map<string, string>()
 
 export const name = 'enpoi-capabilities'
 export const inject = ['tools', 'systemPrompt', 'settings', 'timer']
@@ -267,7 +271,7 @@ export function apply(ctx: Context): void {
   //    This approach is timing-agnostic (no provider race), rank-agnostic (no rank
   //    contest with the filesystem provider), and fully dynamic (reads settings at
   //    each turn). The guard (B1) remains the execution-time backstop.
-  ctx.on('agent/pre-step', (async (_params: unknown, next: (...args: unknown[]) => Promise<unknown>) => {
+  ctx.on('agent/pre-step', (async (params: { agent?: { session?: { id?: string } } }, next: (...args: unknown[]) => Promise<unknown>) => {
     const decision = (await next()) as {
       kind: string
       messages?: Array<{ source?: unknown; content?: unknown }>
@@ -284,23 +288,8 @@ export function apply(ctx: Context): void {
     )
     if (disabledSkillIds.size === 0) return decision
 
-    const filtered = messages.map((msg: { source?: unknown; content?: unknown }) => {
-      const source = msg.source as { kind?: string } | undefined
-      if (source?.kind !== 'skill-catalog') return msg
-      const content = msg.content
-      if (!Array.isArray(content)) return msg
-      const newContent = content.map((block: { type?: string; text?: string }) => {
-        if (block.type !== 'text' || typeof block.text !== 'string') return block
-        const lines = block.text.split('\n')
-        const kept = lines.filter(line => {
-          const m = line.match(/^- `([^`]+)`:/)
-          if (!m) return true
-          return !disabledSkillIds.has(m[1])
-        })
-        return { ...block, text: kept.join('\n') }
-      })
-      return { ...msg, content: newContent }
-    })
+    const sessionId = params?.agent?.session?.id ?? ''
+    const { messages: filtered } = filterSkillCatalogMessages(messages, disabledSkillIds, publishedCatalog, sessionId)
     return { ...decision, messages: filtered }
   }) as (...args: unknown[]) => unknown)
 }

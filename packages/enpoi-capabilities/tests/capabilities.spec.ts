@@ -103,6 +103,44 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
     expect(ueDecision.allowed).toBe(true)
   })
 
+  it('strips disabled skills from catalog text and entries, and drops no-op updates', async () => {
+    const { filterSkillCatalogMessages } = await import('../src/catalog.ts')
+    const published = new Map<string, string>()
+    const disabled = new Set(['ue-mcp', 'tier1-workflow'])
+    const catalog = (update: boolean) => ({
+      source: {
+        kind: 'skill-catalog',
+        ...(update ? { update: true } : {}),
+        entries: [
+          { name: 'project-management', description: 'enabled skill' },
+          { name: 'ue-mcp', description: 'disabled skill' },
+        ],
+      },
+      content: [{
+        type: 'text',
+        text: '<available_skills>\n- `project-management`: enabled skill\n- `ue-mcp`: disabled skill\n</available_skills>',
+      }],
+    })
+
+    const first = filterSkillCatalogMessages([catalog(false)], disabled, published, 's1')
+    expect(first.messages).toHaveLength(1)
+    const message = first.messages[0] as { source: { entries: { name: string }[] }; content: { text: string }[] }
+    expect(message.source.entries.map(e => e.name)).toEqual(['project-management'])
+    expect(message.content[0].text).not.toContain('ue-mcp')
+
+    // The same filtered catalog arriving as an update is a no-op: never shipped.
+    const second = filterSkillCatalogMessages([catalog(true)], disabled, published, 's1')
+    expect(second.messages).toHaveLength(0)
+    expect(second.droppedUpdates).toBe(1)
+
+    // A genuinely new set still ships.
+    const third = filterSkillCatalogMessages([{
+      source: { kind: 'skill-catalog', update: true, entries: [{ name: 'test-alpha', description: 'new' }] },
+      content: [{ type: 'text', text: '- `test-alpha`: new' }],
+    }], disabled, published, 's1')
+    expect(third.messages).toHaveLength(1)
+  })
+
   it('Invariant I15: protected infrastructure capabilities can never be disabled', () => {
     const state = initialCapabilitiesState({
       tools: {

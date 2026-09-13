@@ -105,6 +105,24 @@ function buildDelta(brief, args) {
   }
   return lines.join("\n");
 }
+var ORACLE_BRIEF_WAIT_MS = 4e3;
+async function ensureBriefWithin(parent, signal) {
+  const brief = getBriefService();
+  if (brief === void 0) return;
+  const pending = brief.ensureFreshBrief(parent.session, signal).catch(() => {
+    return null;
+  });
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, ORACLE_BRIEF_WAIT_MS);
+  });
+  try {
+    await Promise.race([pending.then(() => void 0), timeout]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+  if (signal.aborted) throw signal.reason ?? new Error("aborted");
+}
 function resolveOracleTimeoutMs(ctx) {
   try {
     const settings = ctx.get("settings");
@@ -324,11 +342,7 @@ function registerOracleTools(ctx, root) {
         }
         const fresh = fiber === void 0;
         if (fresh) {
-          try {
-            await getBriefService()?.ensureFreshBrief(parent.session, exec.signal);
-          } catch {
-            if (exec.signal.aborted) throw exec.signal.reason ?? new Error("aborted");
-          }
+          await ensureBriefWithin(parent, exec.signal);
           fiber = {
             childId: null,
             consultations: 0,

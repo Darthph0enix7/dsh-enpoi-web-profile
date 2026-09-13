@@ -56,6 +56,56 @@ function initialCapabilitiesState(globalDefaults) {
   return { tools, skills, mcp };
 }
 
+// src/catalog.ts
+function rewriteCatalogMessage(msg, disabledSkillIds) {
+  const source = msg.source;
+  if (source?.kind !== "skill-catalog") return void 0;
+  const content = msg.content;
+  if (!Array.isArray(content)) return msg;
+  const newContent = content.map((block) => {
+    if (block.type !== "text" || typeof block.text !== "string") return block;
+    const kept = block.text.split("\n").filter((line) => {
+      const m = line.match(/^- `([^`]+)`:/);
+      if (!m) return true;
+      return !disabledSkillIds.has(m[1]);
+    });
+    return { ...block, text: kept.join("\n") };
+  });
+  const entries = Array.isArray(source.entries) ? source.entries.filter((entry) => !(entry !== null && typeof entry === "object" && typeof entry.name === "string" && disabledSkillIds.has(entry.name))) : source.entries;
+  return {
+    ...msg,
+    content: newContent,
+    source: { ...source, ...entries === void 0 ? {} : { entries } }
+  };
+}
+function catalogNames(msg) {
+  const entries = msg.source?.entries;
+  return Array.isArray(entries) ? entries.map((entry) => String(entry.name ?? "")).join("\0") : "";
+}
+function filterSkillCatalogMessages(messages, disabledSkillIds, published, sessionId) {
+  const filtered = [];
+  let droppedUpdates = 0;
+  for (const msg of messages) {
+    const rewritten = rewriteCatalogMessage(msg, disabledSkillIds);
+    if (rewritten === void 0) {
+      filtered.push(msg);
+      continue;
+    }
+    const names = catalogNames(rewritten);
+    const isUpdate = msg.source?.update === true;
+    if (isUpdate && sessionId !== "" && published.get(sessionId) === names) {
+      droppedUpdates += 1;
+      continue;
+    }
+    if (sessionId !== "") {
+      if (published.size > 500) published.clear();
+      published.set(sessionId, names);
+    }
+    filtered.push(rewritten);
+  }
+  return { messages: filtered, droppedUpdates };
+}
+
 // src/enforcement.ts
 function evaluateToolCall(toolName, args, state) {
   if (PROTECTED_CAPABILITIES.has(toolName)) {
@@ -102,6 +152,7 @@ function evaluateToolCall(toolName, args, state) {
 }
 
 // src/index.ts
+var publishedCatalog = /* @__PURE__ */ new Map();
 var name = "enpoi-capabilities";
 var inject = ["tools", "systemPrompt", "settings", "timer"];
 var ORCH_NS = "enpoi-orchestration";
@@ -281,7 +332,7 @@ function apply(ctx) {
     }), 4e3);
   }).catch(() => {
   });
-  ctx.on("agent/pre-step", (async (_params, next) => {
+  ctx.on("agent/pre-step", (async (params, next) => {
     const decision = await next();
     if (decision.kind !== "enter") return decision;
     const messages = decision.messages;
@@ -291,23 +342,8 @@ function apply(ctx) {
       Object.entries(state.skills).filter(([, enabled]) => enabled === false).map(([id]) => id)
     );
     if (disabledSkillIds.size === 0) return decision;
-    const filtered = messages.map((msg) => {
-      const source = msg.source;
-      if (source?.kind !== "skill-catalog") return msg;
-      const content = msg.content;
-      if (!Array.isArray(content)) return msg;
-      const newContent = content.map((block) => {
-        if (block.type !== "text" || typeof block.text !== "string") return block;
-        const lines = block.text.split("\n");
-        const kept = lines.filter((line) => {
-          const m = line.match(/^- `([^`]+)`:/);
-          if (!m) return true;
-          return !disabledSkillIds.has(m[1]);
-        });
-        return { ...block, text: kept.join("\n") };
-      });
-      return { ...msg, content: newContent };
-    });
+    const sessionId = params?.agent?.session?.id ?? "";
+    const { messages: filtered } = filterSkillCatalogMessages(messages, disabledSkillIds, publishedCatalog, sessionId);
     return { ...decision, messages: filtered };
   }));
 }

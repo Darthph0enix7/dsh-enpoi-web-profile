@@ -14,6 +14,7 @@ import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { createHash } from 'node:crypto'
+import { getBriefService } from 'dsh-enpoi-context-keeper'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -32,6 +33,35 @@ export interface TraceContext {
   persona: string
   parentSeq: number
   seq: number
+}
+
+/** Bounded wait for the demand-driven Living Brief before council start, in ms. */
+export const BRIEF_WAIT_MS = 4_000
+
+/**
+ * Materialize the demand-driven brief without letting a slow keeper call delay
+ * the council. The generation keeps running single-flight in the keeper, so a
+ * later call consumes the fresh prose from cache; a hanging keeper route no
+ * longer stalls the whole council for its full request timeout.
+ * @param parent - live council parent whose session owns the brief.
+ * @param signal - council-owned cancellation.
+ * @param waitMs - bounded wait before proceeding with the deterministic fold.
+ */
+export async function ensureBriefWithin(parent: Agent, signal: AbortSignal, waitMs = BRIEF_WAIT_MS): Promise<void> {
+  const brief = getBriefService()
+  if (brief === undefined) return
+  const pending = brief.ensureFreshBrief(parent.session, signal).catch((error: unknown) => {
+    councilDiag(`brief wait degraded: ${String(error)}`)
+    return null
+  })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs) })
+  try {
+    await Promise.race([pending.then(() => undefined), timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+  if (signal.aborted) throw signal.reason ?? new Error('aborted')
 }
 
 export interface DebaterFiberState {
