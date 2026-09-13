@@ -1,62 +1,62 @@
 /**
- * enpoi-council — runtime parameters (doc 38).
+ * enpoi-council — runtime parameters (doc 38 + doc 54 §9).
  *
- * All tunable council parameters resolve from the `enpoi-orchestration`
- * settings namespace (`parameters.council`) with the doc-38 defaults as
- * fallback. Resolved FRESH per debate start (hot-swap: a settings change
- * takes effect on the next roundtable/chorus invocation — no restart).
- *
- * @module dsh-enpoi-council/params
+ * Resolved FRESH per council start from `enpoi-orchestration` →
+ * `parameters.council` (hot-swap: a settings change applies to the next
+ * invocation — no restart). Old keys stay accepted for compatibility.
  */
-
 import type { Context } from '@deepseek-ai/cordis'
+import type { CouncilParams } from './core/spec.ts'
 
-export interface CouncilParams {
-  /** Cumulative session safety token ceiling. */
-  maxDebateTokens: number
-  /** Default safety round cap (overridable per call via args.maxRounds). */
-  defaultMaxRounds: number
-  /** Anti-pacing: models are never told the round cap. */
+export interface CouncilRuntimeParams extends CouncilParams {
+  /** Anti-pacing: models are never told the round cap (always true in spirit; kept for compat). */
   defaultHideLimit: boolean
-  /** Minimum fraction of debater fibers that must respond online. */
-  quorumFraction: number
-  /** Maximum timeout per debater turn. */
-  debaterTimeoutMs: number
-  /** Immediate retries if a debater throws or returns empty. */
+  /** Immediate retries if a seat throws or returns empty. */
   debaterRetryCount: number
-  /** Consensus ratio that triggers CONSENSUS_REACHED. */
+  /** Legacy consensus/scalar knobs (unused by the ledger engine; accepted so old settings load). */
   consensusThreshold: number
-  /** Jaccard claim delta below which PLATEAU_DETECTED fires. */
   plateauDeltaThreshold: number
 }
 
-export const COUNCIL_PARAM_DEFAULTS: CouncilParams = {
-  maxDebateTokens: 180_000,
-  defaultMaxRounds: 5,
+export const COUNCIL_PARAM_DEFAULTS: CouncilRuntimeParams = {
+  maxDebateTokens: 200_000,
+  defaultMaxRounds: 6,
   defaultHideLimit: true,
   quorumFraction: 2 / 3,
   debaterTimeoutMs: 300_000,
   debaterRetryCount: 1,
   consensusThreshold: 0.8,
   plateauDeltaThreshold: 0.05,
+  stagnationLimit: 2,
+  challengeRound: true,
+  evidenceBroker: true,
+  evidenceTimeoutMs: 120_000,
+  blindEpoch: true,
+  preflightInventory: false,
 }
 
 /** Read the council parameters fresh from settings (hot-swap, never cached). */
-export function getCouncilParams(ctx: Context): CouncilParams {
+export function getCouncilParams(ctx: Context): CouncilRuntimeParams {
   const d = COUNCIL_PARAM_DEFAULTS
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { council?: Partial<CouncilParams> } } } | undefined
+    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { council?: Record<string, unknown> } } } | undefined
     const p = settings?.get?.('enpoi-orchestration')?.parameters?.council
     if (p === undefined || typeof p !== 'object') return d
     return {
       maxDebateTokens: num(p.maxDebateTokens, d.maxDebateTokens, 20_000, 500_000),
       defaultMaxRounds: num(p.defaultMaxRounds, d.defaultMaxRounds, 1, 12),
-      defaultHideLimit: typeof p.defaultHideLimit === 'boolean' ? p.defaultHideLimit : d.defaultHideLimit,
+      defaultHideLimit: bool(p.defaultHideLimit, d.defaultHideLimit),
       quorumFraction: num(p.quorumFraction, d.quorumFraction, 0.5, 1.0),
       debaterTimeoutMs: num(p.debaterTimeoutMs, d.debaterTimeoutMs, 10_000, 600_000),
       debaterRetryCount: num(p.debaterRetryCount, d.debaterRetryCount, 0, 3),
       consensusThreshold: num(p.consensusThreshold, d.consensusThreshold, 0.5, 1.0),
       plateauDeltaThreshold: num(p.plateauDeltaThreshold, d.plateauDeltaThreshold, 0.01, 0.2),
+      stagnationLimit: num(p.stagnationLimit, d.stagnationLimit, 1, 6),
+      challengeRound: bool(p.challengeRound, d.challengeRound),
+      evidenceBroker: bool(p.evidenceBroker, d.evidenceBroker),
+      evidenceTimeoutMs: num(p.evidenceTimeoutMs, d.evidenceTimeoutMs, 15_000, 600_000),
+      blindEpoch: bool(p.blindEpoch, d.blindEpoch),
+      preflightInventory: bool(p.preflightInventory, d.preflightInventory),
     }
   } catch {
     return d
@@ -66,4 +66,8 @@ export function getCouncilParams(ctx: Context): CouncilParams {
 function num(value: unknown, fallback: number, min: number, max: number): number {
   if (typeof value !== 'number' || Number.isNaN(value)) return fallback
   return Math.min(max, Math.max(min, value))
+}
+
+function bool(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
 }

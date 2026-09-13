@@ -1,21 +1,16 @@
 /**
  * enpoi-council — Cordis plugin entry point.
  *
- * Exposes `roundtable` (Colosseum Dialectic debate) and `chorus` (Polyphonic brainstorm)
- * tools to the orchestrator and sysadmin agent presets, and registers the
- * `enpoi-orchestration` settings namespace for persistent per-persona model routing.
- *
- * @module dsh-enpoi-council
+ * Exposes `roundtable` (debate council) and `chorus` (ideation council) on the
+ * doc-54 core engine: blind formulation, dispute ledger, referee adjudication,
+ * evidence broker, state-delta stopping, chair synthesis.
  */
-
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from 'schemastery'
-import { registerCouncilTools } from './tools'
+import { registerCouncilTools } from './tools.ts'
 
 export const name = 'enpoi-council'
 export const inject = ['tools', 'subagents', 'sessionPersistence', 'sessions', 'agents']
-
-const ORCH_NS = 'enpoi-orchestration'
 
 const PersonaModelSchema = Schema.object({
   provider: Schema.string(),

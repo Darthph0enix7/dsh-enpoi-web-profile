@@ -29,7 +29,7 @@ describe('getCouncilParams (doc 38 hot-swap)', () => {
     expect(p.consensusThreshold).toBe(0.9)
     expect(p.defaultHideLimit).toBe(false)
     // Unset keys keep defaults
-    expect(p.defaultMaxRounds).toBe(5)
+    expect(p.defaultMaxRounds).toBe(6)
     expect(p.quorumFraction).toBeCloseTo(2 / 3)
   })
 
