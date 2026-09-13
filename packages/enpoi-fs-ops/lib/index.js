@@ -11,6 +11,7 @@ function editorBackupPath(sha256) {
   return join(homedir(), ".dsh", "file-history", "editor", sha256);
 }
 var MAX_READ_BYTES = 4 * 1024 * 1024;
+var MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
 function sha256Of(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -238,6 +239,31 @@ function apply(ctx, _config) {
           throw new FsOpsError("not-found", `"${path}" does not exist`, 404);
         }
         throw new FsOpsError("fs-error", `cannot stat "${path}": ${error instanceof Error ? error.message : String(error)}`, 400);
+      }
+    },
+    "fs.download": async (payload) => {
+      const path = requireWorkspacePath(payload, sessions);
+      let handle;
+      try {
+        handle = await open(path, "r");
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          throw new FsOpsError("not-found", `"${path}" does not exist`, 404);
+        }
+        throw new FsOpsError("fs-error", `cannot read "${path}": ${error instanceof Error ? error.message : String(error)}`, 400);
+      }
+      try {
+        const info = await handle.stat();
+        if (info.isDirectory()) {
+          throw new FsOpsError("fs-error", `"${path}" is a directory`, 400);
+        }
+        if (info.size > MAX_DOWNLOAD_BYTES) {
+          throw new FsOpsError("too-large", `"${path}" is larger than ${MAX_DOWNLOAD_BYTES} bytes`, 413);
+        }
+        const bytes = await handle.readFile();
+        return { base64: bytes.toString("base64"), size: bytes.length, name: basename(path) };
+      } finally {
+        await handle.close();
       }
     },
     "fs.read": async (payload) => {
