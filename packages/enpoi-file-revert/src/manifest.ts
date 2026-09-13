@@ -5,7 +5,17 @@
  */
 
 import { mkdir, readFile, appendFile } from 'node:fs/promises'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+
+const LOG_DIR = join(process.env.HOME ?? '', '.dsh', 'logs')
+/** Best-effort diagnostics (never throws; the plugin context has no logger). */
+function diag(line: string): void {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    appendFileSync(join(LOG_DIR, 'enpoi-file-revert.log'), `[${new Date().toISOString()}] ${line}\n`)
+  } catch { /* diagnostics never throw */ }
+}
 
 export interface FileMutationRecord {
   sessionId: string
@@ -51,6 +61,7 @@ export class MutationManifest {
   private async init(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, 'utf8')
+      this.records = []
       const lines = raw.split('\n')
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
@@ -89,6 +100,7 @@ export class MutationManifest {
     const prior = this.lastFor(record.targetKey)
     if (prior !== undefined && prior.postBlobSha !== record.preBlobSha) {
       record.isInterleaved = true
+      diag(`append: interleaved for ${record.targetKey} — prior toolSeq=${prior.toolSeq} post=${String(prior.postBlobSha).slice(0, 10)} vs incoming pre=${String(record.preBlobSha).slice(0, 10)}`)
     }
     this.records.push(record)
     await mkdir(join(this.filePath, '..'), { recursive: true })
@@ -134,9 +146,32 @@ export class MutationManifest {
       }
       entry.records.push(rec)
       if (rec.toolSeq < entry.initialPre.toolSeq) entry.initialPre = rec
-      if (rec.toolSeq > entry.finalPost.toolSeq) entry.finalPost = rec
+    }
+    // finalPost must be the LAST AGENT/USER-authored state, never the plugin's
+    // own revert write: a trashed plugin record (postBlobSha null) otherwise
+    // made the evaluator report "post-agent snapshot unavailable" on a clean
+    // restore-all. Plugin records stay in `records` for the known-state scan.
+    for (const entry of byKey.values()) {
+      const authored = entry.records.filter(r => r.source !== 'plugin-revert')
+      const pool = authored.length > 0 ? authored : entry.records
+      entry.finalPost = pool.reduce((a, b) => (b.toolSeq > a.toolSeq ? b : a))
     }
     return byKey
+  }
+
+
+  /**
+   * Chain-derived interleaving for one record: a record is interleaved iff its
+   * pre-state differs from the previous record's post-state for the same key.
+   * This recomputes from the chain instead of trusting stored flags — a stale
+   * or poisoned `isInterleaved` (e.g. written by an older build during a
+   * restart window) must never degrade a clean target into a spurious
+   * "Snapshot unavailable" conflict (FR1/FR5 backwards-compat).
+   */
+  private chainInterleaved(spanRecs: FileMutationRecord[], index: number): boolean {
+    if (index <= 0) return false
+    const prior = spanRecs[index - 1]
+    return prior.postBlobSha !== spanRecs[index].preBlobSha
   }
 
   /**
@@ -174,8 +209,8 @@ export class MutationManifest {
       // degrade a clean restore-all target.
       const latestIdx = spanRecs.indexOf(latest)
       const successor = spanRecs[latestIdx + 1]
-      const targetInterleaved = latest.isInterleaved
-        || (successor !== undefined && successor.isInterleaved)
+      const targetInterleaved = this.chainInterleaved(spanRecs, latestIdx)
+        || (successor !== undefined && this.chainInterleaved(spanRecs, latestIdx + 1))
       return {
         preExisted: earliest.preExisted,
         preStatus: earliest.preStatus,
@@ -209,11 +244,13 @@ export class MutationManifest {
     // and its immediate successor are unreliable. A stale interleaved flag
     // elsewhere in the chain (e.g. from a pre-recordOutcomes plugin write) must
     // not degrade a clean target.
-    const successor = this.records
-      .filter(r => r.targetKey === targetKey && r.toolSeq > restoreSeq)
-      .sort((a, b) => a.toolSeq - b.toolSeq)[0]
-    const targetInterleaved = latest.isInterleaved
-      || (successor !== undefined && successor.isInterleaved)
+    const spanAll = this.records
+      .filter(r => r.targetKey === targetKey)
+      .sort((a, b) => a.toolSeq - b.toolSeq)
+    const latestIdx = spanAll.indexOf(latest)
+    const successor = spanAll[latestIdx + 1]
+    const targetInterleaved = this.chainInterleaved(spanAll, latestIdx)
+      || (successor !== undefined && this.chainInterleaved(spanAll, latestIdx + 1))
     return {
       preExisted: earliestSpan.preExisted,
       preStatus: earliestSpan.preStatus,

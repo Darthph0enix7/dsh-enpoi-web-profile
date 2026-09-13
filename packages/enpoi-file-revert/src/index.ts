@@ -77,8 +77,9 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
   function manifestFor(sessionId: string): MutationManifest {
     let m = manifests.get(sessionId)
     if (m === undefined) {
+      // The constructor already runs init(); calling it again double-loaded
+      // every record (duplicate toolSeqs broke span aggregation).
       m = new MutationManifest(join(FILE_HISTORY_ROOT, sessionId, 'manifest.jsonl'))
-      void m.init()
       manifests.set(sessionId, m)
     }
     return m
@@ -258,7 +259,10 @@ async function executeFileTransition(
   const aggregated = manifest.aggregateSpan(spanStart)
   diag(`executeFileTransition: session=${session.id} mode=${mode} oldBoundary=${String(oldBoundary)} newBoundary=${String(newBoundary)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`)
 
-  if (aggregated.size === 0) return
+  if (aggregated.size === 0) {
+    diag(`executeFileTransition: no records in span ${spanStart} (toolSeqs: ${manifest.records.map(r => r.toolSeq).join(',')})`)
+    return
+  }
 
   // Active-child guard (Doc 44 §3.3): refuse file revert while any child fiber
   // is active or parked-resumable and has touched files in the span.
@@ -406,7 +410,10 @@ async function recordOutcomes(
   outcomes: Record<string, { status: string; fromSha?: string | null; toSha?: string | null; dest?: string; reason?: string }>,
 ): Promise<void> {
   for (const [targetKey, outcome] of Object.entries(outcomes)) {
-    if (outcome.status === 'no_op' || outcome.status === 'kept' || outcome.status === 'saved_beside') continue
+    // Only mirror ACTUAL disk transitions. Conflicts/refusals/errors carry no
+    // fromSha/toSha and previously wrote null/null records that poisoned the
+    // mutation chain (heal drops them, but they must never be written at all).
+    if (outcome.status !== 'restored' && outcome.status !== 'trashed') continue
     const fromSha = outcome.fromSha ?? null
     const toSha = outcome.toSha ?? null
     try {

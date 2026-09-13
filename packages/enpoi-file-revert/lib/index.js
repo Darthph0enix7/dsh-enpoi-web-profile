@@ -3,7 +3,7 @@ import Schema from "schemastery";
 import { homedir } from "node:os";
 import { join as join4 } from "node:path";
 import { randomUUID as randomUUID2, createHash as createHash2 } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2 } from "node:fs";
 
 // src/blob-store.ts
 import { createHash } from "node:crypto";
@@ -54,7 +54,17 @@ var BlobStore = class {
 
 // src/manifest.ts
 import { mkdir as mkdir2, readFile as readFile2, appendFile } from "node:fs/promises";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join as join2 } from "node:path";
+var LOG_DIR = join2(process.env.HOME ?? "", ".dsh", "logs");
+function diag(line) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    appendFileSync(join2(LOG_DIR, "enpoi-file-revert.log"), `[${(/* @__PURE__ */ new Date()).toISOString()}] ${line}
+`);
+  } catch {
+  }
+}
 var MutationManifest = class {
   constructor(filePath) {
     this.filePath = filePath;
@@ -65,6 +75,7 @@ var MutationManifest = class {
   async init() {
     try {
       const raw = await readFile2(this.filePath, "utf8");
+      this.records = [];
       const lines = raw.split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
@@ -92,6 +103,7 @@ var MutationManifest = class {
     const prior = this.lastFor(record.targetKey);
     if (prior !== void 0 && prior.postBlobSha !== record.preBlobSha) {
       record.isInterleaved = true;
+      diag(`append: interleaved for ${record.targetKey} \u2014 prior toolSeq=${prior.toolSeq} post=${String(prior.postBlobSha).slice(0, 10)} vs incoming pre=${String(record.preBlobSha).slice(0, 10)}`);
     }
     this.records.push(record);
     await mkdir2(join2(this.filePath, ".."), { recursive: true });
@@ -132,9 +144,26 @@ var MutationManifest = class {
       }
       entry.records.push(rec);
       if (rec.toolSeq < entry.initialPre.toolSeq) entry.initialPre = rec;
-      if (rec.toolSeq > entry.finalPost.toolSeq) entry.finalPost = rec;
+    }
+    for (const entry of byKey.values()) {
+      const authored = entry.records.filter((r) => r.source !== "plugin-revert");
+      const pool = authored.length > 0 ? authored : entry.records;
+      entry.finalPost = pool.reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
     }
     return byKey;
+  }
+  /**
+   * Chain-derived interleaving for one record: a record is interleaved iff its
+   * pre-state differs from the previous record's post-state for the same key.
+   * This recomputes from the chain instead of trusting stored flags — a stale
+   * or poisoned `isInterleaved` (e.g. written by an older build during a
+   * restart window) must never degrade a clean target into a spurious
+   * "Snapshot unavailable" conflict (FR1/FR5 backwards-compat).
+   */
+  chainInterleaved(spanRecs, index) {
+    if (index <= 0) return false;
+    const prior = spanRecs[index - 1];
+    return prior.postBlobSha !== spanRecs[index].preBlobSha;
   }
   /**
    * Resolve the target state for a boundary: latest mutation ≤ seq (post),
@@ -151,9 +180,9 @@ var MutationManifest = class {
       const earliest = spanRecs.reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
       const userRecs = spanRecs.filter((r) => r.source !== "plugin-revert");
       const latest2 = (userRecs.length > 0 ? userRecs : spanRecs).reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
-      const latestIdx = spanRecs.indexOf(latest2);
-      const successor2 = spanRecs[latestIdx + 1];
-      const targetInterleaved2 = latest2.isInterleaved || successor2 !== void 0 && successor2.isInterleaved;
+      const latestIdx2 = spanRecs.indexOf(latest2);
+      const successor2 = spanRecs[latestIdx2 + 1];
+      const targetInterleaved2 = this.chainInterleaved(spanRecs, latestIdx2) || successor2 !== void 0 && this.chainInterleaved(spanRecs, latestIdx2 + 1);
       return {
         preExisted: earliest.preExisted,
         preStatus: earliest.preStatus,
@@ -182,8 +211,10 @@ var MutationManifest = class {
     }
     const earliestSpan = this.records.filter((r) => r.targetKey === targetKey).reduce((a, b) => b.toolSeq < a.toolSeq ? b : a);
     const latest = recs.reduce((a, b) => b.toolSeq > a.toolSeq ? b : a);
-    const successor = this.records.filter((r) => r.targetKey === targetKey && r.toolSeq > restoreSeq).sort((a, b) => a.toolSeq - b.toolSeq)[0];
-    const targetInterleaved = latest.isInterleaved || successor !== void 0 && successor.isInterleaved;
+    const spanAll = this.records.filter((r) => r.targetKey === targetKey).sort((a, b) => a.toolSeq - b.toolSeq);
+    const latestIdx = spanAll.indexOf(latest);
+    const successor = spanAll[latestIdx + 1];
+    const targetInterleaved = this.chainInterleaved(spanAll, latestIdx) || successor !== void 0 && this.chainInterleaved(spanAll, latestIdx + 1);
     return {
       preExisted: earliestSpan.preExisted,
       preStatus: earliestSpan.preStatus,
@@ -635,10 +666,10 @@ var inject = ["tools", "fs", "sessions", "sessionPersistence", "timer"];
 var FILE_HISTORY_ROOT = join4(homedir(), ".dsh", "file-history");
 var TRASH_ROOT = join4(homedir(), ".dsh", "trash");
 var DIAG_LOG = join4(homedir(), ".dsh", "logs", "enpoi-file-revert.log");
-function diag(msg) {
+function diag2(msg) {
   try {
-    mkdirSync(join4(homedir(), ".dsh", "logs"), { recursive: true });
-    appendFileSync(DIAG_LOG, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
+    mkdirSync2(join4(homedir(), ".dsh", "logs"), { recursive: true });
+    appendFileSync2(DIAG_LOG, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
 `);
   } catch {
   }
@@ -652,7 +683,7 @@ var Config = Schema.object({
   gcTtlMs: Schema.number().default(30 * 24 * 60 * 60 * 1e3)
 });
 function apply(ctx, config) {
-  diag(`apply: mounted (maxSnapshotBytes=${config.maxSnapshotBytes}, gcIntervalMs=${config.gcIntervalMs})`);
+  diag2(`apply: mounted (maxSnapshotBytes=${config.maxSnapshotBytes}, gcIntervalMs=${config.gcIntervalMs})`);
   const blobStore = new BlobStore(join4(FILE_HISTORY_ROOT, "blobs"));
   void blobStore.init();
   const pendingCaptures = /* @__PURE__ */ new Map();
@@ -663,7 +694,6 @@ function apply(ctx, config) {
     let m = manifests.get(sessionId);
     if (m === void 0) {
       m = new MutationManifest(join4(FILE_HISTORY_ROOT, sessionId, "manifest.jsonl"));
-      void m.init();
       manifests.set(sessionId, m);
     }
     return m;
@@ -703,7 +733,7 @@ function apply(ctx, config) {
       try {
         await capturePre(ctx, exec, pendingCaptures, config.maxSnapshotBytes);
       } catch (err) {
-        diag(`pre-capture failed for ${exec.name}: ${String(err)}`);
+        diag2(`pre-capture failed for ${exec.name}: ${String(err)}`);
       }
     }
     return next();
@@ -713,7 +743,7 @@ function apply(ctx, config) {
       try {
         await capturePost(ctx, exec, result, pendingCaptures, manifestFor, blobStore);
       } catch (err) {
-        diag(`post-capture failed for ${exec.name}: ${String(err)}`);
+        diag2(`post-capture failed for ${exec.name}: ${String(err)}`);
       }
     }
     return next();
@@ -723,24 +753,24 @@ function apply(ctx, config) {
     const data = event.data;
     const fromSeq = data.fromSeq;
     const cause = data.cause ?? (fromSeq === null ? "restore" : "revert");
-    diag(`revert/state: session=${session.id} fromSeq=${String(fromSeq)} cause=${cause}`);
+    diag2(`revert/state: session=${session.id} fromSeq=${String(fromSeq)} cause=${cause}`);
     const state = stateFor(session);
     const oldBoundary = state.boundary;
     const newBoundary = fromSeq;
     state.boundary = newBoundary;
     if (cause === "commit") {
-      diag(`revert/state: commit for ${session.id} \u2014 clearing boundary without file execution`);
+      diag2(`revert/state: commit for ${session.id} \u2014 clearing boundary without file execution`);
       return;
     }
     if (cause === "restore" && newBoundary !== null && newBoundary === oldBoundary) {
-      diag(`revert/state: equal-seq restore no-op for ${session.id} (boundary=${String(newBoundary)})`);
+      diag2(`revert/state: equal-seq restore no-op for ${session.id} (boundary=${String(newBoundary)})`);
       return;
     }
     state.flight = state.flight.then(async () => {
       try {
         await executeFileTransition(ctx, session, oldBoundary, newBoundary, manifestFor, executorFor, blobStore);
       } catch (err) {
-        diag(`revert execution FAILED for ${session.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+        diag2(`revert execution FAILED for ${session.id}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
         try {
           appendIgnorable(session, "revert/file-result", {
             revertSeq: fromSeq ?? -1,
@@ -753,14 +783,14 @@ function apply(ctx, config) {
   });
   const onAny = ctx.on;
   onAny("file-revert/resolve", async (...args) => {
-    diag(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
+    diag2(`file-revert/resolve received: ${JSON.stringify(args[0])}`);
     const request = args[0];
     try {
       const outcome = await applyConflictResolution(ctx, request, executorFor, blobStore, stateFor, manifestFor);
-      diag(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
+      diag2(`file-revert/resolve outcome: ${JSON.stringify(outcome)}`);
       return { accepted: true, ...outcome };
     } catch (err) {
-      diag(`file-revert/resolve ERROR: ${String(err)}`);
+      diag2(`file-revert/resolve ERROR: ${String(err)}`);
       return { accepted: false, reason: String(err) };
     }
   });
@@ -769,7 +799,7 @@ function apply(ctx, config) {
   if (timer?.setInterval !== void 0) {
     timer.setInterval(() => {
       void runGc(manifests, executors, blobStore, config.gcTtlMs).catch((err) => {
-        diag(`GC sweep failed: ${String(err)}`);
+        diag2(`GC sweep failed: ${String(err)}`);
       });
     }, config.gcIntervalMs);
   }
@@ -787,14 +817,17 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
   const isRevert = newBoundary !== null && (oldBoundary === null || newBoundary <= oldBoundary);
   const isRestore = newBoundary === null && oldBoundary !== null || newBoundary !== null && oldBoundary !== null && newBoundary > oldBoundary;
   if (!isRevert && !isRestore) {
-    diag(`executeFileTransition: no-op transition for ${session.id} (old=${String(oldBoundary)}, new=${String(newBoundary)})`);
+    diag2(`executeFileTransition: no-op transition for ${session.id} (old=${String(oldBoundary)}, new=${String(newBoundary)})`);
     return;
   }
   const mode = isRevert ? "revert" : "restore";
   const spanStart = isRevert ? newBoundary : oldBoundary;
   const aggregated = manifest.aggregateSpan(spanStart);
-  diag(`executeFileTransition: session=${session.id} mode=${mode} oldBoundary=${String(oldBoundary)} newBoundary=${String(newBoundary)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`);
-  if (aggregated.size === 0) return;
+  diag2(`executeFileTransition: session=${session.id} mode=${mode} oldBoundary=${String(oldBoundary)} newBoundary=${String(newBoundary)} spanStart=${spanStart} aggregated=${aggregated.size} records=${manifest.records.length}`);
+  if (aggregated.size === 0) {
+    diag2(`executeFileTransition: no records in span ${spanStart} (toolSeqs: ${manifest.records.map((r) => r.toolSeq).join(",")})`);
+    return;
+  }
   const activeChildren = await findActiveChildren(ctx, session.id);
   if (activeChildren.length > 0) {
     appendIgnorable(session, "revert/file-result", {
@@ -803,7 +836,7 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
         _guard: { status: "refused", reason: `active subagent fibers: ${activeChildren.join(", ")}` }
       }
     });
-    diag(`file revert refused for ${session.id} \u2014 active children ${activeChildren.join(", ")}`);
+    diag2(`file revert refused for ${session.id} \u2014 active children ${activeChildren.join(", ")}`);
     return;
   }
   const plan = /* @__PURE__ */ new Map();
@@ -888,7 +921,7 @@ async function executeFileTransition(ctx, session, oldBoundary, newBoundary, man
 }
 async function recordOutcomes(manifest, sessionId, outcomes) {
   for (const [targetKey, outcome] of Object.entries(outcomes)) {
-    if (outcome.status === "no_op" || outcome.status === "kept" || outcome.status === "saved_beside") continue;
+    if (outcome.status !== "restored" && outcome.status !== "trashed") continue;
     const fromSha = outcome.fromSha ?? null;
     const toSha = outcome.toSha ?? null;
     try {
@@ -909,7 +942,7 @@ async function recordOutcomes(manifest, sessionId, outcomes) {
         source: "plugin-revert"
       });
     } catch (err) {
-      diag(`recordOutcomes: failed to record ${targetKey}: ${String(err)}`);
+      diag2(`recordOutcomes: failed to record ${targetKey}: ${String(err)}`);
     }
   }
 }
@@ -923,7 +956,7 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, st
   const conflict = conflictEvent.data;
   const state = stateFor(session);
   if (state.boundary !== (conflict.boundarySeq ?? null)) {
-    diag(`file-revert/resolve: stale conflict ${request.conflictId} for ${request.sessionId} (card boundary=${String(conflict.boundarySeq ?? null)}, current=${String(state.boundary)}) \u2014 refusing`);
+    diag2(`file-revert/resolve: stale conflict ${request.conflictId} for ${request.sessionId} (card boundary=${String(conflict.boundarySeq ?? null)}, current=${String(state.boundary)}) \u2014 refusing`);
     throw new Error("conflict is stale: the session boundary moved since this card was shown");
   }
   let resolution = request.resolution;
@@ -998,7 +1031,7 @@ async function applyConflictResolution(ctx, request, executorFor, _blobStore, st
         source: "user-kept"
       });
     } catch (err) {
-      diag(`keep: failed to record kept state for ${conflict.targetKey}: ${String(err)}`);
+      diag2(`keep: failed to record kept state for ${conflict.targetKey}: ${String(err)}`);
     }
   }
   appendIgnorable(session, "revert/file-result", {
@@ -1019,7 +1052,7 @@ async function recoverUnsealedIntents(ctx, executorFor, manifestFor) {
       const executor = executorFor(entry.name);
       const unsealed = await executor.findUnsealedIntents();
       for (const intent of unsealed) {
-        diag(`recovering unsealed intent ${intent.revertSeq} for ${entry.name}`);
+        diag2(`recovering unsealed intent ${intent.revertSeq} for ${entry.name}`);
         const plan = new Map(
           Object.entries(intent.plan).map(([key, p]) => {
             const rec = p;
@@ -1039,7 +1072,7 @@ async function recoverUnsealedIntents(ctx, executorFor, manifestFor) {
       }
     }
   } catch (err) {
-    diag(`recovery scan failed: ${String(err)}`);
+    diag2(`recovery scan failed: ${String(err)}`);
   }
 }
 async function runGc(manifests, executors, blobStore, ttlMs) {
