@@ -77,12 +77,17 @@ function lastHumanUserMessageSeq(events: readonly SessionEvent[]): number {
   return 0
 }
 
-function textOfContent(blocks: unknown): string {
+export function textOfContent(blocks: unknown): string {
   if (!Array.isArray(blocks)) return ''
+  // Only the child's REPORT blocks reach the parent: reasoning and tool-call
+  // blocks are its private deliberation, not the answer.
   return blocks
-    .map(block => typeof block === 'object' && block !== null && 'text' in block
-      ? String((block as { text: unknown }).text)
-      : '')
+    .map(block => {
+      if (typeof block !== 'object' || block === null || !('text' in block)) return ''
+      const blockType = (block as { type?: unknown }).type
+      return blockType === 'text' || blockType === undefined ? String((block as { text: unknown }).text) : ''
+    })
+    .filter(text => text.length > 0)
     .join(' ')
 }
 

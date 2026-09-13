@@ -29,10 +29,17 @@ describe('enpoi-council / engine — Token & Text Helpers', () => {
     expect(estimateTokens('')).toBe(0)
   })
 
-  it('extracts text from plain string, arrays, and structured content blocks', () => {
+  it('extracts report text only, excluding reasoning blocks', () => {
     expect(textOfContent('plain text')).toBe('plain text')
-    expect(textOfContent(['a', 'b', 'c'])).toBe('a b c')
-    expect(textOfContent([{ text: 'block 1' }, { text: 'block 2' }])).toBe('block 1 block 2')
+    expect(textOfContent(['a', 'b', 'c'])).toBe('a\nb\nc')
+    // Untyped blocks are legacy plain text and stay admissible.
+    expect(textOfContent([{ text: 'block 1' }, { text: 'block 2' }])).toBe('block 1\nblock 2')
+    // A reasoning block is private deliberation and never reaches the parent.
+    expect(textOfContent([
+      { type: 'reasoning', text: 'private deliberation' },
+      { type: 'text', text: 'the report' },
+    ])).toBe('the report')
+    expect(textOfContent([{ type: 'tool-call', callId: 'c1', name: 'noop', argsRaw: '{}' }])).toBe('')
     expect(textOfContent(null)).toBe('')
     expect(textOfContent(undefined)).toBe('')
   })

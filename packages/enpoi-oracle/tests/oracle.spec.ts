@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
+describe('enpoi-oracle report extraction', () => {
+  it('returns report text only, never the child reasoning', async () => {
+    const { textOfContent } = await import('../src/index.ts')
+    expect(textOfContent([
+      { type: 'reasoning', text: 'private deliberation' },
+      { type: 'text', text: 'VERDICT: SHIP IT' },
+    ])).toBe('VERDICT: SHIP IT')
+    expect(textOfContent([{ type: 'tool-call', callId: 'c1', name: 'noop', argsRaw: '{}' }])).toBe('')
+    expect(textOfContent([{ text: 'legacy untyped text' }])).toBe('legacy untyped text')
+    expect(textOfContent(null)).toBe('')
+  })
+})
+
 describe('enpoi-oracle background and output schema conformance', () => {
   const schema = {
     type: 'object',

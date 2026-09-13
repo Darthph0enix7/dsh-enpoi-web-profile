@@ -58,7 +58,7 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
 }
 
-/** Extract text content from message blocks. */
+/** Extract the final report text from message blocks (reasoning excluded). */
 export function textOfContent(content: unknown): string {
   if (typeof content === 'string') return content
   if (content !== null && typeof content === 'object') {
@@ -77,14 +77,19 @@ export function textOfContent(content: unknown): string {
       .map((part) => {
         if (typeof part === 'string') return part
         if (part !== null && typeof part === 'object') {
-          if ('text' in part && typeof (part as { text: unknown }).text === 'string') {
+          // Only report blocks are returned: a reasoning block carries its
+          // own private deliberation and must never reach the parent. An
+          // untyped block is legacy plain text and stays admissible.
+          const blockType = (part as { type?: unknown }).type
+          if ((blockType === 'text' || blockType === undefined)
+            && 'text' in part && typeof (part as { text: unknown }).text === 'string') {
             return (part as { text: string }).text
           }
         }
         return ''
       })
       .filter((t) => t.length > 0)
-      .join(' ')
+      .join('\n')
   }
   return ''
 }

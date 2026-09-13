@@ -378,12 +378,13 @@ function textOfContent(content) {
     return content.map((part) => {
       if (typeof part === "string") return part;
       if (part !== null && typeof part === "object") {
-        if ("text" in part && typeof part.text === "string") {
+        const blockType = part.type;
+        if ((blockType === "text" || blockType === void 0) && "text" in part && typeof part.text === "string") {
           return part.text;
         }
       }
       return "";
-    }).filter((t) => t.length > 0).join(" ");
+    }).filter((t) => t.length > 0).join("\n");
   }
   return "";
 }

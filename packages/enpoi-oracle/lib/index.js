@@ -44,7 +44,11 @@ function lastHumanUserMessageSeq(events) {
 }
 function textOfContent(blocks) {
   if (!Array.isArray(blocks)) return "";
-  return blocks.map((block) => typeof block === "object" && block !== null && "text" in block ? String(block.text) : "").join(" ");
+  return blocks.map((block) => {
+    if (typeof block !== "object" || block === null || !("text" in block)) return "";
+    const blockType = block.type;
+    return blockType === "text" || blockType === void 0 ? String(block.text) : "";
+  }).filter((text) => text.length > 0).join(" ");
 }
 function readLivingBrief(ctx, session) {
   try {
@@ -477,5 +481,6 @@ export {
   inject,
   name,
   resolveOracleTimeoutMs,
-  resolvePersonaModel
+  resolvePersonaModel,
+  textOfContent
 };
