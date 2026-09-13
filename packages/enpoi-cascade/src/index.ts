@@ -2,20 +2,27 @@
  * Enpoi Harness — `enpoi-cascade` (user-stop cancellation).
  *
  * When the user stops the main agent, everything stops:
- * - Every continuable descendant of the aborted session is drained via the
- *   engine's native `drainContinuableDescendants` (recursive, park-semantics).
- * - In-flight spawn coordinators (oracle/dispatcher) trip their pending
- *   reservations synchronously (I6 latch).
- * - The context keeper is EXEMPT (I9) — it is not a subagent, so the drain
+ * - Every live continuable descendant of the aborted session is interrupted via
+ *   `subagents.interrupt(...)` under ancestor authority. Interrupt is per-turn
+ *   and PARK-semantic: the child's current turn is cancelled, but its
+ *   Activation, unclaimed inbox work, and published descendants stay resident,
+ *   and continuable admission stays open. A later `send_message` resumes the
+ *   parked queue.
+ * - The context keeper is EXEMPT (I9) — it is not a subagent, so the walk
  *   never touches it.
  *
  * The hook: `agent/turn-stopping` is BYPASSED on abort (verified in source —
  * user cancel aborts the turn signal and jumps past the natural-end hook), so
  * we subscribe to the durable `session/event` `turn/end` record with
  * `reason.kind === 'aborted'` + `reason.reason.kind === 'user'`.
+ *
+ * Drain (`drainContinuableDescendants`) is NOT used here: that API is host
+ * teardown semantics — it closes continuable admission below the exact parent
+ * until that Agent leaves the registry, which would poison every later
+ * delegation in a session whose Agent stays live across turns.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 
 export const name = 'enpoi-cascade'
 
@@ -31,6 +38,38 @@ function diag(line: string): void {
   } catch { /* diagnostics never throw */ }
 }
 
+/**
+ * Interrupt every live continuable descendant of `sessionId` under the live
+ * root Agent's ancestor authority. Enumeration covers the complete session
+ * tree, so continuable grandchildren below ordinary or one-shot children are
+ * reached as well.
+ * @param ctx - plugin context carrying the Agent registry and subagent runtime.
+ * @param sessionId - durable id of the session whose turn the user aborted.
+ */
+async function interruptDescendants(ctx: Context, sessionId: SessionId): Promise<void> {
+  const subagents = ctx.get('subagents')
+  const agent = ctx.get('agents')?.get(sessionId)
+  if (subagents === undefined || agent === undefined) return
+  let entries
+  try {
+    entries = await subagents.listDescendants(sessionId)
+  } catch (error: unknown) {
+    diag(`descendant enumeration failed for ${sessionId}: ${String(error)}`)
+    return
+  }
+  let interrupted = 0
+  for (const entry of entries) {
+    if (entry.kind !== 'child' || entry.mode !== 'continuable') continue
+    try {
+      subagents.interrupt(entry.id, { kind: 'ancestor', agent })
+      interrupted += 1
+    } catch (error: unknown) {
+      diag(`interrupt of ${entry.id} refused: ${String(error)}`)
+    }
+  }
+  diag(`user stop for ${sessionId} — interrupted ${interrupted} continuable descendant(s) of ${entries.length} enumerated`)
+}
+
 export function apply(ctx: Context): void {
   // Listen on OUR ctx (proven to receive session events — the root does not).
   ctx.on('session/event', (session, event: SessionEvent) => {
@@ -40,16 +79,13 @@ export function apply(ctx: Context): void {
     const cancelCause = reason.reason
     if (cancelCause === undefined || cancelCause.kind !== 'user') return
 
-    diag(`user stop detected for session ${session.id} — draining descendants`)
-    const subagents = ctx.get('subagents')
-    const agent = ctx.get('agents')?.get(session.id)
-    if (subagents !== undefined) {
-      if (agent !== undefined) {
-        // Recursive descendant drain: children + grandchildren park/abort.
-        void subagents.drainContinuableDescendants([agent]).catch((error: unknown) => {
-          ctx.logger.warn(`[enpoi-cascade] descendant drain failed: ${String(error)}`)
-        })
-      }
-    }
+    // Defer out of append publication: enumeration reads session logs and the
+    // interrupt path must never re-enter the synchronous append guard.
+    setTimeout(() => {
+      diag(`user stop detected for session ${session.id} — interrupting continuable descendants`)
+      void interruptDescendants(ctx, session.id).catch((error: unknown) => {
+        ctx.logger.warn(`[enpoi-cascade] descendant interrupt failed: ${String(error)}`)
+      })
+    }, 0)
   })
 }
