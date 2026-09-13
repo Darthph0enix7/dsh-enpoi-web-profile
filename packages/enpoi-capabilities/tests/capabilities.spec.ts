@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   initialCapabilitiesState,
   evaluateToolCall,
-  formatCapabilitiesSnapshot,
   PROTECTED_CAPABILITIES,
   type CapabilitiesState,
 } from '../src/index'
@@ -121,22 +120,5 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
       const decision = evaluateToolCall(p, {}, state)
       expect(decision.allowed).toBe(true)
     }
-  })
-
-  it('Invariant B3: formats runtime-context snapshot line concisely', () => {
-    const allActive = initialCapabilitiesState({
-      mcp: { 'plane-mcp': true, 'ue-mcp': true },
-    })
-    expect(formatCapabilitiesSnapshot(allActive)).toBe('All capabilities, subagents, and skills active.')
-
-    const partiallyDisabled = initialCapabilitiesState({
-      tools: { roundtable: false },
-      skills: { 'ue-mcp-skill': false },
-    })
-    const snapshot = formatCapabilitiesSnapshot(partiallyDisabled)
-    expect(snapshot).toContain('Disabled Capabilities (for this query):')
-    expect(snapshot).toContain('roundtable')
-    expect(snapshot).toContain('ue-mcp-skill')
-    expect(snapshot).toContain('disabled by operator preference for the current query only')
   })
 })

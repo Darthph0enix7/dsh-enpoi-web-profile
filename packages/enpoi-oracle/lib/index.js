@@ -28,7 +28,8 @@ var ORACLE_TOOL_FILTER = {
     "str_replace_editor",
     "todo_write",
     "plan_mode",
-    "goal"
+    "goal",
+    "send_message"
   ]
 };
 function lastHumanUserMessageSeq(events) {
@@ -356,6 +357,7 @@ function registerOracleTools(ctx, root) {
                 prompt,
                 parent,
                 persona: ORACLE_PERSONA,
+                quiet: true,
                 toolFilter: denied.length > 0 ? { deny: denied } : void 0,
                 ...personaModel !== void 0 ? {
                   agentOptions: {

@@ -100,16 +100,6 @@ function evaluateToolCall(toolName, args, state) {
   }
   return { allowed: true };
 }
-function formatCapabilitiesSnapshot(state) {
-  const disabledTools = Object.entries(state.tools).filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id)).map(([id]) => id);
-  const disabledSkills = Object.entries(state.skills).filter(([, enabled]) => !enabled).map(([id]) => id);
-  const disabledMcp = Object.entries(state.mcp).filter(([, enabled]) => !enabled).map(([id]) => id);
-  const allDisabled = [...disabledTools, ...disabledSkills, ...disabledMcp];
-  if (allDisabled.length === 0) {
-    return "All capabilities, subagents, and skills active.";
-  }
-  return `Disabled Capabilities (for this query): [${[...new Set(allDisabled)].join(", ")}]. Note: These capabilities are disabled by operator preference for the current query only (do not attempt to invoke them). When re-enabled by the operator in future queries, they become available again.`;
-}
 
 // src/index.ts
 var name = "enpoi-capabilities";
@@ -165,15 +155,6 @@ function apply(ctx) {
     return { ...assembled, tools: kept };
   }));
   ctx.effect(() => disposeAssemble, "enpoi-capabilities: tool schema strip");
-  const sysPrompt = ctx.get("systemPrompt");
-  if (sysPrompt) {
-    const disposeContext = sysPrompt.context({
-      name: "enpoi-capabilities",
-      order: 85,
-      text: () => formatCapabilitiesSnapshot(initialCapabilitiesState(getGlobalDefaults()))
-    });
-    ctx.effect(() => disposeContext, "enpoi-capabilities: runtime context snapshot");
-  }
   import("@deepseek-ai/dsh-mcp-client").then(async (mcpClient) => {
     const mounted = /* @__PURE__ */ new Map();
     const mountedPending = /* @__PURE__ */ new Set();
@@ -337,7 +318,6 @@ export {
   PROTECTED_CAPABILITIES,
   apply,
   evaluateToolCall,
-  formatCapabilitiesSnapshot,
   initialCapabilitiesState,
   inject,
   name

@@ -109,7 +109,12 @@ export function createTraceContext(
   }
 }
 
+// Council fibers are quiet pure-reasoning children: only the orchestrating
+// tool's final synthesis may reach the parent session. `send_message` is denied
+// so a debater cannot relay its raw output into the parent inbox (the old
+// report-tool leak this plugin was built to avoid).
 const COUNCIL_DENIED_TOOLS = [
+  'send_message',
   'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
   'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
   'todo_write', 'plan_mode', 'goal', 'roundtable', 'chorus',
@@ -204,6 +209,9 @@ export async function startDebaterFiber(
       prompt: [{ type: 'text', text: initialPromptText }],
       parent,
       persona: systemPrompt,
+      // Duplicated from the top-level spec so the persisted descriptor keeps
+      // quiet even if the top-level path regresses (spec.quiet wins at start).
+      quiet: true,
       toolFilter: denied.length > 0 ? { deny: denied } : undefined,
       ...personaModel !== undefined ? {
         agentOptions: {

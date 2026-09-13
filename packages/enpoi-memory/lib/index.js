@@ -429,6 +429,7 @@ function apply(ctx) {
   const db = openMemoryDb();
   const pipeline = makePipeline(db);
   const recent = /* @__PURE__ */ new Map();
+  const injectedSessions = /* @__PURE__ */ new Set();
   void pipeline.reconcileBoot().then((n) => {
     if (n > 0) ctx.logger?.warn(`enpoi-memory: boot reconciled ${n} tentative claim(s) \u2192 orphaned_cancelled`);
   });
@@ -441,6 +442,7 @@ function apply(ctx) {
     const query = (data.content ?? []).filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
     if (query.trim().length === 0) return;
     const sessionId = session.id;
+    if (injectedSessions.has(sessionId)) return;
     const window = recent.get(sessionId) ?? [];
     let result = null;
     try {
@@ -451,10 +453,14 @@ function apply(ctx) {
     }
     if (result === null) return;
     const payload = result;
+    injectedSessions.add(sessionId);
     setTimeout(() => {
       try {
         const agent = ctx.get("agents")?.get(sessionId);
-        if (agent === void 0) return;
+        if (agent === void 0) {
+          injectedSessions.delete(sessionId);
+          return;
+        }
         agent.inject(createUserMessage({
           content: [{ type: "text", text: payload.block }],
           source: { kind: "plugin", plugin: "enpoi-memory" }
@@ -462,6 +468,7 @@ function apply(ctx) {
         recent.set(sessionId, [...window, ...payload.claimIds].slice(-RECENT_WINDOW * 3));
         diag(`inject: session=${sessionId} \u2014 ${payload.claimIds.length} claim(s), ${payload.block.length} chars`);
       } catch (error) {
+        injectedSessions.delete(sessionId);
         diag(`inject: failed for ${sessionId}: ${String(error)}`);
       }
     }, 0);

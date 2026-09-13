@@ -46,7 +46,7 @@ const ORACLE_TOOL_FILTER = {
   deny: [
     'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
     'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
-    'todo_write', 'plan_mode', 'goal',
+    'todo_write', 'plan_mode', 'goal', 'send_message',
   ],
 }
 
@@ -464,6 +464,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
                 prompt,
                 parent,
                 persona: ORACLE_PERSONA,
+                quiet: true,
                 toolFilter: denied.length > 0 ? { deny: denied } : undefined,
                 ...personaModel !== undefined ? {
                   agentOptions: {

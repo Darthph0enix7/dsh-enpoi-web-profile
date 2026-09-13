@@ -1,5 +1,5 @@
 /**
- * enpoi-memory — Cordis plugin: boot reconcile, per-turn bounded injection,
+ * enpoi-memory — Cordis plugin: boot reconcile, per-session bounded injection,
  * and the memory tools. Exposes no service — keeper/dispatcher/CLI open the
  * same DB file through their own connections (WAL + BEGIN IMMEDIATE serialize).
  */
@@ -35,6 +35,7 @@ export function apply(ctx: Context): void {
   const db = openMemoryDb()
   const pipeline = makePipeline(db)
   const recent = new Map<string, string[]>() // sessionId -> queue of claim ids (newest last)
+  const injectedSessions = new Set<string>() // sessions that already received the block
 
   // Boot reconciliation (I10, doc 35 4.1): any crash-leftover tentative → orphaned.
   void pipeline.reconcileBoot().then(n => {
@@ -43,14 +44,16 @@ export function apply(ctx: Context): void {
 
   registerMemoryTools(ctx, db, pipeline)
 
-  // ── Per-turn bounded injection (doc 36 §2.5) ──────────────────────────────
+  // ── Per-session bounded injection (doc 36 §2.5) ───────────────────────────
   // A REAL user prompt on a MAIN session builds one <=1,200-char [PROJECT
   // MEMORY] block and injects it as a plugin user-message, so it lands in the
   // next step's context (placement after the cached prefix; the runtime
-  // dedupes no-op injections by content). Subagent/oracle children are
-  // skipped — they receive the Living Brief package instead (no double
-  // context). A3.2 anti-repeat: claims already injected within the recent
-  // window are excluded, and an empty block costs zero chars.
+  // dedupes no-op injections by content). Injected at most ONCE per session —
+  // the first qualifying user turn; later turns add nothing. Subagent/oracle
+  // children are skipped — they receive the Living Brief package instead (no
+  // double context). A3.2 anti-repeat bookkeeping stays: claims already
+  // injected within the recent window are excluded, and an empty block costs
+  // zero chars.
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (event.type !== 'user/message') return
     const data = event.data as {
@@ -67,6 +70,9 @@ export function apply(ctx: Context): void {
     if (query.trim().length === 0) return
 
     const sessionId = session.id
+    // Once per session: only the first qualifying user turn injects.
+    if (injectedSessions.has(sessionId)) return
+
     const window = recent.get(sessionId) ?? []
     let result: { block: string; claimIds: string[] } | null = null
     try {
@@ -82,12 +88,16 @@ export function apply(ctx: Context): void {
     // ("session append cannot reenter while another append is being published").
     // A macrotask lands after the publish window; the agent is re-resolved then.
     const payload = result
+    injectedSessions.add(sessionId) // claim before deferring; released on failure
     setTimeout(() => {
       try {
         const agent = ctx.get('agents')?.get(sessionId) as
           | { inject(message: unknown): void }
           | undefined
-        if (agent === undefined) return
+        if (agent === undefined) {
+          injectedSessions.delete(sessionId)
+          return
+        }
         agent.inject(createUserMessage({
           content: [{ type: 'text', text: payload.block }],
           source: { kind: 'plugin', plugin: 'enpoi-memory' },
@@ -95,6 +105,7 @@ export function apply(ctx: Context): void {
         recent.set(sessionId, [...window, ...payload.claimIds].slice(-RECENT_WINDOW * 3))
         diag(`inject: session=${sessionId} — ${payload.claimIds.length} claim(s), ${payload.block.length} chars`)
       } catch (error) {
+        injectedSessions.delete(sessionId)
         diag(`inject: failed for ${sessionId}: ${String(error)}`)
       }
     }, 0)

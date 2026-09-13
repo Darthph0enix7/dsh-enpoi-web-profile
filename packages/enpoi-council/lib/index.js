@@ -388,6 +388,7 @@ function textOfContent(content) {
   return "";
 }
 var COUNCIL_DENIED_TOOLS = [
+  "send_message",
   "oracle_review",
   "dispatch_task",
   "subagent",
@@ -464,6 +465,9 @@ async function startDebaterFiber(ctx, parent, persona, systemPrompt, initialProm
       prompt: [{ type: "text", text: initialPromptText }],
       parent,
       persona: systemPrompt,
+      // Duplicated from the top-level spec so the persisted descriptor keeps
+      // quiet even if the top-level path regresses (spec.quiet wins at start).
+      quiet: true,
       toolFilter: denied.length > 0 ? { deny: denied } : void 0,
       ...personaModel !== void 0 ? {
         agentOptions: {

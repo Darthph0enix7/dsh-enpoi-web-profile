@@ -3,7 +3,6 @@
  *
  * Implements:
  * - B1: Execution-level enforcement via monotonic tool guard (`ctx.tools.guard`).
- * - B3: Dynamic runtime-context snapshot line reflecting active/disabled capabilities (KV-cache safe).
  * - B4: Disabled skills are SHADOWED out of every injection surface — a runtime twin
  *   with both invocation surfaces off outranks the provider entry (providerOrder -1),
  *   so the skill vanishes from the model-facing catalog, the `skill` tool, and the
@@ -21,7 +20,7 @@ import Schema from 'schemastery'
 import type { CapabilitiesState } from './types'
 import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
-import { evaluateToolCall, formatCapabilitiesSnapshot } from './enforcement'
+import { evaluateToolCall } from './enforcement'
 
 export const name = 'enpoi-capabilities'
 export const inject = ['tools', 'systemPrompt', 'settings', 'timer']
@@ -105,21 +104,7 @@ export function apply(ctx: Context): void {
   }) as (...args: unknown[]) => unknown)
   ctx.effect(() => disposeAssemble, 'enpoi-capabilities: tool schema strip')
 
-  // 2. Invariant B3: Dynamic runtime-context snapshot line via native systemPrompt.context seam
-  const sysPrompt = ctx.get('systemPrompt') as {
-    context: (context: { name: string; order: number; text: () => string }) => () => void
-  } | undefined
-
-  if (sysPrompt) {
-    const disposeContext = sysPrompt.context({
-      name: 'enpoi-capabilities',
-      order: 85,
-      text: () => formatCapabilitiesSnapshot(initialCapabilitiesState(getGlobalDefaults())),
-    })
-    ctx.effect(() => disposeContext, 'enpoi-capabilities: runtime context snapshot')
-  }
-
-  // 2b. MCP mounting (B5): capabilities.mcp[id]===true spawns a live mcp-client
+  // 2. MCP mounting (B5): capabilities.mcp[id]===true spawns a live mcp-client
   //     fiber for the server catalog entry (enpoi-orchestration.mcpServers) —
   //     its mcp__<server>__* tools register and are injected like native tools.
   //     false = the fiber is disposed and the tools vanish from the schema
@@ -212,7 +197,7 @@ export function apply(ctx: Context): void {
       void syncMcpMounts()
     }) as (...args: unknown[]) => unknown)
 
-    // 2c. Reachability heartbeat (Adam): liveness of each catalog server,
+    // 2b. Reachability heartbeat (Adam): liveness of each catalog server,
     //     INDEPENDENT of the enable toggle. green=mounted, blue=running but
     //     toggled off, grey=unreachable. Results land in
     //     enpoi-orchestration.mcpStatus so every client renders the same dots.
@@ -323,4 +308,4 @@ export function apply(ctx: Context): void {
 export type { CapabilitiesState, CapabilityDescriptor, CapabilityKind } from './types'
 export { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 export { initialCapabilitiesState } from './state'
-export { evaluateToolCall, formatCapabilitiesSnapshot } from './enforcement'
+export { evaluateToolCall } from './enforcement'
