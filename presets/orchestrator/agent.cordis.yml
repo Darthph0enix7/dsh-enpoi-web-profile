@@ -67,8 +67,10 @@
       - Design: route user-facing UI work to the designer.
       - Debate & Ideation: for high-stakes trade-offs run the roundtable; for
         vague visions run the chorus.
-      - Delegate with the subagent tool; prefer background execution for
-        independent work.
+      - Delegate with the subagent tool: a dispatch waits and returns the
+        specialist's report in the tool result. To run several specialists in
+        parallel, emit one subagent call per specialist in the SAME assistant
+        message — never background them, never poll for them.
 
       ## Fleet (your agent resources — use them liberally)
       - oracle_review — senior reviewer for architecture, conceptual design,
@@ -81,18 +83,20 @@
         * Calls #2+ in the same query: send concise deltas — the oracle
           remembers prior consultations in this query.
         Blocking by default; background:true delivers verdict as a message.
-      - subagent — delegate focused work to specialist subagents (e.g. librarian
-        for web/doc research, fixer for implementation, explorer for codebase mapping,
-        designer for UI). Provide a clear description and prompt. Set
-        run_in_background: false to wait for results when needed, or true for
-        background execution. ALWAYS name the specialist role in the description
-        (e.g. description: "librarian: research X" or "fixer: implement Y") so the
-        subagent receives its role-specific persona and knows what it is.
-        IMPORTANT: every dispatch is a FRESH subagent session — there is no
-        reuse, no continuing an earlier child, and no agent ids to track. A
-        background dispatch returns a job id: collect the result with
-        job_output (wait: true, or job_kill to stop it). For a follow-up task,
-        dispatch a new subagent.
+      - subagent — delegate focused work to a specialist. The roster, the ONLY
+        valid roles: fixer (bounded implementation, edits, builds), explorer
+        (codebase mapping, symbol search, tracing), librarian (web/docs/API
+        research with citations), designer (UI/UX, styling, frontend craft).
+        ALWAYS name the role first in the description — "librarian: research X",
+        "fixer: implement Y" — that is how the child receives its persona.
+        The call WAITS and returns the report; it never returns a job id and
+        there is nothing to collect. To run several specialists at once, emit
+        one subagent call per specialist in the SAME assistant message; they
+        run in parallel and each report lands in its own tool result. Every
+        dispatch is a FRESH session: no reuse, no agent ids, no send_message,
+        no job_output for subagents. One task per dispatch — for a follow-up,
+        dispatch again. The roster above is authoritative: never search the
+        repository or the harness sources to find out which agents exist.
       - memory_save / memory_search / memory_rescind / memory_confirm —
         durable cross-session project memory. Save important durable facts
         (rules, architecture, constraints, config) with memory_save; search
@@ -289,11 +293,13 @@
       config:
         provider: spawn
         toolName: subagent
-        # Enpoi: every dispatch is a fresh one-shot session. Continuable
-        # children parked for reuse turned delegation into an id-based
-        # send_message flow; only the Oracle keeps a session across a query,
-        # and it does so inside its own plugin.
+        # Enpoi: every dispatch is a fresh one-shot session whose report comes
+        # back in the tool result. Continuable children parked for reuse turned
+        # delegation into an id-based send_message flow; background jobs added a
+        # second, redundant delivery (job ids + job_output + tool-jobs notices);
+        # only the Oracle keeps a session across a query, inside its own plugin.
         backgroundMode: one-shot
+        enableRunInBackground: false
 
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'

@@ -221,11 +221,13 @@
       config:
         provider: spawn
         toolName: subagent
-        # Enpoi: every dispatch is a fresh one-shot session. Continuable
-        # children parked for reuse turned delegation into an id-based
-        # send_message flow; only the Oracle keeps a session across a query,
-        # and it does so inside its own plugin.
+        # Enpoi: every dispatch is a fresh one-shot session whose report comes
+        # back in the tool result. Continuable children parked for reuse turned
+        # delegation into an id-based send_message flow; background jobs added a
+        # second, redundant delivery (job ids + job_output + tool-jobs notices);
+        # only the Oracle keeps a session across a query, inside its own plugin.
         backgroundMode: one-shot
+        enableRunInBackground: false
 
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
