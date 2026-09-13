@@ -2,11 +2,59 @@
 import Schema from "schemastery";
 import { homedir } from "node:os";
 import { join, dirname, basename, resolve, isAbsolute, relative } from "node:path";
-import { mkdir, rename, stat, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { mkdir, rename, stat, writeFile, rm, open, readFile } from "node:fs/promises";
+import { randomUUID, createHash } from "node:crypto";
 var name = "enpoi-fs-ops";
 var inject = ["webServer", "webRuntime", "sessions"];
 var TRASH_ROOT = join(homedir(), ".dsh", "trash", "sidebar");
+function editorBackupPath(sha256) {
+  return join(homedir(), ".dsh", "file-history", "editor", sha256);
+}
+var MAX_READ_BYTES = 4 * 1024 * 1024;
+function sha256Of(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+async function readAtMost(handle, length) {
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const { bytesRead } = await handle.read(buffer, offset, length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return buffer.subarray(0, offset);
+}
+async function writeFileAtomic(target, bytes, mode) {
+  const dir = dirname(target);
+  const tmp = join(dir, `${basename(target)}.dsh-tmp-${process.pid}-${randomUUID().slice(0, 8)}`);
+  await mkdir(dir, { recursive: true });
+  let handle;
+  try {
+    handle = await open(tmp, "w", mode);
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    handle = void 0;
+    await rename(tmp, target);
+  } catch (error) {
+    if (handle !== void 0) await handle.close().catch(() => {
+    });
+    await rm(tmp, { force: true }).catch(() => {
+    });
+    throw new FsOpsError("fs-error", `cannot write "${target}": ${error instanceof Error ? error.message : String(error)}`, 400);
+  }
+}
+async function backupBytes(bytes) {
+  const dest = editorBackupPath(sha256Of(bytes));
+  try {
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, bytes, { flag: "wx" });
+  } catch (error) {
+    if (error.code === "EEXIST") return dest;
+    throw new FsOpsError("fs-error", `cannot back up existing file: ${error instanceof Error ? error.message : String(error)}`, 400);
+  }
+  return dest;
+}
 var Config = Schema.object({});
 function header(headers, name2) {
   const value = headers[name2];
@@ -56,18 +104,24 @@ function requireAbsolute(path) {
   }
   return resolve(path);
 }
+function requireWorkspacePath(payload, sessions, key = "path") {
+  const raw = requireString(payload, key);
+  if (isAbsolute(raw)) return resolve(raw);
+  return resolve(cwdOf(payload, sessions), raw);
+}
 function requireValidName(name2) {
   if (name2 === "" || name2 === "." || name2 === ".." || name2.includes("/") || name2.includes("\\")) {
     throw new FsOpsError("bad-request", `invalid name "${name2}"`, 400);
   }
   return name2;
 }
+var MAX_BODY_BYTES = 2 * MAX_READ_BYTES;
 async function readJsonBody(req) {
   const chunks = [];
   let total = 0;
   for await (const chunk of req) {
     total += chunk.length;
-    if (total > 1 << 20) throw new FsOpsError("bad-request", "request body too large", 413);
+    if (total > MAX_BODY_BYTES) throw new FsOpsError("bad-request", "request body too large", 413);
     chunks.push(Buffer.from(chunk));
   }
   if (chunks.length === 0) return {};
@@ -175,13 +229,111 @@ function apply(ctx, _config) {
       return { ok: true, path: target };
     },
     "fs.stat": async (payload) => {
-      const path = requireAbsolute(requireString(payload, "path"));
+      const path = requireWorkspacePath(payload, sessions);
       try {
         const info = await stat(path);
         return { ok: true, path, mtimeMs: info.mtimeMs, size: info.size, isDir: info.isDirectory() };
       } catch (error) {
+        if (error.code === "ENOENT") {
+          throw new FsOpsError("not-found", `"${path}" does not exist`, 404);
+        }
         throw new FsOpsError("fs-error", `cannot stat "${path}": ${error instanceof Error ? error.message : String(error)}`, 400);
       }
+    },
+    "fs.read": async (payload) => {
+      const path = requireWorkspacePath(payload, sessions);
+      let handle;
+      try {
+        handle = await open(path, "r");
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          throw new FsOpsError("not-found", `"${path}" does not exist`, 404);
+        }
+        throw new FsOpsError("fs-error", `cannot read "${path}": ${error instanceof Error ? error.message : String(error)}`, 400);
+      }
+      try {
+        const info = await handle.stat();
+        if (info.isDirectory()) {
+          throw new FsOpsError("fs-error", `"${path}" is a directory`, 400);
+        }
+        const size = info.size;
+        const truncated = size > MAX_READ_BYTES;
+        const head = await readAtMost(handle, truncated ? MAX_READ_BYTES : size);
+        if (head.includes(0)) {
+          throw new FsOpsError("not-text", `"${path}" is binary (NUL byte)`, 400);
+        }
+        let content;
+        try {
+          content = new TextDecoder("utf-8", { fatal: true }).decode(head);
+        } catch {
+          throw new FsOpsError("not-text", `"${path}" is not valid UTF-8 text`, 400);
+        }
+        let sha256;
+        if (!truncated) {
+          sha256 = sha256Of(head);
+        } else {
+          const hash = createHash("sha256");
+          const stream = handle.createReadStream({ start: 0, autoClose: false });
+          for await (const chunk of stream) hash.update(chunk);
+          sha256 = hash.digest("hex");
+        }
+        return { content, sha256, mtimeMs: info.mtimeMs, size, truncated };
+      } finally {
+        await handle.close().catch(() => {
+        });
+      }
+    },
+    "fs.write": async (payload) => {
+      const cwd = cwdOf(payload, sessions);
+      const path = requireWorkspacePath(payload, sessions);
+      const record = payload;
+      const content = record?.content;
+      if (typeof content !== "string") {
+        throw new FsOpsError("bad-request", 'missing or invalid "content"', 400);
+      }
+      const rawExpected = record?.expectedSha;
+      if (rawExpected !== void 0 && rawExpected !== null && typeof rawExpected !== "string") {
+        throw new FsOpsError("bad-request", 'invalid "expectedSha"', 400);
+      }
+      const expectedSha = typeof rawExpected === "string" ? rawExpected : null;
+      const createOnly = rawExpected === null;
+      const root = resolve(cwd);
+      const rel = relative(root, path);
+      if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+        throw new FsOpsError("fs-error", "file must stay inside the workspace", 400);
+      }
+      const bytes = Buffer.from(content, "utf8");
+      const newSha = sha256Of(bytes);
+      let existing = null;
+      let mode = 420;
+      try {
+        const info2 = await stat(path);
+        if (info2.isDirectory()) {
+          throw new FsOpsError("fs-error", `"${path}" is a directory`, 400);
+        }
+        existing = await readFile(path);
+        mode = info2.mode & 511;
+      } catch (error) {
+        if (error instanceof FsOpsError) throw error;
+        if (error.code !== "ENOENT") {
+          throw new FsOpsError("fs-error", `cannot read "${path}": ${error instanceof Error ? error.message : String(error)}`, 400);
+        }
+      }
+      let backup = null;
+      if (existing !== null) {
+        if (createOnly) {
+          throw new FsOpsError("exists", `"${path}" already exists`, 409);
+        }
+        if (expectedSha !== null && sha256Of(existing) !== expectedSha) {
+          throw new FsOpsError("conflict", "file changed on disk since it was read", 409);
+        }
+        backup = await backupBytes(existing);
+      } else if (expectedSha !== null) {
+        throw new FsOpsError("conflict", "file changed on disk since it was read", 409);
+      }
+      await writeFileAtomic(path, bytes, mode);
+      const info = await stat(path);
+      return { sha256: newSha, mtimeMs: info.mtimeMs, size: bytes.length, backup };
     }
   };
   ctx.effect(() => {
