@@ -89,9 +89,10 @@
         (e.g. description: "librarian: research X" or "fixer: implement Y") so the
         subagent receives its role-specific persona and knows what it is.
         IMPORTANT: every dispatch is a FRESH subagent session — there is no
-        reuse, no continuing an earlier child, and no agent ids to track. When
-        a follow-up task exists, dispatch a new subagent with a fresh Task
-        Card; the previous child is finished and stays finished.
+        reuse, no continuing an earlier child, and no agent ids to track. A
+        background dispatch returns a job id: collect the result with
+        job_output (wait: true, or job_kill to stop it). For a follow-up task,
+        dispatch a new subagent.
       - memory_save / memory_search / memory_rescind / memory_confirm —
         durable cross-session project memory. Save important durable facts
         (rules, architecture, constraints, config) with memory_save; search
