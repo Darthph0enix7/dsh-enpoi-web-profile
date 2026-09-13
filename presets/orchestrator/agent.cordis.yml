@@ -88,10 +88,10 @@
         background execution. ALWAYS name the specialist role in the description
         (e.g. description: "librarian: research X" or "fixer: implement Y") so the
         subagent receives its role-specific persona and knows what it is.
-        IMPORTANT: a background subagent returns a durable subagent id, NOT a job
-        id — do NOT call job_output/job_list on it. Its result arrives as a
-        "Background subagent ... finished" notice in your next turn; use
-        send_message to continue it, or just wait for the notice.
+        IMPORTANT: every dispatch is a FRESH subagent session — there is no
+        reuse, no continuing an earlier child, and no agent ids to track. When
+        a follow-up task exists, dispatch a new subagent with a fresh Task
+        Card; the previous child is finished and stays finished.
       - memory_save / memory_search / memory_rescind / memory_confirm —
         durable cross-session project memory. Save important durable facts
         (rules, architecture, constraints, config) with memory_save; search
@@ -274,16 +274,25 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
+      # Enpoi: disabled. send_message reused parked children by id instead of
+      # dispatching fresh work; delegation is one-shot (see tool-subagent).
+      disabled: true
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+      # Enpoi: disabled with send_message — no id bookkeeping for workers.
+      disabled: true
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
-        backgroundMode: continuable
+        # Enpoi: every dispatch is a fresh one-shot session. Continuable
+        # children parked for reuse turned delegation into an id-based
+        # send_message flow; only the Oracle keeps a session across a query,
+        # and it does so inside its own plugin.
+        backgroundMode: one-shot
 
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'

@@ -207,16 +207,25 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
+      # Enpoi: disabled. send_message reused parked children by id instead of
+      # dispatching fresh work; delegation is one-shot (see tool-subagent).
+      disabled: true
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+      # Enpoi: disabled with send_message — no id bookkeeping for workers.
+      disabled: true
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
-        backgroundMode: continuable
+        # Enpoi: every dispatch is a fresh one-shot session. Continuable
+        # children parked for reuse turned delegation into an id-based
+        # send_message flow; only the Oracle keeps a session across a query,
+        # and it does so inside its own plugin.
+        backgroundMode: one-shot
 
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
