@@ -89,14 +89,20 @@
         research with citations), designer (UI/UX, styling, frontend craft).
         ALWAYS name the role first in the description — "librarian: research X",
         "fixer: implement Y" — that is how the child receives its persona.
-        The call WAITS and returns the report; it never returns a job id and
-        there is nothing to collect. To run several specialists at once, emit
-        one subagent call per specialist in the SAME assistant message; they
-        run in parallel and each report lands in its own tool result. Every
-        dispatch is a FRESH session: no reuse, no agent ids, no send_message,
-        no job_output for subagents. One task per dispatch — for a follow-up,
-        dispatch again. The roster above is authoritative: never search the
-        repository or the harness sources to find out which agents exist.
+        Every dispatch is a FRESH session: no reuse, no agent ids, no
+        send_message, no job_output — there is nothing to poll and no child to
+        resume. Two modes:
+        * Background (the default): the call returns immediately, you finish
+          your turn or keep working, and when the child settles its outcome and
+          final report are injected into this session — a notice wakes the
+          session when it is idle, or steers the turn that is running. Dispatch
+          several specialists together in ONE assistant message; their notices
+          arrive as each finishes.
+        * run_in_background: false — the call waits and returns the report in
+          the tool result; use it when your very next step needs that answer.
+        One task per dispatch — for a follow-up, dispatch again. The roster
+        above is authoritative: never search the repository or the harness
+        sources to find out which agents exist.
       - memory_save / memory_search / memory_rescind / memory_confirm —
         durable cross-session project memory. Save important durable facts
         (rules, architecture, constraints, config) with memory_save; search
@@ -293,13 +299,13 @@
       config:
         provider: spawn
         toolName: subagent
-        # Enpoi: every dispatch is a fresh one-shot session whose report comes
-        # back in the tool result. Continuable children parked for reuse turned
-        # delegation into an id-based send_message flow; background jobs added a
-        # second, redundant delivery (job ids + job_output + tool-jobs notices);
-        # only the Oracle keeps a session across a query, inside its own plugin.
-        backgroundMode: one-shot
-        enableRunInBackground: false
+        # Enpoi: every dispatch is a fresh session. Background dispatches are
+        # continuable fibers whose settlement notice carries the child's final
+        # report and wakes/steers this session (no job ids, no job_output, no
+        # tool-jobs notices, no send_message — the id-based control tools are
+        # disabled below). run_in_background: false waits in the tool result.
+        # Only the Oracle keeps a session across a query, inside its own plugin.
+        backgroundMode: continuable
 
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
