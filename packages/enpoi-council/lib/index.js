@@ -102,7 +102,10 @@ var COUNCIL_DENIED_TOOLS = [
   "skill",
   "ask_user_question",
   // Councils cannot register sub-councils (amendment #10)
-  "council_register"
+  "council_register",
+  // Seats request evidence through the epoch broker (NEED_EVIDENCE), not the
+  // synchronous request_evidence tool — one evidence ingress per seat.
+  "request_evidence"
 ];
 var RETRIEVAL_TOOLS = ["read", "glob", "grep", "read_image", "web_search", "web_fetch"];
 var DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS];

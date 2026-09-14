@@ -36,6 +36,7 @@ const ORACLE_PERSONA = [
   'You are an advisor, not a dictator: if a plan is flawed, over-engineered, or heading in the wrong direction, say so plainly.',
   'When reviewing code, inspect relevant files directly using your search/read tools as needed to understand the broader context. When reviewing concepts or plans, evaluate feasibility, modularity, and trade-offs.',
   'This is a continuing reviewer session within the active query: reuse your accumulated context and memory from prior turns.',
+  'You may call request_evidence(target, question) at any point — it sends a research child (codebase explorer or web librarian) to fetch ground truth and returns a short cited fact sheet. Ask as many or as few questions as your judgment requires; use it whenever first-hand verification would sharpen your review, and ignore it entirely when you already know enough.',
   'You never write or edit files. You never paste whole files back — you summarize, explain, and cite.',
   'End every review with a VERDICT BLOCK in exactly this JSON — the orchestrator parses it mechanically, so it must be the LAST thing you output and must be valid JSON:',
   '{"approved":true|false,"concerns":["..."],"unverified":["..."],"blockers":["..."]}',
@@ -59,6 +60,36 @@ const ORACLE_TOOL_FILTER = {
     'todo_write', 'memory_save', 'memory_rescind', 'memory_confirm', 'memory_search',
     'send_message', 'interrupt_agent', 'list_agents',
   ],
+}
+
+/** Research child persona for the evidence broker (model-facing, no internals). */
+const EVIDENCE_RESEARCH_PERSONA = [
+  'You are a precision research assistant. You answer EXACTLY the question asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.',
+  'Output a FACT SHEET and nothing more:',
+  'CITATION: the ACTUAL file path with line number, or the exact URL you read — never a placeholder.',
+  'FACTS: the answer, maximum 150 words, only what the question asked.',
+  'CONFIDENCE: high | medium | low',
+  'Never speculate. If the answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
+].join('\n')
+
+/** Parse a fact sheet answer (markdown-tolerant). */
+export function parseEvidenceSheet(text: string): { citation: string; facts: string; confidence: string } | null {
+  const plain = text.replace(/\*\*/g, '')
+  const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim()
+  const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim()
+  const confidence = plain.match(/CONFIDENCE\s*[:=]\s*(high|medium|low)/i)?.[1]?.toLowerCase()
+  if (!rawCitation || !facts) return null
+  const placeholder = /<file:line|url\s*—|— exact>|your citation/i.test(rawCitation)
+  return {
+    citation: placeholder ? 'unverified (research child echoed the template)' : rawCitation,
+    facts,
+    confidence: placeholder ? 'low' : (confidence ?? 'medium'),
+  }
+}
+
+/** External-looking targets route to the librarian, codebase targets to the explorer. */
+export function isExternalEvidenceTarget(target: string): boolean {
+  return /\b(web|http|npm|docs?|librar|package|registry|external|api)\b/i.test(target)
 }
 
 interface Verdict {
@@ -621,4 +652,104 @@ function registerOracleTools(ctx: Context, root: Context): void {
       }
     },
   })
+
+  // ── request_evidence: the oracle's errand boy ────────────────────────────
+  // A free-form research primitive. Any agent that can see it may call it any
+  // number of times (or never); it spawns one research child — codebase
+  // explorer or web librarian, chosen by the target — waits for a cited fact
+  // sheet, returns it as the tool result, and disposes the child. The caller
+  // keeps its own context pure: one distilled answer instead of raw files.
+  ctx.tools.register({
+    name: 'request_evidence',
+    description: [
+      'Fetch ground truth for one specific question: a research child inspects the codebase (or the web for external targets) and returns a short, cited fact sheet.',
+      'Use it whenever first-hand verification would sharpen your work — ask as many or as few questions as you need, one per call.',
+      'The answer carries an exact citation and a confidence level; "NOT FINDABLE" means the research child could not verify it.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: 'Where to look: a module/file/area of the codebase, or a web topic (npm, docs, library, API).' },
+        question: { type: 'string', description: 'The exact factual question to verify.' },
+      },
+      required: ['target', 'question'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          found: { type: 'boolean' },
+          citation: { type: 'string' },
+          facts: { type: 'string' },
+          confidence: { type: 'string' },
+        },
+        required: ['found', 'citation', 'facts', 'confidence'],
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.found
+          ? `FACT SHEET (${value.confidence})\nCITATION: ${value.citation}\nFACTS: ${value.facts}`
+          : `NOT FINDABLE — ${value.facts}`,
+      }],
+    },
+    async execute(args: { target: string; question: string }, exec) {
+      const requester: Agent | undefined = exec.agent
+      if (requester === undefined) throw new Error('request_evidence requires a calling agent')
+      const target = String(args.target ?? '').trim()
+      const question = String(args.question ?? '').trim()
+      if (target.length === 0 || question.length === 0) {
+        return { found: false, citation: 'n/a', facts: 'request_evidence requires both target and question.', confidence: 'low' }
+      }
+      const retrievedBy = isExternalEvidenceTarget(target) ? 'librarian' : 'explorer'
+      const personaModel = resolvePersonaModel(ctx, retrievedBy)
+      let childId: SessionId | null = null
+      try {
+        const started = await ctx.subagents.startContinuable({
+          provider: 'spawn',
+          label: `evidence request: ${question.slice(0, 50)}`,
+          quiet: true,
+          request: {
+            prompt: [{ type: 'text', text: `TARGET: ${target}\nQUESTION: ${question}\n\nProduce the FACT SHEET now.` }],
+            parent: requester,
+            persona: EVIDENCE_RESEARCH_PERSONA,
+            quiet: true,
+            toolFilter: { deny: EVIDENCE_CHILD_DENY },
+            ...(personaModel !== undefined ? {
+              agentOptions: { provider: personaModel.provider, model: personaModel.model },
+            } : {}),
+          },
+          signal: exec.signal,
+        })
+        if (!started.childId || started.childId === 'null' || !String(started.childId).includes('-')) {
+          throw new Error(`evidence research child spawn returned an invalid id: ${String(started.childId)}`)
+        }
+        childId = started.childId as SessionId
+        const text = await waitForChildTurn(ctx, childId, exec.signal, 240_000)
+        const sheet = parseEvidenceSheet(text)
+        if (sheet === null) {
+          return { found: false, citation: 'n/a', facts: `the research child returned no parseable fact sheet; raw tail: ${text.slice(-300)}`, confidence: 'low' }
+        }
+        const notFindable = /NOT FINDABLE/i.test(sheet.facts)
+        return { found: !notFindable, citation: sheet.citation, facts: sheet.facts, confidence: sheet.confidence }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return { found: false, citation: 'n/a', facts: `evidence retrieval failed: ${msg}`, confidence: 'low' }
+      } finally {
+        if (childId !== null) {
+          try { await ctx.get('sessions')?.delete(childId) } catch { /* best-effort disposal */ }
+        }
+      }
+    },
+  })
 }
+
+/** Anti-leak fence for evidence research children (never relay to the parent inbox). */
+const EVIDENCE_CHILD_DENY = [
+  'send_message', 'oracle_review', 'request_evidence', 'dispatch_task', 'subagent', 'subagent_fork',
+  'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'council_register',
+  'bash', 'edit', 'write', 'str_replace_editor', 'todo_write', 'plan_mode', 'goal',
+  'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'workflow', 'ralph',
+  'job_output', 'job_list', 'job_kill', 'skill', 'ask_user_question', 'memory_save',
+  'memory_search', 'memory_rescind', 'memory_confirm', 'interrupt_agent', 'list_agents',
+]

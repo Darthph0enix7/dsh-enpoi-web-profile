@@ -128,3 +128,34 @@ describe('enpoi-oracle scorecard rollover (doc 35 2.4)', () => {
     expect(out).not.toContain('PRIOR REVIEWS')
   })
 })
+
+describe('request_evidence fact sheet parsing', () => {
+  it('parses a well-formed sheet', async () => {
+    const { parseEvidenceSheet } = await import('../src/index.ts')
+    const sheet = parseEvidenceSheet('CITATION: src/core/queue.py:142\nFACTS: claims are leased with FOR UPDATE SKIP LOCKED.\nCONFIDENCE: high')
+    expect(sheet?.citation).toBe('src/core/queue.py:142')
+    expect(sheet?.confidence).toBe('high')
+  })
+
+  it('degrades template placeholders instead of faking precision', async () => {
+    const { parseEvidenceSheet } = await import('../src/index.ts')
+    const sheet = parseEvidenceSheet('CITATION: <file:line or URL — exact>\nFACTS: something.\nCONFIDENCE: high')
+    expect(sheet?.citation).toContain('unverified')
+    expect(sheet?.confidence).toBe('low')
+  })
+
+  it('tolerates markdown bolding', async () => {
+    const { parseEvidenceSheet } = await import('../src/index.ts')
+    const sheet = parseEvidenceSheet('**CITATION:** README.md:5\n**FACTS:** the harness is plugin-based.\n**CONFIDENCE:** medium')
+    expect(sheet?.citation).toBe('README.md:5')
+    expect(sheet?.facts).toBe('the harness is plugin-based.')
+  })
+
+  it('routes external-looking targets to the librarian', async () => {
+    const { isExternalEvidenceTarget } = await import('../src/index.ts')
+    expect(isExternalEvidenceTarget('npm docs for zod v4')).toBe(true)
+    expect(isExternalEvidenceTarget('web: changelog of xy')).toBe(true)
+    expect(isExternalEvidenceTarget('src/core/queue.py')).toBe(false)
+    expect(isExternalEvidenceTarget('council engine ledger')).toBe(false)
+  })
+})
