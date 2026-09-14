@@ -146,6 +146,7 @@ export async function runCouncil(
         ? 'Propose ideas as SPROUT: <title> | <rationale> lines (one per idea).'
         : (spec.ledgerKinds.some(k => k.kind === 'crux') ? 'Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line.' : ''),
       'If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary — conclude your arguments conditionally.',
+      'IMPORTANT: the run_code tool is NON-FUNCTIONAL in this council — calling it only wastes your turn. Never invoke it; argue directly or request facts with NEED_EVIDENCE.',
     ].filter(Boolean).join('\n\n')
 
     {
@@ -220,7 +221,7 @@ export async function runCouncil(
           isChallenge
             ? 'The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw — with evidence — or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else.'
             : buildEpochInstructions(spec),
-          'NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary.',
+          'NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. The run_code tool is non-functional here — never call it.',
         ].filter(Boolean).join('\n\n')
         },
         fibers,

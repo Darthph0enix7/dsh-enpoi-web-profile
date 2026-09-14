@@ -207,7 +207,9 @@ export async function startSeatFiber(
   if (!started.childId || started.childId === 'null' || !String(started.childId).includes('-')) {
     throw new Error(`council seat spawn returned an invalid child id for ${opts.seatId}: ${String(started.childId)}`)
   }
-  applyPersonaModel(ctx, started.childId, opts.seatId)
+  // Model routing happens at spawn via agentOptions — no extra request/header
+  // is appended (a second header duplicated the "System prompt" chip in the
+  // trajectory and wrote a reason value the session validator rejects).
   return { seatId: opts.seatId, label: opts.label, childId: started.childId, isOffline: false, totalTokens: 0 }
 }
 

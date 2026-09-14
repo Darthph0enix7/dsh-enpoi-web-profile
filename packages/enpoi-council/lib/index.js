@@ -125,30 +125,6 @@ function resolvePersonaModel(ctx, persona) {
   }
   return void 0;
 }
-function applyPersonaModel(ctx, childId, persona) {
-  try {
-    const entry = resolvePersonaModel(ctx, persona);
-    if (entry && entry.provider && entry.model) {
-      const sessions = ctx.get("sessions");
-      const childSession = sessions?.get?.(childId);
-      if (childSession && typeof childSession.append === "function") {
-        childSession.append("request/header", {
-          header: {
-            config: {
-              provider: entry.provider,
-              model: entry.model,
-              ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
-            }
-          },
-          reason: "custom"
-        });
-        councilDiag(`Applied persona model header for ${persona}: ${entry.provider}/${entry.model}`);
-      }
-    }
-  } catch (err) {
-    councilDiag(`applyPersonaModel warning for ${persona}: ${String(err)}`);
-  }
-}
 async function startSeatFiber(ctx, parent, opts, signal) {
   const personaModel = resolvePersonaModel(ctx, opts.seatId);
   const started = await ctx.subagents.startContinuable({
@@ -170,7 +146,6 @@ async function startSeatFiber(ctx, parent, opts, signal) {
   if (!started.childId || started.childId === "null" || !String(started.childId).includes("-")) {
     throw new Error(`council seat spawn returned an invalid child id for ${opts.seatId}: ${String(started.childId)}`);
   }
-  applyPersonaModel(ctx, started.childId, opts.seatId);
   return { seatId: opts.seatId, label: opts.label, childId: started.childId, isOffline: false, totalTokens: 0 };
 }
 async function followupSeatFiber(ctx, parent, fiber, promptText, signal, timeoutMs = 3e4) {
@@ -319,12 +294,16 @@ var EvidenceQueue = class {
 };
 var BROKER_PERSONA = [
   "You are the Council Evidence Broker \u2014 a precision research assistant serving a high-stakes deliberation.",
-  "You answer EXACTLY the question asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.",
-  "Output format \u2014 a FACT SHEET and nothing more:",
+  "You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.",
+  "You may receive MULTIPLE questions. Answer each in order, one FACT SHEET per question, in this exact format:",
+  "SHEET 1",
   "CITATION: the ACTUAL file path with line number, or the exact URL you read. Never a placeholder, never a template \u2014 a real path you personally opened.",
   "FACTS: the answer, maximum 150 words, only what the question asked.",
   "CONFIDENCE: high | medium | low \u2014 one word",
-  'Never speculate. If the answer is not findable, say "NOT FINDABLE" and show the closest citation.'
+  "SHEET 2",
+  "...",
+  'Never speculate. If an answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
+  "The run_code tool is non-functional in this deployment \u2014 never call it."
 ].join("\n");
 function isExternalTarget(target) {
   return /\b(web|http|npm|docs?|library|libraries|package|registry|external|api)\b/i.test(target);
@@ -332,58 +311,71 @@ function isExternalTarget(target) {
 async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, timeoutMs) {
   if (queue.length === 0) return { sheets: 0, errors: [] };
   const errors = [];
-  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch}`);
-  const tasks = queue.map(async (req) => {
-    const retrievedBy = isExternalTarget(req.target) ? "librarian" : "explorer";
-    const prompt = [
-      `TARGET: ${req.target}`,
-      `QUESTION: ${req.question}`,
-      "Produce the FACT SHEET now."
-    ].join("\n");
-    let fiber;
-    try {
-      fiber = await startSeatFiber(ctx, parent, {
-        seatId: retrievedBy,
-        label: `council broker: ${req.ticket}`,
-        persona: BROKER_PERSONA,
-        initialPrompt: prompt,
-        // Broker keeps the research surface; everything else stays denied.
-        denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t))
-      }, signal);
-      const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
-      const parsed = parseFactSheet(text);
-      const tokens = estimateTokens(text);
-      void tokens;
-      if (parsed === null) {
-        errors.push(`${req.ticket}: unparseable fact sheet`);
-        return;
+  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child)`);
+  const hasExternal = queue.some((req) => isExternalTarget(req.target));
+  const retrievedBy = hasExternal ? "librarian" : "explorer";
+  const prompt = [
+    `Answer ${queue.length} question${queue.length > 1 ? "s" : ""}. One FACT SHEET per question, numbered in order (SHEET 1 \u2026 SHEET ${queue.length}).`,
+    ...queue.map((req, i) => `SHEET ${i + 1} \u2014 TARGET: ${req.target} \u2014 QUESTION: ${req.question}`),
+    "Produce the fact sheets now."
+  ].join("\n\n");
+  let fiber;
+  try {
+    fiber = await startSeatFiber(ctx, parent, {
+      seatId: retrievedBy,
+      label: queue.length === 1 ? `council broker: ${queue[0].ticket}` : `council broker: ${queue.length} questions (epoch ${epoch})`,
+      persona: BROKER_PERSONA,
+      initialPrompt: prompt,
+      // Broker keeps the research surface; everything else stays denied.
+      denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t))
+    }, signal);
+    const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
+    const parsed = parseFactSheets(text);
+    let committed = 0;
+    for (let i = 0; i < queue.length; i++) {
+      const sheet = parsed[i];
+      if (sheet === void 0) {
+        errors.push(`${queue[i].ticket}: no fact sheet returned`);
+        councilDiag(`[broker] ${queue[i].ticket} FAILED: missing sheet ${i + 1}`);
+        continue;
       }
       vault.add({
-        citation: parsed.citation,
-        question: req.question,
-        factSheet: `${parsed.facts}
-CONFIDENCE: ${parsed.confidence}`,
+        citation: sheet.citation,
+        question: queue[i].question,
+        factSheet: `${sheet.facts}
+CONFIDENCE: ${sheet.confidence}`,
         addedEpoch: epoch,
         retrievedBy
       });
-      councilDiag(`[broker] ${req.ticket} satisfied via ${retrievedBy} (${parsed.citation})`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push(`${req.ticket}: ${msg}`);
-      councilDiag(`[broker] ${req.ticket} FAILED: ${msg}`);
-    } finally {
-      if (fiber !== void 0) {
-        try {
-          await disposeSeatFibers(ctx, [fiber]);
-        } catch {
-        }
+      committed += 1;
+      councilDiag(`[broker] ${queue[i].ticket} satisfied via ${retrievedBy} (${sheet.citation})`);
+    }
+    return { sheets: committed, errors };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    for (const req of queue) errors.push(`${req.ticket}: ${msg}`);
+    councilDiag(`[broker] batch FAILED: ${msg}`);
+    return { sheets: 0, errors };
+  } finally {
+    if (fiber !== void 0) {
+      try {
+        await disposeSeatFibers(ctx, [fiber]);
+      } catch {
       }
     }
-  });
-  await Promise.allSettled(tasks);
-  return { sheets: vault.since(epoch).length, errors };
+  }
 }
-function parseFactSheet(text) {
+function parseFactSheets(text) {
+  const plain = text.replace(/\*\*/g, "");
+  const parts = plain.split(/(?=CITATION\s*[:=])/i).filter((p) => /CITATION\s*[:=]/i.test(p));
+  const sheets = [];
+  for (const part of parts) {
+    const sheet = parseOneSheet(part);
+    if (sheet !== null) sheets.push(sheet);
+  }
+  return sheets;
+}
+function parseOneSheet(text) {
   const plain = text.replace(/\*\*/g, "");
   const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim();
   const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim();
@@ -4963,7 +4955,8 @@ ${briefText}` : "",
 ${spec.scopeContract}` : "",
       spec.opening === "blind" ? "BLIND FORMULATION: You are formulating INDEPENDENTLY \u2014 you cannot see the other seats. State your position in your own voice." : "",
       spec.forestMode ? "Propose ideas as SPROUT: <title> | <rationale> lines (one per idea)." : spec.ledgerKinds.some((k) => k.kind === "crux") ? "Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line." : "",
-      "If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary \u2014 conclude your arguments conditionally."
+      "If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary \u2014 conclude your arguments conditionally.",
+      "IMPORTANT: the run_code tool is NON-FUNCTIONAL in this council \u2014 calling it only wastes your turn. Never invoke it; argue directly or request facts with NEED_EVIDENCE."
     ].filter(Boolean).join("\n\n");
     {
       councilDiag(`[council ${spec.id}] ${spec.opening} epoch 0: ${spec.seats.length} seats formulating`);
@@ -5032,7 +5025,7 @@ ${vault.render(seatVault)}` : "",
             directives[seat.id] ? `REFEREE DIRECTIVE TO YOU:
 ${directives[seat.id]}` : "",
             isChallenge ? "The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw \u2014 with evidence \u2014 or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else." : buildEpochInstructions(spec),
-            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary."
+            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. The run_code tool is non-functional here \u2014 never call it."
           ].filter(Boolean).join("\n\n");
         },
         fibers,

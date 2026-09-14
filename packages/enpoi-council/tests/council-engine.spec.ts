@@ -134,3 +134,29 @@ describe('procedural steelman gate (Oracle gate #5)', () => {
     function gave(g: { allowed: unknown[] }): boolean { return g.allowed.length === 1 }
   })
 })
+
+describe('batch broker parsing (one child, N sheets)', () => {
+  it('splits a multi-sheet response in order', async () => {
+    const { parseFactSheets } = await import('../src/core/broker.ts')
+    const text = [
+      'SHEET 1',
+      'CITATION: src/a.py:10',
+      'FACTS: first answer.',
+      'CONFIDENCE: high',
+      'SHEET 2',
+      'CITATION: https://example.com/b',
+      'FACTS: second answer.',
+      'CONFIDENCE: low',
+    ].join('\n')
+    const sheets = parseFactSheets(text)
+    expect(sheets).toHaveLength(2)
+    expect(sheets[0].citation).toBe('src/a.py:10')
+    expect(sheets[1].facts).toBe('second answer.')
+    expect(sheets[1].confidence).toBe('low')
+  })
+
+  it('parses single-question responses unchanged', async () => {
+    const { parseFactSheet } = await import('../src/core/broker.ts')
+    expect(parseFactSheet('CITATION: src/x.ts:1\nFACTS: it uses a row update.\nCONFIDENCE: high')?.facts).toBe('it uses a row update.')
+  })
+})

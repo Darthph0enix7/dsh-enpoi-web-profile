@@ -80,12 +80,16 @@ export class EvidenceQueue {
 
 const BROKER_PERSONA = [
   'You are the Council Evidence Broker — a precision research assistant serving a high-stakes deliberation.',
-  'You answer EXACTLY the question asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.',
-  'Output format — a FACT SHEET and nothing more:',
+  'You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.',
+  'You may receive MULTIPLE questions. Answer each in order, one FACT SHEET per question, in this exact format:',
+  'SHEET 1',
   'CITATION: the ACTUAL file path with line number, or the exact URL you read. Never a placeholder, never a template — a real path you personally opened.',
   'FACTS: the answer, maximum 150 words, only what the question asked.',
   'CONFIDENCE: high | medium | low — one word',
-  'Never speculate. If the answer is not findable, say "NOT FINDABLE" and show the closest citation.',
+  'SHEET 2',
+  '...',
+  'Never speculate. If an answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
+  'The run_code tool is non-functional in this deployment — never call it.',
 ].join('\n')
 
 function isExternalTarget(target: string): boolean {
@@ -113,58 +117,81 @@ export async function serviceEvidenceQueue(
 ): Promise<BrokerResult> {
   if (queue.length === 0) return { sheets: 0, errors: [] }
   const errors: string[] = []
-  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch}`)
+  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child)`)
 
-  const tasks = queue.map(async (req): Promise<void> => {
-    const retrievedBy = isExternalTarget(req.target) ? 'librarian' : 'explorer'
-    const prompt = [
-      `TARGET: ${req.target}`,
-      `QUESTION: ${req.question}`,
-      'Produce the FACT SHEET now.',
-    ].join('\n')
-    let fiber: { childId: string } | undefined
-    try {
-      fiber = await startSeatFiber(ctx, parent, {
-        seatId: retrievedBy,
-        label: `council broker: ${req.ticket}`,
-        persona: BROKER_PERSONA,
-        initialPrompt: prompt,
-        // Broker keeps the research surface; everything else stays denied.
-        denyTools: COUNCIL_DENIED_TOOLS.filter(t => !(BROKER_KEPT_TOOLS as readonly string[]).includes(t)),
-      }, signal)
-      const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs)
-      const parsed = parseFactSheet(text)
-      const tokens = estimateTokens(text)
-      void tokens
-      if (parsed === null) {
-        errors.push(`${req.ticket}: unparseable fact sheet`)
-        return
+  // Batch mode: ONE research child answers the whole queue (one session per
+  // epoch instead of one per question — shared research context, fewer spawns).
+  const hasExternal = queue.some(req => isExternalTarget(req.target))
+  const retrievedBy = hasExternal ? 'librarian' as const : 'explorer' as const
+  const prompt = [
+    `Answer ${queue.length} question${queue.length > 1 ? 's' : ''}. One FACT SHEET per question, numbered in order (SHEET 1 … SHEET ${queue.length}).`,
+    ...queue.map((req, i) => `SHEET ${i + 1} — TARGET: ${req.target} — QUESTION: ${req.question}`),
+    'Produce the fact sheets now.',
+  ].join('\n\n')
+
+  let fiber: { childId: string } | undefined
+  try {
+    fiber = await startSeatFiber(ctx, parent, {
+      seatId: retrievedBy,
+      label: queue.length === 1 ? `council broker: ${queue[0].ticket}` : `council broker: ${queue.length} questions (epoch ${epoch})`,
+      persona: BROKER_PERSONA,
+      initialPrompt: prompt,
+      // Broker keeps the research surface; everything else stays denied.
+      denyTools: COUNCIL_DENIED_TOOLS.filter(t => !(BROKER_KEPT_TOOLS as readonly string[]).includes(t)),
+    }, signal)
+    const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs)
+    const parsed = parseFactSheets(text)
+    let committed = 0
+    for (let i = 0; i < queue.length; i++) {
+      const sheet = parsed[i]
+      if (sheet === undefined) {
+        errors.push(`${queue[i].ticket}: no fact sheet returned`)
+        councilDiag(`[broker] ${queue[i].ticket} FAILED: missing sheet ${i + 1}`)
+        continue
       }
       vault.add({
-        citation: parsed.citation,
-        question: req.question,
-        factSheet: `${parsed.facts}\nCONFIDENCE: ${parsed.confidence}`,
+        citation: sheet.citation,
+        question: queue[i].question,
+        factSheet: `${sheet.facts}\nCONFIDENCE: ${sheet.confidence}`,
         addedEpoch: epoch,
         retrievedBy,
       })
-      councilDiag(`[broker] ${req.ticket} satisfied via ${retrievedBy} (${parsed.citation})`)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      errors.push(`${req.ticket}: ${msg}`)
-      councilDiag(`[broker] ${req.ticket} FAILED: ${msg}`)
-    } finally {
-      if (fiber !== undefined) {
-        try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
-      }
+      committed += 1
+      councilDiag(`[broker] ${queue[i].ticket} satisfied via ${retrievedBy} (${sheet.citation})`)
     }
-  })
-
-  await Promise.allSettled(tasks)
-  return { sheets: vault.since(epoch).length, errors }
+    return { sheets: committed, errors }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    for (const req of queue) errors.push(`${req.ticket}: ${msg}`)
+    councilDiag(`[broker] batch FAILED: ${msg}`)
+    return { sheets: 0, errors }
+  } finally {
+    if (fiber !== undefined) {
+      try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
+    }
+  }
 }
 
+/** Parse ONE fact sheet (single-question responses). */
 export function parseFactSheet(text: string): { citation: string; facts: string; confidence: string } | null {
+  return parseFactSheets(text)[0] ?? null
+}
+
+/** Parse a (possibly multi-sheet) broker response into ordered fact sheets. */
+export function parseFactSheets(text: string): Array<{ citation: string; facts: string; confidence: string }> {
   // Tolerate markdown bolding (**CITATION:** etc.) before matching.
+  const plain = text.replace(/\*\*/g, '')
+  // Each sheet starts at its CITATION line; split there and parse in order.
+  const parts = plain.split(/(?=CITATION\s*[:=])/i).filter(p => /CITATION\s*[:=]/i.test(p))
+  const sheets: Array<{ citation: string; facts: string; confidence: string }> = []
+  for (const part of parts) {
+    const sheet = parseOneSheet(part)
+    if (sheet !== null) sheets.push(sheet)
+  }
+  return sheets
+}
+
+function parseOneSheet(text: string): { citation: string; facts: string; confidence: string } | null {
   const plain = text.replace(/\*\*/g, '')
   const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim()
   const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim()
