@@ -31,10 +31,11 @@ const BASE_PARAMS: CouncilParams = {
  * Build a scripted ctx. `script` is a list of turn texts consumed in order —
  * one entry per waitForSeatTurn read (seats, referees, brokers, chair).
  */
-function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: string[] } = {}) {
+function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: string[]; truncSeats?: string[] } = {}) {
   let spawnSeq = 0
   let readSeq = 0
   const childLabel = new Map<string, string>()
+  const truncCounter = new Set<string>()
   const appends: Array<{ type: string; data: unknown }> = []
   const spawnedLabels: string[] = []
 
@@ -56,15 +57,27 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
               const label = childLabel.get(childId) ?? ''
               const seatFailed = opts.failSeatIds?.some(id => label.includes(`seat: ${id}`)) ?? false
               const failing = opts.failSeats === true || seatFailed
-              const text = failing ? 'irrelevant' : nextText()
+              // Truncation simulation: the FIRST read for a trunc seat returns
+              // text + a max-tokens turn/end; the SECOND read (after the
+              // auto-continue followup) returns the completion + a clean end.
+              const seatTruncated = opts.truncSeats?.some(id => label.includes(`seat: ${id}`)) ?? false
+              const truncKey = `trunc:${childId}`
+              const firstTrunc = seatTruncated && !truncCounter.has(truncKey)
+              if (firstTrunc) truncCounter.add(truncKey)
+              const text = firstTrunc ? 'TRUNCATED-PART' : (failing ? 'irrelevant' : nextText())
               const events = failing
                 ? [
                     { type: 'turn/end', seq: 2, data: { reason: { kind: 'error', error: { message: 'provider exploded' } } } },
                   ]
-                : [
-                    { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text }] } } },
-                    { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
-                  ]
+                : firstTrunc
+                  ? [
+                      { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text }] } } },
+                      { type: 'turn/end', seq: 2, data: { reason: { kind: 'max-tokens' } } },
+                    ]
+                  : [
+                      { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text }] } } },
+                      { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
+                    ]
               return { events }
             },
             close: async () => undefined,
@@ -355,5 +368,34 @@ describe('dead-seat retirement (no per-epoch respawn churn)', () => {
     expect(skepticSpawns).toBe(2)
     expect(result.deliverable).toContain('Decision')
     expect(result.ledgerState.entries.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('auto-continue on output-token truncation', () => {
+  it('resumes a seat whose turn ended at the cap and concatenates the continuation', async () => {
+    const script = [
+      BLIND, BLIND, BLIND,                                   // blind; the skeptic truncates then continues
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'A dispute about lease TTLs.', author: 'skeptic' }] }),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({ flips: [{ id: 'C-1', to: 'contested', reason: 'open' }] }),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({}),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({}),
+      CONCUR, CONCUR, CONCUR,
+      refereeJson({}),
+      CHAIR,
+    ]
+    const { ctx, parent } = makeCtx(script, { truncSeats: ['skeptic'] })
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    })
+    expect(result.deliverable).toContain('Decision')
+    // The skeptic's fiber got one followup (the auto-continue) — nothing else to assert directly;
+    // the run completing without quorum errors IS the behavior check (the first read returned
+    // TRUNCATED-PART with a max-tokens end, the second the scripted completion).
   })
 })

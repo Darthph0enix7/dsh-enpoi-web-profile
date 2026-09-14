@@ -258,6 +258,26 @@ export async function waitForSeatTurn(
   signal: AbortSignal,
   timeoutMs = 90_000,
 ): Promise<string> {
+  return (await waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs)).text
+}
+
+export interface SeatTurnResult {
+  text: string
+  /** True when the turn ended at the provider's output-token cap (max-tokens). */
+  truncated: boolean
+}
+
+/**
+ * Like {@link waitForSeatTurn} but also reports whether the turn ended at the
+ * output-token cap — callers can resume the seat instead of arguing from a
+ * silently truncated position.
+ */
+export async function waitForSeatTurnDetailed(
+  ctx: Context,
+  childId: string,
+  signal: AbortSignal,
+  timeoutMs = 90_000,
+): Promise<SeatTurnResult> {
   const started = Date.now()
   const controller = new AbortController()
   const onAbort = () => controller.abort()
@@ -288,7 +308,13 @@ export async function waitForSeatTurn(
               .filter(t => t.length > 0)
               .join('\n')
               .trim()
-            if (extracted.length > 0) return extracted
+            if (extracted.length > 0) {
+              // Truncation flag: the LAST turn/end before this read may be
+              // max-tokens even though text exists (text-first, then cut).
+              const truncated = events.some(e => e.type === 'turn/end'
+                && (e.data as { reason?: { kind?: string } })?.reason?.kind === 'max-tokens')
+              return { text: extracted, truncated }
+            }
           }
           const turnEnd = events.find(e => e.type === 'turn/end' && e.seq > since)
           if (turnEnd !== undefined) {
@@ -300,7 +326,7 @@ export async function waitForSeatTurn(
               throw new Error(`Turn was aborted (${reason.reason?.kind ?? 'cancelled'})`)
             }
             if (reason?.kind === 'completed' && messages.length === 0) {
-              return '[NO_OUTPUT: seat returned empty content]'
+              return { text: '[NO_OUTPUT: seat returned empty content]', truncated: false }
             }
           }
         }

@@ -175,6 +175,9 @@ async function followupSeatFiber(ctx, parent, fiber, promptText, signal, timeout
   }
 }
 async function waitForSeatTurn(ctx, childId, signal, timeoutMs = 9e4) {
+  return (await waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs)).text;
+}
+async function waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs = 9e4) {
   const started = Date.now();
   const controller = new AbortController();
   const onAbort = () => controller.abort();
@@ -201,7 +204,10 @@ async function waitForSeatTurn(ctx, childId, signal, timeoutMs = 9e4) {
               const data = m.data;
               return textOfContent(data.message?.content ?? data.content);
             }).filter((t) => t.length > 0).join("\n").trim();
-            if (extracted.length > 0) return extracted;
+            if (extracted.length > 0) {
+              const truncated = events.some((e) => e.type === "turn/end" && e.data?.reason?.kind === "max-tokens");
+              return { text: extracted, truncated };
+            }
           }
           const turnEnd = events.find((e) => e.type === "turn/end" && e.seq > since);
           if (turnEnd !== void 0) {
@@ -213,7 +219,7 @@ async function waitForSeatTurn(ctx, childId, signal, timeoutMs = 9e4) {
               throw new Error(`Turn was aborted (${reason.reason?.kind ?? "cancelled"})`);
             }
             if (reason?.kind === "completed" && messages.length === 0) {
-              return "[NO_OUTPUT: seat returned empty content]";
+              return { text: "[NO_OUTPUT: seat returned empty content]", truncated: false };
             }
           }
         }
@@ -5233,7 +5239,18 @@ async function generateParallel(ctx, parent, spec, args) {
           fiber = current;
           await followupSeatFiber(ctx, parent, fiber, prompt, args.signal);
         }
-        const text = await waitForSeatTurn(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs);
+        let turn = await waitForSeatTurnDetailed(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs);
+        let resumes = 0;
+        while (turn.truncated && resumes < 2 && !args.signal.aborted) {
+          resumes += 1;
+          councilDiag(`[epoch ${args.epoch}] seat ${seat.id} hit the output-token cap \u2014 resuming (${resumes}/2)`);
+          await followupSeatFiber(ctx, parent, fiber, "Your reply was cut at the output-token limit. Continue EXACTLY where you stopped \u2014 do not repeat or restate anything. Complete your turn.", args.signal);
+          const next = await waitForSeatTurnDetailed(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs);
+          turn = { text: `${turn.text}
+
+${next.text}`, truncated: next.truncated };
+        }
+        const text = turn.text;
         const tokens2 = estimateTokens(text);
         fiber.totalTokens += tokens2;
         return { seatId: seat.id, text, tokens: tokens2 };
@@ -5299,8 +5316,8 @@ ${input.vault.render()}`,
       initialPrompt: prompt,
       denyTools: DEBATER_DENIED_TOOLS
     }, input.signal);
-    const text = await waitForSeatTurn(ctx, fiber.childId, input.signal, input.timeoutMs);
-    return { text, tokens: estimateTokens(text) };
+    const chairTurn = await waitForSeatTurnDetailed(ctx, fiber.childId, input.signal, input.timeoutMs);
+    return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) };
   } finally {
     if (fiber !== void 0) {
       try {

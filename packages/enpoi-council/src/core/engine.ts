@@ -21,7 +21,7 @@ import {
   followupSeatFiber,
   getLivingBriefText,
   startSeatFiber,
-  waitForSeatTurn,
+  waitForSeatTurnDetailed,
   type SeatFiber,
   type SeatTurn,
 } from './fiber.ts'
@@ -450,7 +450,19 @@ async function generateParallel(
           fiber = current
           await followupSeatFiber(ctx, parent, fiber, prompt, args.signal)
         }
-        const text = await waitForSeatTurn(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs)
+        let turn = await waitForSeatTurnDetailed(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs)
+        // Auto-continue a turn the provider cut at the output-token cap: a
+        // truncated seat position silently degrades the referee's reading.
+        // Bounded resumes; each continuation is appended verbatim.
+        let resumes = 0
+        while (turn.truncated && resumes < 2 && !args.signal.aborted) {
+          resumes += 1
+          councilDiag(`[epoch ${args.epoch}] seat ${seat.id} hit the output-token cap — resuming (${resumes}/2)`)
+          await followupSeatFiber(ctx, parent, fiber, 'Your reply was cut at the output-token limit. Continue EXACTLY where you stopped — do not repeat or restate anything. Complete your turn.', args.signal)
+          const next = await waitForSeatTurnDetailed(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs)
+          turn = { text: `${turn.text}\n\n${next.text}`, truncated: next.truncated }
+        }
+        const text = turn.text
         const tokens = estimateTokens(text)
         fiber.totalTokens += tokens
         return { seatId: seat.id, text, tokens }
@@ -531,8 +543,8 @@ async function runChair(
       initialPrompt: prompt,
       denyTools: DEBATER_DENIED_TOOLS,
     }, input.signal)
-    const text = await waitForSeatTurn(ctx, fiber.childId, input.signal, input.timeoutMs)
-    return { text, tokens: estimateTokens(text) }
+    const chairTurn = await waitForSeatTurnDetailed(ctx, fiber.childId, input.signal, input.timeoutMs)
+    return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) }
   } finally {
     if (fiber !== undefined) {
       try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
