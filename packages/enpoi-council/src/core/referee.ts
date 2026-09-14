@@ -54,13 +54,22 @@ export interface RefereeOutput {
  */
 export function extractProposals(turnText: string): Array<{ kind: string; assertion: string }> {
   const out: Array<{ kind: string; assertion: string }> = []
-  const block = /PROPOSE_(CRUX|RISK)\s*:\s*(.+)/gi
-  for (const m of turnText.matchAll(block)) {
+  // Models dress protocol lines in bullets, bold, or backticks; strip the
+  // dressing first so the semantic tokens always match.
+  const cleaned = turnText
+    .split(/\n/)
+    .map(line => line
+      .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)*/, '')
+      .replace(/\*\*/g, '')
+      .replace(/`/g, ''))
+    .join('\n')
+  const block = /PROPOSE_(CRUX|RISK)\s*[:\-–]\s*(.+)/gi
+  for (const m of cleaned.matchAll(block)) {
     const assertion = m[2].trim()
     if (assertion.length > 0) out.push({ kind: m[1].toLowerCase(), assertion })
   }
-  const sprout = /SPROUT\s*:\s*(.+)/gi
-  for (const m of turnText.matchAll(sprout)) {
+  const sprout = /SPROUT\s*[:\-–]\s*(.+)/gi
+  for (const m of cleaned.matchAll(sprout)) {
     const assertion = m[1].trim()
     if (assertion.length > 0) out.push({ kind: 'idea', assertion })
   }

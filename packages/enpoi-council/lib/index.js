@@ -255,16 +255,40 @@ ${lb.decisions.map((d) => `\u2022 ${d.text}`).join("\n")}` : "";
 
 // src/core/broker.ts
 import { createHash } from "node:crypto";
+function undecorate(line) {
+  return line.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)*/, "").replace(/\*\*/g, "").replace(/`/g, "").trim();
+}
 function extractEvidenceRequests(seatId, epoch, turnText) {
   const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const push = (target, question) => {
+    target = target.trim();
+    question = question.trim();
+    if (target.length === 0 || question.length === 0) return;
+    const ticket = fpTicket(target, question);
+    if (seen.has(ticket)) return;
+    seen.add(ticket);
+    out.push({ ticket, seatId, target, question, epoch });
+  };
   const strip = (v) => v.trim().replace(/^[`"'(\s]+/, "").replace(/[`"')\s.,;]+$/, "").trim();
-  for (const rawLine of turnText.split(/\n/)) {
-    const m = rawLine.match(/NEED_EVIDENCE\s*\(?\s*target\s*[:=]\s*(.+?)\s*,\s*question\s*[:=]\s*(.+)$/i);
+  const lines = turnText.split(/\n/).map(undecorate);
+  for (const line of lines) {
+    const m = line.match(/NEED_EVIDENCE\s*\(?\s*target\s*[:=]\s*(.+?)\s*,\s*question\s*[:=]\s*(.+)$/i);
     if (m === null) continue;
-    const target = strip(m[1]);
-    const question = strip(m[2]);
-    if (target.length === 0 || question.length === 0) continue;
-    out.push({ ticket: fpTicket(target, question), seatId, target, question, epoch });
+    push(strip(m[1]), strip(m[2]));
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^NEED_EVIDENCE\b/i.test(lines[i]) || /target\s*[:=]/i.test(lines[i])) continue;
+    let target;
+    let question;
+    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+      const t = lines[j].match(/^target\s*[:=]\s*(.+)$/i);
+      const q = lines[j].match(/^question\s*[:=]\s*(.+)$/i);
+      if (t !== null && target === void 0) target = strip(t[1]);
+      if (q !== null && question === void 0) question = strip(q[1]);
+      if (target !== void 0 && question !== void 0) break;
+    }
+    if (target !== void 0 && question !== void 0) push(target, question);
   }
   return out;
 }
@@ -4957,7 +4981,11 @@ ${spec.scopeContract}` : "",
       spec.opening === "blind" ? "BLIND FORMULATION: You are formulating INDEPENDENTLY \u2014 you cannot see the other seats. State your position in your own voice." : "",
       spec.forestMode ? "Propose ideas as SPROUT: <title> | <rationale> lines (one per idea)." : spec.ledgerKinds.some((k) => k.kind === "crux") ? "Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line." : "",
       "If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary \u2014 conclude your arguments conditionally.",
-      "IMPORTANT: the run_code tool is NON-FUNCTIONAL in this council \u2014 calling it only wastes your turn. Never invoke it; argue directly or request facts with NEED_EVIDENCE."
+      "IMPORTANT: the run_code tool is NON-FUNCTIONAL in this council \u2014 calling it only wastes your turn. Never invoke it; argue directly or request facts with NEED_EVIDENCE.",
+      "PROTOCOL LINE FORMATS (the council parses these mechanically \u2014 always exactly these, one line each, no markdown, no headings around them):",
+      "  NEED_EVIDENCE(target: <area>, question: <what to verify>)",
+      "  PROPOSE_CRUX: <assertion>",
+      'Never reformat these lines (no "NEED_EVIDENCE" alone on a line with Target/Question below, no bold, no bullets) \u2014 variants are silently dropped.'
     ].filter(Boolean).join("\n\n");
     {
       councilDiag(`[council ${spec.id}] ${spec.opening} epoch 0: ${spec.seats.length} seats formulating`);
@@ -5027,7 +5055,8 @@ ${vault.render(seatVault)}` : "",
             directives[seat.id] ? `REFEREE DIRECTIVE TO YOU:
 ${directives[seat.id]}` : "",
             isChallenge ? "The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw \u2014 with evidence \u2014 or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else." : buildEpochInstructions(spec),
-            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. The run_code tool is non-functional here \u2014 never call it."
+            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. The run_code tool is non-functional here \u2014 never call it.",
+            "PROTOCOL LINE FORMATS (mechanically parsed \u2014 one line each, exactly): NEED_EVIDENCE(target: <area>, question: <what>) and PROPOSE_CRUX: <assertion>. Never reformat or decorate them \u2014 variants are dropped."
           ].filter(Boolean).join("\n\n");
         },
         fibers,

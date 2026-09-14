@@ -33,16 +33,54 @@ export interface EvidenceRequest {
 }
 
 /** Extract NEED_EVIDENCE lines from a seat turn. Tolerant to formatting drift. */
+/**
+ * Remove the stylistic dressing models add around protocol lines — bullets,
+ * bold pairs, backticks, trailing prose. The semantic tokens stay verbatim.
+ */
+function undecorate(line: string): string {
+  return line
+    .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)*/, '')
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '')
+    .trim()
+}
+
 export function extractEvidenceRequests(seatId: string, epoch: number, turnText: string): EvidenceRequest[] {
   const out: EvidenceRequest[] = []
+  const seen = new Set<string>()
+  const push = (target: string, question: string) => {
+    target = target.trim()
+    question = question.trim()
+    if (target.length === 0 || question.length === 0) return
+    const ticket = fpTicket(target, question)
+    if (seen.has(ticket)) return
+    seen.add(ticket)
+    out.push({ ticket, seatId, target, question, epoch })
+  }
   const strip = (v: string) => v.trim().replace(/^[`"'(\s]+/, '').replace(/[`"')\s.,;]+$/, '').trim()
-  for (const rawLine of turnText.split(/\n/)) {
-    const m = rawLine.match(/NEED_EVIDENCE\s*\(?\s*target\s*[:=]\s*(.+?)\s*,\s*question\s*[:=]\s*(.+)$/i)
+  const lines = turnText.split(/\n/).map(undecorate)
+
+  // Form 1 — inline: NEED_EVIDENCE(target: X, question: Y)
+  for (const line of lines) {
+    const m = line.match(/NEED_EVIDENCE\s*\(?\s*target\s*[:=]\s*(.+?)\s*,\s*question\s*[:=]\s*(.+)$/i)
     if (m === null) continue
-    const target = strip(m[1])
-    const question = strip(m[2])
-    if (target.length === 0 || question.length === 0) continue
-    out.push({ ticket: fpTicket(target, question), seatId, target, question, epoch })
+    push(strip(m[1]), strip(m[2]))
+  }
+
+  // Form 2 — block: NEED_EVIDENCE (own line) with Target:/Question: lines
+  // following within a few lines (models split the fields across lines).
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^NEED_EVIDENCE\b/i.test(lines[i]) || /target\s*[:=]/i.test(lines[i])) continue
+    let target: string | undefined
+    let question: string | undefined
+    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+      const t = lines[j].match(/^target\s*[:=]\s*(.+)$/i)
+      const q = lines[j].match(/^question\s*[:=]\s*(.+)$/i)
+      if (t !== null && target === undefined) target = strip(t[1])
+      if (q !== null && question === undefined) question = strip(q[1])
+      if (target !== undefined && question !== undefined) break
+    }
+    if (target !== undefined && question !== undefined) push(target, question)
   }
   return out
 }

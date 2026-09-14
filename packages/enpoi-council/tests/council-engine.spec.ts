@@ -160,3 +160,47 @@ describe('batch broker parsing (one child, N sheets)', () => {
     expect(parseFactSheet('CITATION: src/x.ts:1\nFACTS: it uses a row update.\nCONFIDENCE: high')?.facts).toBe('it uses a row update.')
   })
 })
+
+describe('tolerant protocol extraction (natural model styles)', () => {
+  it('parses the multi-line NEED_EVIDENCE block form (NEED_EVIDENCE alone, Target/Question below)', async () => {
+    const { extractEvidenceRequests } = await import('../src/core/broker.ts')
+    const text = [
+      'Position Update',
+      '',
+      'NEED_EVIDENCE',
+      'Target: The internal module structure of the non-worker code',
+      'Question: Are domain boundaries already enforced through packages? (This decides C-1.)',
+      '',
+      'There is no evidence supporting additional boundaries.',
+    ].join('\n')
+    const reqs = extractEvidenceRequests('skeptic', 3, text)
+    expect(reqs).toHaveLength(1)
+    expect(reqs[0].target).toBe('The internal module structure of the non-worker code')
+    expect(reqs[0].question).toContain('domain boundaries')
+  })
+
+  it('parses decorated single-line requests (bullets, bold, backticks, trailing prose)', async () => {
+    const { extractEvidenceRequests } = await import('../src/core/broker.ts')
+    const text = [
+      '- **NEED_EVIDENCE(target: `ingestion_pipeline`, question: does it need polyglot runtimes?)** — this decides C-5',
+      '3. NEED_EVIDENCE(target: postgres_core, question: what isolation level?)',
+    ].join('\n')
+    const reqs = extractEvidenceRequests('architect', 2, text)
+    expect(reqs).toHaveLength(2)
+    expect(reqs[0].target).toBe('ingestion_pipeline')
+    expect(reqs[1].question).toContain('isolation level')
+  })
+
+  it('parses decorated PROPOSE_CRUX lines (bullets, bold)', async () => {
+    const { extractProposals } = await import('../src/core/referee.ts')
+    const text = [
+      '**PROPOSE_CRUX:** Decoupling GPU-heavy ingestion via a queue satisfies isolation without microservices.',
+      '- PROPOSE_CRUX: Operational boundaries follow process topology, not domain ownership.',
+      'PROPOSE_CRUX - plain dash variant also counts',
+    ].join('\n')
+    const out = extractProposals(text)
+    expect(out).toHaveLength(3)
+    expect(out[0].kind).toBe('crux')
+    expect(out[2].assertion).toContain('plain dash')
+  })
+})
