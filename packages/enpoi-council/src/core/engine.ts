@@ -78,6 +78,9 @@ export async function runCouncil(
   const queue = new EvidenceQueue()
   const runtime: StoppingRuntime = initialRuntime()
   const fibers = new Map<string, SeatFiber>()
+  /** Seats whose FRESH fiber also failed — retired for the rest of the run
+   * (no per-epoch respawn churn; quorum rules decide whether the run continues). */
+  const deadSeats = new Set<string>()
   /** Per-seat last participation epoch — drives cumulative vault catch-up (amendment #4). */
   const lastActive = new Map<string, number>()
   let totalTokens = 0
@@ -153,7 +156,7 @@ export async function runCouncil(
       councilDiag(`[council ${spec.id}] ${spec.opening} epoch 0: ${spec.seats.length} seats formulating`)
       const blindTurns = await generateParallel(ctx, parent, spec, {
         promptBuilder: seat => openingPrompt(seatPersona(spec, seat)),
-        fibers, deny: true, epoch: 0, signal, params,
+        fibers, deny: true, epoch: 0, signal, params, deadSeats,
       })
       totalTokens += blindTurns.tokens
       runtime.tokens = totalTokens
@@ -230,6 +233,7 @@ export async function runCouncil(
         signal,
         params,
         only: floor.active,
+        deadSeats,
       })
       for (const t of round.turns) {
         if (t.error === undefined) lastActive.set(t.seatId, epoch)
@@ -389,6 +393,7 @@ interface GenerateArgs {
   signal: AbortSignal
   params: CouncilParams
   only?: string[]
+  deadSeats: Set<string>
 }
 
 /** Parallel seat generation over the current floor (spawn epoch 0+1, followup after). */
@@ -399,6 +404,7 @@ async function generateParallel(
   args: GenerateArgs,
 ): Promise<{ turns: SeatTurn[]; tokens: number }> {
   const seats = (args.only ?? spec.seats.map(s => s.id))
+    .filter(id => !args.deadSeats.has(id))
     .map(id => spec.seats.find(s => s.id === id))
     .filter((s): s is NonNullable<typeof s> => s !== undefined)
 
@@ -446,6 +452,10 @@ async function generateParallel(
     }
     const fiberState = args.fibers.get(seat.id)
     if (fiberState !== undefined) fiberState.isOffline = true
+    // Retire the seat for the rest of the run: even the fresh respawn died,
+    // so re-spawning every epoch would only churn sessions (the operator-
+    // observed 6× skeptic). Quorum rules decide whether the run continues.
+    args.deadSeats.add(seat.id)
     return {
       seatId: seat.id,
       text: `[SEAT ERROR: ${seat.id} failed: ${lastError?.message ?? 'deliberation failed'}]`,

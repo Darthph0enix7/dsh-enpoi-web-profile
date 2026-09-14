@@ -31,9 +31,10 @@ const BASE_PARAMS: CouncilParams = {
  * Build a scripted ctx. `script` is a list of turn texts consumed in order —
  * one entry per waitForSeatTurn read (seats, referees, brokers, chair).
  */
-function makeCtx(script: string[], opts: { failSeats?: boolean } = {}) {
+function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: string[] } = {}) {
   let spawnSeq = 0
   let readSeq = 0
+  const childLabel = new Map<string, string>()
   const appends: Array<{ type: string; data: unknown }> = []
   const spawnedLabels: string[] = []
 
@@ -50,12 +51,13 @@ function makeCtx(script: string[], opts: { failSeats?: boolean } = {}) {
       if (ns === 'agents') return { get: () => undefined } // children always parked
       if (ns === 'sessionPersistence') {
         return {
-          open: async () => ({
+          open: async (childId: string) => ({
             read: async () => {
-              const text = opts.failSeats === true
-                ? 'irrelevant'
-                : nextText()
-              const events = opts.failSeats === true
+              const label = childLabel.get(childId) ?? ''
+              const seatFailed = opts.failSeatIds?.some(id => label.includes(`seat: ${id}`)) ?? false
+              const failing = opts.failSeats === true || seatFailed
+              const text = failing ? 'irrelevant' : nextText()
+              const events = failing
                 ? [
                     { type: 'turn/end', seq: 2, data: { reason: { kind: 'error', error: { message: 'provider exploded' } } } },
                   ]
@@ -78,7 +80,9 @@ function makeCtx(script: string[], opts: { failSeats?: boolean } = {}) {
       startContinuable: async (spec: { label: string }) => {
         spawnSeq += 1
         spawnedLabels.push(spec.label)
-        return { childId: `child-${String(spawnSeq).padStart(4, '0')}-aaaa-bbbb-cccc-dddddddddddd` }
+        const childId = `child-${String(spawnSeq).padStart(4, '0')}-aaaa-bbbb-cccc-dddddddddddd`
+        childLabel.set(childId, spec.label)
+        return { childId }
       },
       [deliverSubagentPrompt]: async () => undefined,
     },
@@ -319,5 +323,37 @@ describe('council engine — scripted full runs', () => {
     expect(result.deliverable).toContain('Harvest')
     expect(result.ledgerState.entries.length).toBeGreaterThanOrEqual(5)
     expect(result.ledgerState.edges.length).toBe(0) // edges come from parsed ops in v2; entries carry the ideas
+  })
+})
+
+describe('dead-seat retirement (no per-epoch respawn churn)', () => {
+  it('retires a seat whose fresh fiber also fails, and never respawns it again', async () => {
+    const script = [
+      // Blind: only architect + pragmatist consume reads (the skeptic's failed
+      // turns never consume script items — its turns are error events).
+      BLIND, BLIND,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'A real dispute about leases.', author: 'architect' }] }),
+      ARGUE, ARGUE,                                          // epoch 2: skeptic retired — only 2 seats
+      refereeJson({ flips: [{ id: 'C-1', to: 'contested', reason: 'genuine' }] }),
+      ARGUE, ARGUE,                                          // epoch 3
+      refereeJson({}),
+      ARGUE, ARGUE,                                          // epoch 4
+      refereeJson({}),
+      CONCUR, CONCUR,                                        // epoch 5 challenge (2 seats)
+      refereeJson({}),
+      CHAIR,
+    ]
+    const { ctx, parent, spawnedLabels } = makeCtx(script, { failSeatIds: ['skeptic'] })
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    })
+    const skepticSpawns = spawnedLabels.filter(l => l.includes('seat: skeptic')).length
+    // initial spawn + one respawn (attempt 2) — then retired, never again.
+    expect(skepticSpawns).toBe(2)
+    expect(result.deliverable).toContain('Decision')
+    expect(result.ledgerState.entries.length).toBeGreaterThanOrEqual(1)
   })
 })

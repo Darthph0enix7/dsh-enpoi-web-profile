@@ -4898,6 +4898,7 @@ async function runCouncil(ctx, parent, opts) {
   const queue = new EvidenceQueue();
   const runtime = initialRuntime();
   const fibers = /* @__PURE__ */ new Map();
+  const deadSeats = /* @__PURE__ */ new Set();
   const lastActive = /* @__PURE__ */ new Map();
   let totalTokens = 0;
   let directives = {};
@@ -4966,7 +4967,8 @@ ${spec.scopeContract}` : "",
         deny: true,
         epoch: 0,
         signal,
-        params
+        params,
+        deadSeats
       });
       totalTokens += blindTurns.tokens;
       runtime.tokens = totalTokens;
@@ -5033,7 +5035,8 @@ ${directives[seat.id]}` : "",
         epoch,
         signal,
         params,
-        only: floor.active
+        only: floor.active,
+        deadSeats
       });
       for (const t of round.turns) {
         if (t.error === void 0) lastActive.set(t.seatId, epoch);
@@ -5167,7 +5170,7 @@ function renderLedger(ledger, spec) {
   return [...lines, ...edgeLines].join("\n");
 }
 async function generateParallel(ctx, parent, spec, args) {
-  const seats = (args.only ?? spec.seats.map((s) => s.id)).map((id) => spec.seats.find((s) => s.id === id)).filter((s) => s !== void 0);
+  const seats = (args.only ?? spec.seats.map((s) => s.id)).filter((id) => !args.deadSeats.has(id)).map((id) => spec.seats.find((s) => s.id === id)).filter((s) => s !== void 0);
   const tasks = seats.map(async (seat) => {
     const prompt = args.promptBuilder(seat.id);
     const existing = args.fibers.get(seat.id);
@@ -5209,6 +5212,7 @@ async function generateParallel(ctx, parent, spec, args) {
     }
     const fiberState = args.fibers.get(seat.id);
     if (fiberState !== void 0) fiberState.isOffline = true;
+    args.deadSeats.add(seat.id);
     return {
       seatId: seat.id,
       text: `[SEAT ERROR: ${seat.id} failed: ${lastError?.message ?? "deliberation failed"}]`,
