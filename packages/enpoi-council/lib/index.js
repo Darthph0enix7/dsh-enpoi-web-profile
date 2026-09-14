@@ -335,7 +335,8 @@ function isExternalTarget(target) {
 async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, timeoutMs) {
   if (queue.length === 0) return { sheets: 0, errors: [] };
   const errors = [];
-  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child)`);
+  const waitMs = Math.max(timeoutMs, queue.length * 9e4);
+  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child, wait ${Math.round(waitMs / 1e3)}s)`);
   const hasExternal = queue.some((req) => isExternalTarget(req.target));
   const retrievedBy = hasExternal ? "librarian" : "explorer";
   const prompt = [
@@ -5034,6 +5035,11 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
     for (epoch = 2; epoch <= effectiveParams.defaultMaxRounds + 2; epoch++) {
       if (signal.aborted) throw new Error("council deliberation aborted");
       const isChallenge = challengeEpoch === epoch;
+      try {
+        parent.session.append("council/round", { epoch, council: spec.id, phase: "generating", floor });
+      } catch (err) {
+        councilDiag(`epoch-start append failed: ${String(err)}`);
+      }
       const ledgerText = renderLedger(ledger, spec);
       const round = await generateParallel(ctx, parent, spec, {
         // Cumulative epistemic package per seat (amendment #4): a standby
@@ -5316,7 +5322,8 @@ function computeQuality(ledger, spec) {
     cruxResolutionRatio: cruxLike.length > 0 ? resolved / cruxLike.length : null,
     adversarialSurvivability: cruxLike.length > 0 ? flippedFromOpen / cruxLike.length : null,
     invariantDensity: invariants,
-    newClusters: spec.forestMode ? s.edges.filter((e) => e.op === "SPROUT").length : contested.length >= 0 ? null : null
+    // Forest mode: idea count is the volume signal (the edge graph is v2).
+    newClusters: spec.forestMode ? cruxLike.filter((e) => e.kind === "idea").length : null
   };
 }
 

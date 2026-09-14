@@ -155,7 +155,12 @@ export async function serviceEvidenceQueue(
 ): Promise<BrokerResult> {
   if (queue.length === 0) return { sheets: 0, errors: [] }
   const errors: string[] = []
-  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child)`)
+  // Per-question budget: a batched child runs one research pass per question,
+  // so the wait scales with the queue (a fixed timeout cut off 10-question
+  // batches mid-flight — the operator-observed "we continued without the
+  // broker"). Quality-first: generous, not stingy.
+  const waitMs = Math.max(timeoutMs, queue.length * 90_000)
+  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child, wait ${Math.round(waitMs / 1000)}s)`)
 
   // Batch mode: ONE research child answers the whole queue (one session per
   // epoch instead of one per question — shared research context, fewer spawns).

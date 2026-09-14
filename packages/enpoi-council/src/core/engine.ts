@@ -209,6 +209,13 @@ export async function runCouncil(
 
       const isChallenge = challengeEpoch === epoch
 
+      // Progress visibility during the silent generation window (reused seats
+      // create no new catalog rows — without this marker the council looks
+      // dead between rounds).
+      try {
+        parent.session.append('council/round', { epoch, council: spec.id, phase: 'generating', floor })
+      } catch (err) { councilDiag(`epoch-start append failed: ${String(err)}`) }
+
       // 1. Context assembly + parallel seat generation (floor-gated).
       const ledgerText = renderLedger(ledger, spec)
       const round = await generateParallel(ctx, parent, spec, {
@@ -545,6 +552,7 @@ function computeQuality(ledger: Ledger, spec: CouncilSpec): CouncilRuntimeResult
     cruxResolutionRatio: cruxLike.length > 0 ? resolved / cruxLike.length : null,
     adversarialSurvivability: cruxLike.length > 0 ? flippedFromOpen / cruxLike.length : null,
     invariantDensity: invariants,
-    newClusters: spec.forestMode ? s.edges.filter(e => e.op === 'SPROUT').length : (contested.length >= 0 ? null : null),
+    // Forest mode: idea count is the volume signal (the edge graph is v2).
+    newClusters: spec.forestMode ? cruxLike.filter(e => e.kind === 'idea').length : null,
   }
 }
