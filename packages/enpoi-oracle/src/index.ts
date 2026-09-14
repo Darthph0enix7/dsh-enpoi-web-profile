@@ -52,7 +52,10 @@ const ORACLE_TOOL_FILTER = {
   // NOTE: `run_code` is never named — the PTC presentation transport is
   // reserved and `tools.restrict()` throws when a filter names it.
   deny: [
-    'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
+    // The Oracle MAY delegate: it can spawn subagents (fixer/explorer/…)
+    // and use the request_evidence broker — judgment work only, no mutations
+    // (write tools stay denied below).
+    'oracle_review', 'dispatch_task', 'subagent_codex',
     'subagent_claude_code', 'roundtable', 'chorus',
     'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal',
     'ralph', 'workflow', 'job_output', 'job_list', 'job_kill',
