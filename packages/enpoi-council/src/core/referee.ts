@@ -100,6 +100,8 @@ export interface RefereePassInput {
   vaultDeltaText: string
   epoch: number
   previousDirectives: Record<string, string>
+  /** Seats retired this run (dead routes) — excluded from floor and directives. */
+  offlineSeats?: string[]
 }
 
 /**
@@ -126,6 +128,9 @@ export async function runRefereePass(
     // acknowledge compliance and avoid repeating or contradicting itself.
     input.previousDirectives !== undefined && Object.keys(input.previousDirectives).length > 0
       ? `YOUR DIRECTIVES FROM THE PREVIOUS EPOCH (you are a fresh pass of the same referee — keep them coherent; drop what was addressed, follow through on what was not):\n${Object.entries(input.previousDirectives).map(([seat, text]) => `${seat}: ${text}`).join('\n')}`
+      : '',
+    input.offlineSeats !== undefined && input.offlineSeats.length > 0
+      ? `OFFLINE SEATS (their routes failed — they produce nothing; exclude them from floor.active and issue them no directives): ${input.offlineSeats.join(', ')}`
       : '',
     `SEAT OUTPUTS THIS EPOCH:\n${input.roundTranscript}`,
     'Produce the referee JSON now. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch.',

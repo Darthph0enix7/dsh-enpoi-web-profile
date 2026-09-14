@@ -33,6 +33,7 @@ export const COUNCIL_PARAM_DEFAULTS: CouncilRuntimeParams = {
   evidenceTimeoutMs: 120_000,
   blindEpoch: true,
   preflightInventory: false,
+  runDeadlineMs: 1_800_000,
 }
 
 /** Read the council parameters fresh from settings (hot-swap, never cached). */
@@ -57,6 +58,7 @@ export function getCouncilParams(ctx: Context): CouncilRuntimeParams {
       evidenceTimeoutMs: num(p.evidenceTimeoutMs, d.evidenceTimeoutMs, 15_000, 600_000),
       blindEpoch: bool(p.blindEpoch, d.blindEpoch),
       preflightInventory: bool(p.preflightInventory, d.preflightInventory),
+      runDeadlineMs: num(p.runDeadlineMs, d.runDeadlineMs, 300_000, 7_200_000),
     }
   } catch {
     return d

@@ -99,6 +99,7 @@ export async function runCouncil(
           edges: ledger.state().edges.length,
         },
         floor,
+        offline: [...deadSeats],
         vault: vault.since(epoch).length,
         ...extra,
       })
@@ -181,16 +182,38 @@ export async function runCouncil(
 
       // Dispute Ledger Ingest: the referee admits opening proposals (epoch 1).
       // Runs for BOTH opening modes — a 'open' spec must never reach the
-      // deliberation loop over an empty ledger.
+      // deliberation loop over an empty ledger. Resilient: one retry, then a
+      // no-op ingest (an empty ledger reaching epoch 2 terminates fast and
+      // loud via the empty-ledger guard — never a hung run).
       ledger.setEpoch(1)
-      const ingest = await runRefereePass(ctx, parent, {
+      const ingestInput = {
         spec,
         ledgerText: renderLedger(ledger, spec),
         roundTranscript: blindTurns.turns.map(t => `── ${t.seatId} ──\n${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join('\n\n'),
         vaultDeltaText: vault.all().length > 0 ? vault.render() : '',
         epoch: 1,
         previousDirectives: {},
-      }, ledger, signal, params.debaterTimeoutMs)
+        offlineSeats: [...deadSeats],
+      }
+      let ingest
+      try {
+        ingest = await runRefereePass(ctx, parent, ingestInput, ledger, signal, params.debaterTimeoutMs)
+      } catch (firstErr) {
+        if (signal.aborted) throw firstErr
+        const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
+        councilDiag(`ingest referee pass failed (${firstMsg}) — retrying once`)
+        try {
+          ingest = await runRefereePass(ctx, parent, ingestInput, ledger, signal, params.debaterTimeoutMs)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          councilDiag(`ingest referee unavailable: ${msg} — no-op ingest`)
+          audit.push(`ingest: referee unavailable (${msg}) — proceeding without admission`)
+          ingest = {
+            output: { admissions: [], flips: [], directives: {}, floor: { active: spec.seats.map(s => s.id), standby: [] }, scopeWarnings: [] },
+            applied: { admissions: [], flips: [], rejected: [`ingest unavailable: ${msg}`] },
+          }
+        }
+      }
       directives = ingest.output.directives
       floor = ingest.output.floor
       trackFlipRun(runtime, ledger.flipsInEpoch(1) + ingest.applied.admissions.length, false)
@@ -204,8 +227,14 @@ export async function runCouncil(
     let challengeEpoch = -1
     let consolidationEpoch = -1
 
+    const runStarted = Date.now()
     for (epoch = 2; epoch <= effectiveParams.defaultMaxRounds + 2; epoch++) {
       if (signal.aborted) throw new Error('council deliberation aborted')
+      if (Date.now() - runStarted >= effectiveParams.runDeadlineMs) {
+        stopReason = 'run deadline reached'
+        audit.push(`run deadline (${Math.round(effectiveParams.runDeadlineMs / 60000)} min) reached at epoch ${epoch} — skipping to synthesis`)
+        break
+      }
 
       const isChallenge = challengeEpoch === epoch
 
@@ -266,18 +295,58 @@ export async function runCouncil(
       }
 
       // 3. Referee pass (admission + flips + directives + next floor).
+      // Resilient: one retry; a persistently dead referee makes the epoch
+      // non-material instead of killing the debate (the ledger is unchanged,
+      // so stagnation naturally steers the run to its end).
       ledger.setEpoch(epoch)
       const transcript = round.turns
         .map(t => `── ${t.seatId} ──\n${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`)
         .join('\n\n')
-      const referee = await runRefereePass(ctx, parent, {
+      const refereeInput = {
         spec,
         ledgerText: renderLedger(ledger, spec),
         roundTranscript: transcript,
         vaultDeltaText: (() => { const ev = vault.since(epoch); return ev.length > 0 ? vault.render(ev) : '' })(),
         epoch,
         previousDirectives: directives,
-      }, ledger, signal, params.debaterTimeoutMs)
+        offlineSeats: [...deadSeats],
+      }
+      let referee
+      try {
+        referee = await runRefereePass(ctx, parent, refereeInput, ledger, signal, params.debaterTimeoutMs)
+      } catch (firstErr) {
+        if (signal.aborted) throw firstErr
+        const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
+        councilDiag(`[epoch ${epoch}] referee pass failed (${firstMsg}) — retrying once`)
+        try {
+          referee = await runRefereePass(ctx, parent, refereeInput, ledger, signal, params.debaterTimeoutMs)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          councilDiag(`[epoch ${epoch}] referee unavailable: ${msg}`)
+          audit.push(`epoch ${epoch}: referee unavailable (${msg}) — epoch treated as non-material`)
+          directives = {}
+          floor = { active: spec.seats.map(s => s.id).filter(id => !deadSeats.has(id)), standby: [] }
+          trackFlipRun(runtime, 0, isChallenge)
+          emitRound(epoch, { phase: 'referee-unavailable', error: msg, flips: 0, admissions: 0, offline: [...deadSeats] })
+          if (isChallenge) {
+            stopReason = 'referee unavailable during final challenge'
+            break
+          }
+          // Fall through to the stopping evaluation with an unchanged ledger:
+          // the empty-ledger and stagnation guards still steer the run to its
+          // end (a dead referee must not burn every remaining epoch).
+          const degradedVerdict = evaluate(ledger.state(), runtime, effectiveParams, terminalSet(spec))
+          if (degradedVerdict.action === 'terminate') {
+            stopReason = degradedVerdict.reason
+            break
+          }
+          if (degradedVerdict.action === 'final-challenge') {
+            challengeEpoch = epoch + 1
+            audit.push(`epoch ${epoch}: stagnation → final challenge at epoch ${epoch + 1}`)
+          }
+          continue
+        }
+      }
       directives = referee.output.directives
       floor = referee.output.floor
 
@@ -328,9 +397,29 @@ export async function runCouncil(
     }
 
     // ── Chair synthesis ─────────────────────────────────────────────────
-    const deliverable = await runChair(ctx, parent, spec, {
-      query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
-    })
+    // Resilient: one retry; a persistently dead chair falls back to a
+    // deterministic mechanical compilation of the ledger — the run NEVER
+    // dies after the deliberation already happened.
+    let deliverable
+    try {
+      deliverable = await runChair(ctx, parent, spec, {
+        query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
+      })
+    } catch (firstErr) {
+      if (signal.aborted) throw firstErr
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
+      councilDiag(`chair pass failed (${firstMsg}) — retrying once`)
+      try {
+        deliverable = await runChair(ctx, parent, spec, {
+          query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
+        })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        councilDiag(`chair unavailable: ${msg} — mechanical fallback`)
+        audit.push(`chair unavailable (${msg}) — mechanical compilation`)
+        deliverable = { text: mechanicalDeliverable(spec, ledger, vault, query, stopReason), tokens: 0 }
+      }
+    }
     totalTokens += deliverable.tokens
 
     const quality = computeQuality(ledger, spec)
@@ -550,6 +639,36 @@ async function runChair(
       try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
     }
   }
+}
+
+/**
+ * Deterministic zero-LLM compilation used when the Chair is unavailable:
+ * every ledger entry with its disposition and evidence reference, the vault
+ * summary, and the stopping reason. Worse prose than the Chair, but NOTHING
+ * is lost — the run always returns a deliverable.
+ */
+function mechanicalDeliverable(spec: CouncilSpec, ledger: Ledger, vault: EvidenceVault, query: string, stopReason: string): string {
+  const s = ledger.state()
+  const sections = spec.deliverableSections
+  const lines: string[] = [
+    `# ${spec.label} Deliverable (mechanical compilation — chair unavailable)`,
+    '',
+    `Query: ${query}`,
+    `Stop: ${stopReason}`,
+    '',
+    '## Ledger Dispositions',
+    ...s.entries.map(e => `- **${e.id}** (${e.kind}, ${e.status}) — ${e.assertion}${e.evidenceRef ? ` [evidence: ${e.evidenceRef}]` : ''}`),
+    '',
+  ]
+  if (sections.length > 0) {
+    lines.push(`_Intended sections: ${sections.join(', ')}._`)
+    lines.push('')
+  }
+  const facts = vault.all()
+  lines.push('## Evidence Vault', ...(facts.length > 0
+    ? facts.map(f => `- [${f.id}] (${f.retrievedBy}, ${f.citation}): ${f.factSheet.split('\n')[0]}`)
+    : ['- (no evidence collected)']))
+  return lines.join('\n')
 }
 
 function computeQuality(ledger: Ledger, spec: CouncilSpec): CouncilRuntimeResult['quality'] {

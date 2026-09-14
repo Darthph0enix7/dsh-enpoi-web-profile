@@ -4751,6 +4751,7 @@ ${input.vaultDeltaText}` : "",
     // acknowledge compliance and avoid repeating or contradicting itself.
     input.previousDirectives !== void 0 && Object.keys(input.previousDirectives).length > 0 ? `YOUR DIRECTIVES FROM THE PREVIOUS EPOCH (you are a fresh pass of the same referee \u2014 keep them coherent; drop what was addressed, follow through on what was not):
 ${Object.entries(input.previousDirectives).map(([seat, text]) => `${seat}: ${text}`).join("\n")}` : "",
+    input.offlineSeats !== void 0 && input.offlineSeats.length > 0 ? `OFFLINE SEATS (their routes failed \u2014 they produce nothing; exclude them from floor.active and issue them no directives): ${input.offlineSeats.join(", ")}` : "",
     `SEAT OUTPUTS THIS EPOCH:
 ${input.roundTranscript}`,
     "Produce the referee JSON now. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch."
@@ -4951,6 +4952,7 @@ async function runCouncil(ctx, parent, opts) {
           edges: ledger.state().edges.length
         },
         floor,
+        offline: [...deadSeats],
         vault: vault.since(epoch).length,
         ...extra
       });
@@ -5024,15 +5026,35 @@ ${spec.scopeContract}` : "",
         }
       }
       ledger.setEpoch(1);
-      const ingest = await runRefereePass(ctx, parent, {
+      const ingestInput = {
         spec,
         ledgerText: renderLedger(ledger, spec),
         roundTranscript: blindTurns.turns.map((t) => `\u2500\u2500 ${t.seatId} \u2500\u2500
 ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
         vaultDeltaText: vault.all().length > 0 ? vault.render() : "",
         epoch: 1,
-        previousDirectives: {}
-      }, ledger, signal, params.debaterTimeoutMs);
+        previousDirectives: {},
+        offlineSeats: [...deadSeats]
+      };
+      let ingest;
+      try {
+        ingest = await runRefereePass(ctx, parent, ingestInput, ledger, signal, params.debaterTimeoutMs);
+      } catch (firstErr) {
+        if (signal.aborted) throw firstErr;
+        const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+        councilDiag(`ingest referee pass failed (${firstMsg}) \u2014 retrying once`);
+        try {
+          ingest = await runRefereePass(ctx, parent, ingestInput, ledger, signal, params.debaterTimeoutMs);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          councilDiag(`ingest referee unavailable: ${msg} \u2014 no-op ingest`);
+          audit.push(`ingest: referee unavailable (${msg}) \u2014 proceeding without admission`);
+          ingest = {
+            output: { admissions: [], flips: [], directives: {}, floor: { active: spec.seats.map((s) => s.id), standby: [] }, scopeWarnings: [] },
+            applied: { admissions: [], flips: [], rejected: [`ingest unavailable: ${msg}`] }
+          };
+        }
+      }
       directives = ingest.output.directives;
       floor = ingest.output.floor;
       trackFlipRun(runtime, ledger.flipsInEpoch(1) + ingest.applied.admissions.length, false);
@@ -5043,8 +5065,14 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
     let stopReason = "max rounds reached";
     let challengeEpoch = -1;
     let consolidationEpoch = -1;
+    const runStarted = Date.now();
     for (epoch = 2; epoch <= effectiveParams.defaultMaxRounds + 2; epoch++) {
       if (signal.aborted) throw new Error("council deliberation aborted");
+      if (Date.now() - runStarted >= effectiveParams.runDeadlineMs) {
+        stopReason = "run deadline reached";
+        audit.push(`run deadline (${Math.round(effectiveParams.runDeadlineMs / 6e4)} min) reached at epoch ${epoch} \u2014 skipping to synthesis`);
+        break;
+      }
       const isChallenge = challengeEpoch === epoch;
       try {
         parent.session.append("council/round", { epoch, council: spec.id, phase: "generating", floor });
@@ -5102,7 +5130,7 @@ ${directives[seat.id]}` : "",
       ledger.setEpoch(epoch);
       const transcript = round.turns.map((t) => `\u2500\u2500 ${t.seatId} \u2500\u2500
 ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
-      const referee = await runRefereePass(ctx, parent, {
+      const refereeInput = {
         spec,
         ledgerText: renderLedger(ledger, spec),
         roundTranscript: transcript,
@@ -5111,8 +5139,42 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
           return ev.length > 0 ? vault.render(ev) : "";
         })(),
         epoch,
-        previousDirectives: directives
-      }, ledger, signal, params.debaterTimeoutMs);
+        previousDirectives: directives,
+        offlineSeats: [...deadSeats]
+      };
+      let referee;
+      try {
+        referee = await runRefereePass(ctx, parent, refereeInput, ledger, signal, params.debaterTimeoutMs);
+      } catch (firstErr) {
+        if (signal.aborted) throw firstErr;
+        const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+        councilDiag(`[epoch ${epoch}] referee pass failed (${firstMsg}) \u2014 retrying once`);
+        try {
+          referee = await runRefereePass(ctx, parent, refereeInput, ledger, signal, params.debaterTimeoutMs);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          councilDiag(`[epoch ${epoch}] referee unavailable: ${msg}`);
+          audit.push(`epoch ${epoch}: referee unavailable (${msg}) \u2014 epoch treated as non-material`);
+          directives = {};
+          floor = { active: spec.seats.map((s) => s.id).filter((id) => !deadSeats.has(id)), standby: [] };
+          trackFlipRun(runtime, 0, isChallenge);
+          emitRound(epoch, { phase: "referee-unavailable", error: msg, flips: 0, admissions: 0, offline: [...deadSeats] });
+          if (isChallenge) {
+            stopReason = "referee unavailable during final challenge";
+            break;
+          }
+          const degradedVerdict = evaluate(ledger.state(), runtime, effectiveParams, terminalSet(spec));
+          if (degradedVerdict.action === "terminate") {
+            stopReason = degradedVerdict.reason;
+            break;
+          }
+          if (degradedVerdict.action === "final-challenge") {
+            challengeEpoch = epoch + 1;
+            audit.push(`epoch ${epoch}: stagnation \u2192 final challenge at epoch ${epoch + 1}`);
+          }
+          continue;
+        }
+      }
       directives = referee.output.directives;
       floor = referee.output.floor;
       const flips = ledger.flipsInEpoch(epoch);
@@ -5151,14 +5213,36 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
         audit.push(`epoch ${epoch}: stagnation \u2192 final challenge at epoch ${epoch + 1}`);
       }
     }
-    const deliverable = await runChair(ctx, parent, spec, {
-      query,
-      ledger,
-      vault,
-      transcriptNote: briefStall,
-      signal,
-      timeoutMs: params.debaterTimeoutMs
-    });
+    let deliverable;
+    try {
+      deliverable = await runChair(ctx, parent, spec, {
+        query,
+        ledger,
+        vault,
+        transcriptNote: briefStall,
+        signal,
+        timeoutMs: params.debaterTimeoutMs
+      });
+    } catch (firstErr) {
+      if (signal.aborted) throw firstErr;
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      councilDiag(`chair pass failed (${firstMsg}) \u2014 retrying once`);
+      try {
+        deliverable = await runChair(ctx, parent, spec, {
+          query,
+          ledger,
+          vault,
+          transcriptNote: briefStall,
+          signal,
+          timeoutMs: params.debaterTimeoutMs
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        councilDiag(`chair unavailable: ${msg} \u2014 mechanical fallback`);
+        audit.push(`chair unavailable (${msg}) \u2014 mechanical compilation`);
+        deliverable = { text: mechanicalDeliverable(spec, ledger, vault, query, stopReason), tokens: 0 };
+      }
+    }
     totalTokens += deliverable.tokens;
     const quality = computeQuality(ledger, spec);
     try {
@@ -5332,6 +5416,27 @@ ${input.vault.render()}`,
     }
   }
 }
+function mechanicalDeliverable(spec, ledger, vault, query, stopReason) {
+  const s = ledger.state();
+  const sections = spec.deliverableSections;
+  const lines = [
+    `# ${spec.label} Deliverable (mechanical compilation \u2014 chair unavailable)`,
+    "",
+    `Query: ${query}`,
+    `Stop: ${stopReason}`,
+    "",
+    "## Ledger Dispositions",
+    ...s.entries.map((e) => `- **${e.id}** (${e.kind}, ${e.status}) \u2014 ${e.assertion}${e.evidenceRef ? ` [evidence: ${e.evidenceRef}]` : ""}`),
+    ""
+  ];
+  if (sections.length > 0) {
+    lines.push(`_Intended sections: ${sections.join(", ")}._`);
+    lines.push("");
+  }
+  const facts = vault.all();
+  lines.push("## Evidence Vault", ...facts.length > 0 ? facts.map((f) => `- [${f.id}] (${f.retrievedBy}, ${f.citation}): ${f.factSheet.split("\n")[0]}`) : ["- (no evidence collected)"]);
+  return lines.join("\n");
+}
 function computeQuality(ledger, spec) {
   const s = ledger.state();
   const terminal = new Set(spec.ledgerKinds.flatMap((k) => k.terminalStatuses));
@@ -5455,7 +5560,8 @@ var COUNCIL_PARAM_DEFAULTS = {
   evidenceBroker: true,
   evidenceTimeoutMs: 12e4,
   blindEpoch: true,
-  preflightInventory: false
+  preflightInventory: false,
+  runDeadlineMs: 18e5
 };
 function getCouncilParams(ctx) {
   const d = COUNCIL_PARAM_DEFAULTS;
@@ -5477,7 +5583,8 @@ function getCouncilParams(ctx) {
       evidenceBroker: bool(p.evidenceBroker, d.evidenceBroker),
       evidenceTimeoutMs: num(p.evidenceTimeoutMs, d.evidenceTimeoutMs, 15e3, 6e5),
       blindEpoch: bool(p.blindEpoch, d.blindEpoch),
-      preflightInventory: bool(p.preflightInventory, d.preflightInventory)
+      preflightInventory: bool(p.preflightInventory, d.preflightInventory),
+      runDeadlineMs: num(p.runDeadlineMs, d.runDeadlineMs, 3e5, 72e5)
     };
   } catch {
     return d;

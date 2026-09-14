@@ -119,6 +119,8 @@ export interface CouncilParams {
   evidenceTimeoutMs: number
   blindEpoch: boolean
   preflightInventory: boolean
+  /** Wall-clock ceiling for one council run; on breach the run skips to the chair. */
+  runDeadlineMs: number
 }
 
 /**

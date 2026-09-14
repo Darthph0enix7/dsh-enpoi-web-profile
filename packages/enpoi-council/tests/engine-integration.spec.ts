@@ -25,6 +25,7 @@ const BASE_PARAMS: CouncilParams = {
   evidenceTimeoutMs: 5000,
   blindEpoch: true,
   preflightInventory: false,
+  runDeadlineMs: 1_800_000,
 }
 
 /**
@@ -55,12 +56,12 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
           open: async (childId: string) => ({
             read: async () => {
               const label = childLabel.get(childId) ?? ''
-              const seatFailed = opts.failSeatIds?.some(id => label.includes(`seat: ${id}`)) ?? false
+              const seatFailed = opts.failSeatIds?.some(id => label.includes(id)) ?? false
               const failing = opts.failSeats === true || seatFailed
               // Truncation simulation: the FIRST read for a trunc seat returns
               // text + a max-tokens turn/end; the SECOND read (after the
               // auto-continue followup) returns the completion + a clean end.
-              const seatTruncated = opts.truncSeats?.some(id => label.includes(`seat: ${id}`)) ?? false
+              const seatTruncated = opts.truncSeats?.some(id => label.includes(id)) ?? false
               const truncKey = `trunc:${childId}`
               const firstTrunc = seatTruncated && !truncCounter.has(truncKey)
               if (firstTrunc) truncCounter.add(truncKey)
@@ -397,5 +398,75 @@ describe('auto-continue on output-token truncation', () => {
     // The skeptic's fiber got one followup (the auto-continue) — nothing else to assert directly;
     // the run completing without quorum errors IS the behavior check (the first read returned
     // TRUNCATED-PART with a max-tokens end, the second the scripted completion).
+  })
+})
+
+
+describe('degraded-mode fallbacks (never lose a finished debate)', () => {
+  it('referee unavailable for the whole run: epochs are non-material, run still delivers', async () => {
+    // Referee failures never consume script reads. Flow: blind(3) → ingest fails
+    // → epoch2(3) → fails → epoch3(3) → fails → run=2 → challenge(3) → fails → terminate.
+    const script = [
+      BLIND, BLIND, BLIND,
+      ARGUE, ARGUE, ARGUE,   // epoch 2: the only deliberation epoch (guard fires)
+      CHAIR,
+    ]
+    const { ctx, parent } = makeCtx(script, { failSeatIds: ['referee'] })
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    })
+    // With a dead referee nothing is ever admitted, so the empty-ledger guard
+    // terminates fast and loud — that IS the degraded-mode contract (no hang,
+    // no crash, deliverable still produced).
+    expect(result.stopReason).toBe('no ledger entries were ever admitted')
+    expect(result.deliverable).toContain('Decision')
+  })
+
+  it('chair unavailable: mechanical compilation preserves every ledger entry', async () => {
+    const script = [
+      BLIND, BLIND, BLIND,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'A dispute about lease TTLs.', author: 'skeptic' }] }),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({ flips: [{ id: 'C-1', to: 'contested', reason: 'open' }] }),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({}),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({}),
+      CONCUR, CONCUR, CONCUR,
+      refereeJson({}),
+      CHAIR,
+    ]
+    const { ctx, parent } = makeCtx(script, { failSeatIds: ['chair'] })
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    })
+    expect(result.stopReason).toBe('final challenge produced no state changes')
+    expect(result.deliverable).toContain('mechanical compilation')
+    expect(result.deliverable).toContain('C-1')
+    expect(result.deliverable).toContain('Ledger Dispositions')
+  })
+
+  it('run deadline: skips to synthesis instead of overrunning', async () => {
+    const script = [
+      BLIND, BLIND, BLIND,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'a claim', author: 'skeptic' }] }),
+      CHAIR,
+    ]
+    const { ctx, parent } = makeCtx(script)
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: { ...BASE_PARAMS, runDeadlineMs: 0 },
+      signal: new AbortController().signal,
+    })
+    expect(result.stopReason).toBe('run deadline reached')
+    expect(result.deliverable).toContain('Decision')
+    expect(result.ledgerState.entries.length).toBe(1)
   })
 })
