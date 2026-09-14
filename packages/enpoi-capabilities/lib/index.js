@@ -151,6 +151,263 @@ function evaluateToolCall(toolName, args, state) {
   return { allowed: true };
 }
 
+// src/policy.ts
+var MUTATION_TOOLS = /* @__PURE__ */ new Set(["bash", "edit", "write", "str_replace_editor"]);
+var SHIPPED_TOOL_DEFAULTS = {
+  read: "allow",
+  glob: "allow",
+  grep: "allow",
+  read_image: "allow",
+  web_search: "allow",
+  web_fetch: "allow",
+  todo_write: "allow",
+  todo_read: "allow",
+  memory_search: "allow",
+  memory_save: "ask",
+  memory_rescind: "ask",
+  memory_confirm: "ask",
+  oracle_review: "allow",
+  request_evidence: "allow",
+  roundtable: "allow",
+  chorus: "allow",
+  subagent: "allow",
+  task: "allow",
+  job_output: "allow",
+  job_list: "allow",
+  job_kill: "ask",
+  skill: "allow",
+  ask_user_question: "allow",
+  edit: "allow",
+  write: "allow",
+  bash: "ask",
+  str_replace_editor: "ask"
+};
+var SHIPPED_BASH_PATTERNS = [
+  { pattern: "git *", policy: "allow" },
+  { pattern: "rm", policy: "ask" },
+  { pattern: "rm *", policy: "ask" },
+  { pattern: "rmdir", policy: "ask" },
+  { pattern: "rmdir *", policy: "ask" },
+  { pattern: "unlink", policy: "ask" },
+  { pattern: "unlink *", policy: "ask" },
+  { pattern: "dd*", policy: "ask" },
+  { pattern: "mkfs*", policy: "ask" },
+  { pattern: "fdisk", policy: "ask" },
+  { pattern: "fdisk *", policy: "ask" },
+  { pattern: "shutdown", policy: "ask" },
+  { pattern: "reboot", policy: "ask" },
+  { pattern: "poweroff", policy: "ask" },
+  { pattern: "halt", policy: "ask" },
+  { pattern: "chmod -R *", policy: "ask" },
+  { pattern: "chown -R *", policy: "ask" }
+];
+function splitCompoundCommand(command) {
+  const parts = [];
+  let current = "";
+  let quote = null;
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "\n") {
+      parts.push(current);
+      current = "";
+      i += 1;
+      continue;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === "&&" || two === "||") {
+      parts.push(current);
+      current = "";
+      i += 2;
+      continue;
+    }
+    if (ch === ";" || ch === "|") {
+      parts.push(current);
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+function stripEnvPrefixes(subCommand) {
+  const tokens = subCommand.trim().split(/\s+/);
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? "")) i += 1;
+  return i > 0 ? tokens.slice(i).join(" ") : subCommand.trim();
+}
+function matchBashPattern(pattern, subCommand) {
+  const p = pattern.trim();
+  const tokens = subCommand.split(/\s+/);
+  const argv0 = tokens[0] ?? "";
+  if (!p.includes(" ") && !p.includes("*")) return argv0 === p;
+  if (p.endsWith("*") && !p.slice(0, -1).includes(" ")) {
+    return argv0 === p.slice(0, -1);
+  }
+  const rx = new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, (ch) => ch === "*" ? "[\\s\\S]*" : `\\${ch}`)}$`);
+  return rx.test(subCommand);
+}
+function mcpLadder(toolName, table) {
+  if (table === void 0) return null;
+  const check = (key) => {
+    const policy = table[key];
+    if (policy === void 0) return null;
+    return policy === "deny" ? { kind: "deny", reason: `operator policy denies ${toolName}`, source: `matrix:${key}` } : { kind: "ask", reason: `operator policy asks for ${key}`, source: `matrix:${key}`, grantTier: "tool" };
+  };
+  const exact = check(toolName);
+  if (exact !== null) return exact;
+  const parts = toolName.split("__");
+  if (parts.length >= 3) {
+    const server = check(`mcp__${parts[1]}__*`);
+    if (server !== null) return server;
+  }
+  if (toolName.startsWith("mcp__")) {
+    const family = check("mcp__*");
+    if (family !== null) return family;
+  }
+  return null;
+}
+function grantsShortCircuit(toolName, agent, grants, tier, pattern) {
+  if (grants === void 0) return false;
+  for (const grant of Object.values(grants)) {
+    if (grant.tool !== toolName) continue;
+    if (tier === "pattern") {
+      if (grant.pattern !== pattern) continue;
+    } else {
+      if (grant.pattern !== void 0) continue;
+    }
+    if (grant.agent !== void 0 && grant.agent !== agent) continue;
+    return true;
+  }
+  return false;
+}
+function decideSubCommand(sub, config, agent) {
+  const agentCfg = agent !== void 0 ? config.agents?.[agent] : void 0;
+  const agentPatterns = agentCfg?.bashPatterns;
+  if (agentPatterns !== void 0) {
+    for (const { pattern, policy } of agentPatterns) {
+      if (!matchBashPattern(pattern, sub)) continue;
+      if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `agent pattern:${pattern}` };
+      if (policy === "ask") return { kind: "ask", reason: `bash rule "${pattern}" requires approval`, source: `agent pattern:${pattern}`, grantTier: "pattern", pattern };
+      return { kind: "allow", source: `agent pattern:${pattern}` };
+    }
+  }
+  const agentTool = agentCfg?.tools?.bash;
+  if (agentTool !== void 0) {
+    if (agentTool === "deny") return { kind: "deny", reason: `agent policy denies bash`, source: `agent:${agent}` };
+    if (agentTool === "ask") return { kind: "ask", reason: `agent policy asks for bash`, source: `agent:${agent}`, grantTier: "tool" };
+    return { kind: "allow", source: `agent:${agent}` };
+  }
+  const globalPatterns = [...config.bashPatterns ?? [], ...SHIPPED_BASH_PATTERNS];
+  for (const { pattern, policy } of globalPatterns) {
+    if (!matchBashPattern(pattern, sub)) continue;
+    if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` };
+    if (policy === "ask") return { kind: "ask", reason: `bash rule "${pattern}" requires approval`, source: `pattern:${pattern}`, grantTier: "pattern", pattern };
+    return { kind: "allow", source: `pattern:${pattern}` };
+  }
+  const globalTool = config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
+  if (globalTool === "deny") return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
+  if (globalTool === "ask") return { kind: "ask", reason: "operator policy asks for bash", source: "matrix:global", grantTier: "tool" };
+  return { kind: "allow", source: "matrix:global" };
+}
+function resolvePolicy(input) {
+  const { toolName, command, sandboxMode } = input;
+  const agent = input.agent ?? "(unknown)";
+  if (sandboxMode === "read-only" && MUTATION_TOOLS.has(toolName)) {
+    return { kind: "deny", reason: `read-only session: ${toolName} mutations are blocked`, source: "session:read-only" };
+  }
+  if (toolName === "bash") {
+    if (command === void 0 || command.trim().length === 0) {
+      return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
+    }
+    const subs = splitCompoundCommand(command);
+    if (subs.length === 0) return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
+    let sawAsk = null;
+    let firstAllow = null;
+    for (const raw of subs) {
+      const sub = stripEnvPrefixes(raw);
+      const subDecision = decideSubCommand(sub, input.config, agent);
+      if (subDecision.kind === "deny") {
+        const suffix = subs.length > 1 ? " (part of compound command)" : "";
+        return { kind: "deny", reason: `${subDecision.reason}${suffix}`, source: subDecision.source };
+      }
+      if (subDecision.kind === "ask" && sawAsk === null) sawAsk = subDecision;
+      if (subDecision.kind === "allow" && firstAllow === null) firstAllow = subDecision;
+    }
+    if (sawAsk !== null) {
+      const who = input.agent;
+      if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0 && grantsShortCircuit(toolName, who, input.config.grants, "pattern", sawAsk.pattern)) {
+        return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
+      }
+      if (sawAsk.grantTier === "tool" && grantsShortCircuit(toolName, who, input.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
+      }
+      return sawAsk;
+    }
+    return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
+  }
+  const agentCfg = input.agent !== void 0 ? input.config.agents?.[input.agent] : void 0;
+  const agentPolicy = agentCfg?.tools?.[toolName];
+  if (agentPolicy !== void 0) {
+    if (agentPolicy === "deny") return { kind: "deny", reason: `agent policy denies ${toolName}`, source: `agent:${agent}` };
+    if (agentPolicy === "ask") {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
+      }
+      return { kind: "ask", reason: `agent policy asks for ${toolName}`, source: `agent:${agent}`, grantTier: "tool" };
+    }
+    return { kind: "allow", source: `agent:${agent}` };
+  }
+  const globalPolicy = input.config.tools?.[toolName] ?? SHIPPED_TOOL_DEFAULTS[toolName];
+  if (globalPolicy !== void 0) {
+    if (globalPolicy === "deny") return { kind: "deny", reason: `operator policy denies ${toolName}`, source: "matrix:global" };
+    if (globalPolicy === "ask") {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
+      }
+      return { kind: "ask", reason: `operator policy asks for ${toolName}`, source: "matrix:global", grantTier: "tool" };
+    }
+    return { kind: "allow", source: "matrix:global" };
+  }
+  if (isMcpToolName(toolName)) {
+    const ladder = mcpLadder(toolName, input.config.tools);
+    if (ladder !== null) return ladder;
+  }
+  const fallback = input.config.defaults?.unknownTools ?? "ask";
+  if (fallback === "deny") return { kind: "deny", reason: `unconfigured tool ${toolName} denied by default`, source: "defaults" };
+  if (fallback === "ask") {
+    if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
+      return { kind: "allow", source: "grant:tool" };
+    }
+    return { kind: "ask", reason: `unconfigured tool ${toolName} requires approval (default)`, source: "defaults", grantTier: "tool" };
+  }
+  return { kind: "allow", source: "defaults" };
+}
+function isMcpToolName(toolName) {
+  return toolName.startsWith("mcp__");
+}
+function grantProposalFor(decision, toolName, command, agent) {
+  if (decision.grantTier === "pattern" && decision.pattern !== void 0) {
+    return { tool: toolName, pattern: decision.pattern, agent };
+  }
+  return { tool: toolName, agent };
+}
+
 // src/index.ts
 var publishedCatalog = /* @__PURE__ */ new Map();
 var name = "enpoi-capabilities";
@@ -167,7 +424,8 @@ var OrchestrationSettingsSchema = Schema.object({
   mcpStatus: Schema.dict(Schema.any()).default({}),
   personas: Schema.dict(Schema.any()).default({}),
   parameters: Schema.any(),
-  uiPreferences: Schema.any()
+  uiPreferences: Schema.any(),
+  permissions: Schema.any()
 });
 function apply(ctx) {
   try {
@@ -346,6 +604,99 @@ function apply(ctx) {
     const { messages: filtered } = filterSkillCatalogMessages(messages, disabledSkillIds, publishedCatalog, sessionId);
     return { ...decision, messages: filtered };
   }));
+  const pendingGrants = /* @__PURE__ */ new Map();
+  function readPermissionConfig() {
+    try {
+      const settings = ctx.get("settings");
+      return settings?.get?.(ORCH_NS)?.permissions ?? {};
+    } catch {
+      return {};
+    }
+  }
+  function readSandboxMode(agent) {
+    try {
+      const session = agent?.session;
+      if (session === void 0 || typeof session.eventAt !== "function") return void 0;
+      for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt(seq);
+        if (event?.type === "sandbox/mode") return String(event.data.mode ?? "");
+      }
+      const shell = ctx.get("shell");
+      return shell?.sandboxMode;
+    } catch {
+      return void 0;
+    }
+  }
+  function agentNameOf(exec) {
+    const a = exec.agent;
+    if (a === void 0) return void 0;
+    return a.agentPreset ?? a.preset ?? a.name ?? a.label;
+  }
+  const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
+    const state = initialCapabilitiesState(getGlobalDefaults());
+    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state);
+    if (!capabilityDecision.allowed) {
+      return { kind: "deny", reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` };
+    }
+    const config = readPermissionConfig();
+    const isBash = exec.name === "bash";
+    const decision = resolvePolicy({
+      toolName: exec.name,
+      command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
+      agent: agentNameOf(exec),
+      config,
+      sandboxMode: readSandboxMode(exec.agent)
+    });
+    if (decision.kind === "allow") return await next();
+    if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
+    if (typeof exec.callId === "string" && pendingGrants.size < 128) {
+      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : void 0, agentNameOf(exec)));
+    }
+    return { kind: "ask", reason: decision.reason };
+  }));
+  ctx.effect(() => disposePolicy, "enpoi-capabilities: permission policy pre-execute");
+  function persistGrant(proposal) {
+    try {
+      const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const grant = { id, tool: proposal.tool, ...proposal.pattern !== void 0 ? { pattern: proposal.pattern } : {}, ...proposal.agent !== void 0 ? { agent: proposal.agent } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+      const settings = ctx.get("settings");
+      const existing = readPermissionConfig().grants ?? {};
+      const next = { ...existing, [id]: grant };
+      void settings?.mutate?.([{ op: "set", path: ["permissions", "grants"], value: next }], ORCH_NS);
+      process.stderr.write(`[enpoi-capabilities] standing grant persisted: ${grant.tool}${grant.pattern ? ` ${grant.pattern}` : ""}${grant.agent ? ` (agent ${grant.agent})` : ""}
+`);
+    } catch (error) {
+      process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}
+`);
+    }
+  }
+  const disposeGrantWatch = ctx.on("session/event", ((session, event) => {
+    if (event?.type !== "approval/decided") return void 0;
+    const outcome = event.data?.outcome;
+    if (outcome !== "allowed-always") return void 0;
+    const approvalId = event.data.id;
+    if (approvalId === void 0) return void 0;
+    let callId;
+    if (typeof session?.eventAt === "function") {
+      for (let seq = event.seq ?? session.seq ?? 0; seq >= 0 && seq >= (event.seq ?? 0) - 64; seq -= 1) {
+        const e = session.eventAt(seq);
+        if (e?.type === "approval/asked" && e.data.id === approvalId) {
+          const c = e.data.callId;
+          if (c !== void 0) callId = String(c);
+          break;
+        }
+      }
+    }
+    if (callId === void 0) {
+      callId = [...pendingGrants.keys()][0];
+    }
+    if (callId === void 0) return void 0;
+    const proposal = pendingGrants.get(callId);
+    pendingGrants.delete(callId);
+    if (proposal !== void 0) persistGrant(proposal);
+    return void 0;
+  }));
+  ctx.effect(() => disposeGrantWatch, "enpoi-capabilities: allow-always grant writer");
 }
 export {
   CapabilitiesSchema,

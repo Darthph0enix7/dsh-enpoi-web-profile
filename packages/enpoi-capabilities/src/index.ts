@@ -22,6 +22,10 @@ import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
 import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
+import {
+  resolvePolicy, grantProposalFor, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS,
+  type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
+} from './policy'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -51,6 +55,7 @@ export const OrchestrationSettingsSchema = Schema.object({
   personas: Schema.dict(Schema.any()).default({}),
   parameters: Schema.any(),
   uiPreferences: Schema.any(),
+  permissions: Schema.any(),
 })
 
 export function apply(ctx: Context): void {
@@ -292,6 +297,125 @@ export function apply(ctx: Context): void {
     const { messages: filtered } = filterSkillCatalogMessages(messages, disabledSkillIds, publishedCatalog, sessionId)
     return { ...decision, messages: filtered }
   }) as (...args: unknown[]) => unknown)
+
+  // ── Permission policy engine (doc 55) ────────────────────────────────────
+  // Fresh per dispatch; settings.yaml is the single source of truth. The
+  // capability-disabled check runs HERE (not via the separate tools.guard):
+  // the registry resolves serviceAsk BEFORE guardReason, so a disabled tool
+  // with an ask policy would prompt first and deny after (Oracle amendment).
+  // Grants short-circuit asks at the granularity the ask arose at; deny
+  // always terminates; grants never upgrade a deny.
+
+  /** Pending ask proposals by callId — consumed by allow-always grant writes. */
+  const pendingGrants = new Map<string, GrantProposal>()
+
+  function readPermissionConfig(): PermissionPolicyConfig {
+    try {
+      const settings = ctx.get('settings') as { get?: (ns: unknown) => { permissions?: PermissionPolicyConfig } } | undefined
+      return settings?.get?.(ORCH_NS)?.permissions ?? {}
+    } catch {
+      return {}
+    }
+  }
+
+  function readSandboxMode(agent: { session?: { id?: string } } | undefined): string | undefined {
+    try {
+      const session = agent?.session
+      if (session === undefined || typeof session.eventAt !== 'function') return undefined
+      for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt(seq)
+        if (event?.type === 'sandbox/mode') return String((event.data as { mode?: string }).mode ?? '')
+      }
+      const shell = ctx.get('shell') as { sandboxMode?: string } | undefined
+      return shell?.sandboxMode
+    } catch {
+      return undefined
+    }
+  }
+
+  function agentNameOf(exec: { agent?: { preset?: string; agentPreset?: string; label?: string; name?: string } }): string | undefined {
+    const a = exec.agent
+    if (a === undefined) return undefined
+    return a.agentPreset ?? a.preset ?? a.name ?? a.label
+  }
+
+  const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: { session?: unknown } }, next: () => Promise<{ kind: string; reason?: string }>) => {
+    // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
+    // before guardReason, so a disabled tool with an ask policy would otherwise
+    // prompt and then deny after the user clicks allow.
+    const state = initialCapabilitiesState(getGlobalDefaults())
+    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state)
+    if (!capabilityDecision.allowed) {
+      return { kind: 'deny', reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` }
+    }
+    const config = readPermissionConfig()
+    const isBash = exec.name === 'bash'
+    const decision = resolvePolicy({
+      toolName: exec.name,
+      command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
+      agent: agentNameOf(exec),
+      config,
+      sandboxMode: readSandboxMode(exec.agent as { session?: unknown } | undefined),
+    })
+    if (decision.kind === 'allow') return await next()
+    if (decision.kind === 'deny') return { kind: 'deny', reason: decision.reason }
+    // ask: stash the grant proposal for the host-side allow-always writer.
+    if (typeof exec.callId === 'string' && pendingGrants.size < 128) {
+      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : undefined, agentNameOf(exec)))
+    }
+    return { kind: 'ask', reason: decision.reason }
+  }) as (...args: unknown[]) => unknown)
+  ctx.effect(() => disposePolicy, 'enpoi-capabilities: permission policy pre-execute')
+
+  // Host-side allow-always persistence (Oracle amendment 2): the card only
+  // answers; the host observes the decided outcome and writes the standing
+  // grant into settings under the file lock — no client-side read-modify-write.
+  function persistGrant(proposal: GrantProposal): void {
+    try {
+      const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+      const grant: StandingGrant = { id, tool: proposal.tool, ...(proposal.pattern !== undefined ? { pattern: proposal.pattern } : {}), ...(proposal.agent !== undefined ? { agent: proposal.agent } : {}), createdAt: new Date().toISOString() }
+      const settings = ctx.get('settings') as {
+        mutate?: (ops: Array<{ op: string; path: string[]; value?: unknown }>, ns?: string) => Promise<unknown> | unknown
+      } | undefined
+      const existing = readPermissionConfig().grants ?? {}
+      const next = { ...existing, [id]: grant }
+      void settings?.mutate?.([{ op: 'set', path: ['permissions', 'grants'], value: next }], ORCH_NS)
+      process.stderr.write(`[enpoi-capabilities] standing grant persisted: ${grant.tool}${grant.pattern ? ` ${grant.pattern}` : ''}${grant.agent ? ` (agent ${grant.agent})` : ''}\n`)
+    } catch (error) {
+      process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}\n`)
+    }
+  }
+
+  const disposeGrantWatch = ctx.on('session/event', ((session: { id?: string; eventAt?: (seq: number) => { type: string; data?: Record<string, unknown>; seq?: number } | undefined; seq?: number }, event: { type: string; seq?: number; data?: Record<string, unknown> }) => {
+    if (event?.type !== 'approval/decided') return undefined
+    const outcome = event.data?.outcome
+    if (outcome !== 'allowed-always') return undefined
+    const approvalId = (event.data as { id?: string }).id
+    if (approvalId === undefined) return undefined
+    // The decided event carries the APPROVAL id; the paired asked event carries
+    // the exec callId our pending-proposal map is keyed by. Pair them by scan.
+    let callId: string | undefined
+    if (typeof session?.eventAt === 'function') {
+      for (let seq = (event.seq ?? session.seq ?? 0); seq >= 0 && seq >= (event.seq ?? 0) - 64; seq -= 1) {
+        const e = session.eventAt(seq)
+        if (e?.type === 'approval/asked' && (e.data as { id?: string }).id === approvalId) {
+          const c = (e.data as { callId?: string }).callId
+          if (c !== undefined) callId = String(c)
+          break
+        }
+      }
+    }
+    if (callId === undefined) {
+      // Fallback: pop the oldest pending proposal (single-approval flows).
+      callId = [...pendingGrants.keys()][0]
+    }
+    if (callId === undefined) return undefined
+    const proposal = pendingGrants.get(callId)
+    pendingGrants.delete(callId)
+    if (proposal !== undefined) persistGrant(proposal)
+    return undefined
+  }) as (...args: unknown[]) => unknown)
+  ctx.effect(() => disposeGrantWatch, 'enpoi-capabilities: allow-always grant writer')
 }
 
 export type { CapabilitiesState, CapabilityDescriptor, CapabilityKind } from './types'
