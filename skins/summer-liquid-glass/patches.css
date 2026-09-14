@@ -117,3 +117,14 @@ a {
     --dsw-glass-float: rgba(16, 22, 37, 0.9);
   }
 }
+
+/* ── enpoi: sidebar nav accent legibility ──────────────────────────────────
+   The v2 skin set --dsw-specific-sidebar-nav-item-active-accent to a dark
+   navy (#1f3a56), but the sidebar rail renders it as the ICON COLOR of the
+   active/clicked item — dark-on-dark, unreadable. The accent is a foreground
+   token; give it the theme's bright cyan instead. (The matching fill tokens,
+   --dsw-specific-sidebar-nav-item-active/-hover, stay dark: those ARE
+   backgrounds.) */
+:root {
+  --dsw-specific-sidebar-nav-item-active-accent: #7FE3EC;
+}
