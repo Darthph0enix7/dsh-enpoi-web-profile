@@ -483,6 +483,22 @@ case "pull"
                 echo "  ✔ Sync merge script deployed"
             end
 
+            # Deploy the skin guard (keeps the liquid-glass skin from being
+            # nulled by a ui-skin-center write of the stock selection)
+            if test -f "$g_dotfiles/scripts/dsh-skin-guard.mjs"
+                mkdir -p "$HOME/.local/bin"
+                cp "$g_dotfiles/scripts/dsh-skin-guard.mjs" "$HOME/.local/bin/dsh-skin-guard.mjs"
+                chmod +x "$HOME/.local/bin/dsh-skin-guard.mjs"
+                for unit in dsh-skin-guard.service dsh-skin-guard.path
+                    if test -f "$g_dotfiles/systemd/$unit"
+                        cp "$g_dotfiles/systemd/$unit" "$HOME/.config/systemd/user/$unit"
+                    end
+                end
+                systemctl --user daemon-reload 2>/dev/null
+                systemctl --user enable --now dsh-skin-guard.path 2>/dev/null
+                echo "  ✔ Skin guard deployed"
+            end
+
             # Check for locally-changed files before overwriting
             # (settings.yaml is EXCLUDED — local is always the merged
             # baseline+patch, repo holds the stripped baseline by design)
