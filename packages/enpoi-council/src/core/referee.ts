@@ -121,6 +121,12 @@ export async function runRefereePass(
     input.spec.scopeContract ? `SCOPE CONTRACT:\n${input.spec.scopeContract}` : '',
     `CURRENT LEDGER:\n${input.ledgerText}`,
     input.vaultDeltaText ? `NEW EVIDENCE THIS EPOCH:\n${input.vaultDeltaText}` : '',
+    // Delivered memory (stateless-judge principle): the prior pass's own
+    // directives, so a fresh referee stays coherent across epochs — it can
+    // acknowledge compliance and avoid repeating or contradicting itself.
+    input.previousDirectives !== undefined && Object.keys(input.previousDirectives).length > 0
+      ? `YOUR DIRECTIVES FROM THE PREVIOUS EPOCH (you are a fresh pass of the same referee — keep them coherent; drop what was addressed, follow through on what was not):\n${Object.entries(input.previousDirectives).map(([seat, text]) => `${seat}: ${text}`).join('\n')}`
+      : '',
     `SEAT OUTPUTS THIS EPOCH:\n${input.roundTranscript}`,
     'Produce the referee JSON now. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch.',
   ].filter(Boolean).join('\n\n')
