@@ -80,6 +80,9 @@ export const SHIPPED_BASH_PATTERNS: BashPattern[] = [
   { pattern: 'halt', policy: 'ask' },
   { pattern: 'chmod -R *', policy: 'ask' },
   { pattern: 'chown -R *', policy: 'ask' },
+  // The OpenCode catch-all: every command not explicitly listed runs free.
+  // Only the dangerous list above asks.
+  { pattern: '*', policy: 'allow' },
 ]
 
 /**
@@ -149,6 +152,7 @@ export function stripEnvPrefixes(subCommand: string): string {
  */
 export function matchBashPattern(pattern: string, subCommand: string): boolean {
   const p = pattern.trim()
+  if (p === '*') return true
   const tokens = subCommand.split(/\s+/)
   const argv0 = tokens[0] ?? ''
   if (!p.includes(' ') && !p.includes('*')) return argv0 === p

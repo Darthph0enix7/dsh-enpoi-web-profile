@@ -98,8 +98,16 @@ describe('resolution order (Oracle-amended)', () => {
       tools: { bash: 'ask' },
       grants: { g3: { id: 'g3', tool: 'bash', agent: 'fixer' } },
     }
+    // The shipped catch-all now allows unpatterned commands — the grant only
+    // matters when the tool-level policy would ask (a bare bash with no
+    // patterns at all). Scope both to a patternless-ask config to keep the
+    // grant-tier semantics under test.
     expect(resolvePolicy({ toolName: 'bash', command: 'ls', agent: 'fixer', config: cfg }).kind).toBe('allow')
-    expect(resolvePolicy({ toolName: 'bash', command: 'ls', agent: 'designer', config: cfg }).kind).toBe('ask')
+    // The shipped catch-all allows unpatterned commands, so the agent-scope
+    // grant check must use a config that makes THIS command ask: an explicit
+    // user pattern (user patterns outrank the shipped catch-all).
+    const designerCfg: PermissionPolicyConfig = { tools: { bash: 'ask' }, grants: cfg.grants, bashPatterns: [{ pattern: 'ls', policy: 'ask' }] }
+    expect(resolvePolicy({ toolName: 'bash', command: 'ls', agent: 'designer', config: designerCfg }).kind).toBe('ask')
   })
 
   it('mcp wildcards: exact > server > family > default', () => {
@@ -111,10 +119,13 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'mcp__ue__do_thing', config: cfg2 }).kind).toBe('deny')
   })
 
-  it('unconfigured tools default to ask; configured allow wins over unknown default', () => {
+  it('unconfigured tools default to ask; unpatterned bash runs free (catch-all)', () => {
     expect(resolvePolicy({ toolName: 'brand_new_tool', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'read', config: EMPTY }).kind).toBe('allow')
-    expect(resolvePolicy({ toolName: 'bash', command: 'ls', config: EMPTY }).kind).toBe('ask')
+    // Adam's OpenCode model: unpatterned commands allow; only the dangerous
+    // list asks.
+    expect(resolvePolicy({ toolName: 'bash', command: 'ls', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/x', config: EMPTY }).kind).toBe('ask')
   })
 
   it('shipped defaults: adam-like flow works out of the box', () => {
