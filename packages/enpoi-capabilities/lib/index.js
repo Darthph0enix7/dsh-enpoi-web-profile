@@ -302,6 +302,8 @@ function grantsShortCircuit(toolName, agent, grants, tier, pattern) {
 }
 var HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</;
 var DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/;
+var OPAQUE_EXECUTORS = /* @__PURE__ */ new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "source", "."]);
+var INLINE_INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/;
 function decideSubCommand(sub, config, agent) {
   const agentCfg = agent !== void 0 ? config.agents?.[agent] : void 0;
   const agentPatterns = agentCfg?.bashPatterns;
@@ -364,6 +366,23 @@ function resolvePolicy(input) {
         return { kind: "allow", source: "grant:tool" };
       }
       return sawAsk;
+    }
+    const opaque = subs.map(stripEnvPrefixes).find((sub) => {
+      const argv0 = sub.split(/\s+/)[0] ?? "";
+      if (OPAQUE_EXECUTORS.has(argv0)) return true;
+      return INLINE_INTERPRETERS.test(argv0) && /(?:^|\s)(?:-c|-e|--eval)\b/.test(sub);
+    });
+    if (opaque !== void 0) {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
+        return { kind: "allow", source: "grant:command" };
+      }
+      return {
+        kind: "ask",
+        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code \u2014 approve explicitly`,
+        source: "scan:opaque-executor",
+        grantTier: "pattern",
+        pattern: command
+      };
     }
     if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
       if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {

@@ -123,6 +123,18 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'git rm file.txt', config: EMPTY }).kind).toBe('allow')
   })
 
+  it('opaque executors ask (payload pipes and inline interpreter code)', () => {
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo cm0= | base64 -d | bash', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'bash script.sh', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'python -c "import os; os.remove(\'x\')"', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'sh -c "ls"', config: EMPTY }).kind).toBe('ask')
+    // plain interpreter invocations of a file are ordinary work
+    expect(resolvePolicy({ toolName: 'bash', command: 'python script.py --flag', config: EMPTY }).kind).toBe('allow')
+    // an Always-allow grant pins the exact command
+    const cfg = { grants: { g: { id: 'g', tool: 'bash', pattern: 'bash script.sh' } } }
+    expect(resolvePolicy({ toolName: 'bash', command: 'bash script.sh', config: cfg }).kind).toBe('allow')
+  })
+
   it('multi-line compound commands evaluate every line', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'ls -la\nrm -rf /tmp/x', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'bash', command: 'ls -la\necho done', config: EMPTY }).kind).toBe('allow')

@@ -229,6 +229,12 @@ const HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exe
  */
 const DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/
 
+/** Interpreters whose invocation can execute arbitrary code. */
+const OPAQUE_EXECUTORS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'eval', 'source', '.'])
+
+/** Interpreters where only the inline (-c/-e/--eval) form is opaque. */
+const INLINE_INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/
+
 /** One sub-command's decision through the four tiers (no grants, no compound). */
 function decideSubCommand(
   sub: string,
@@ -321,7 +327,28 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
       }
       return sawAsk
     }
-    // Fail-safe for hidden surfaces: an otherwise-allowed command that embeds
+    // Fail-safe 1: opaque executors. A shell/interpreter invocation can run
+    // anything (including `base64 -d | bash` payloads) regardless of the
+    // verbs visible in the text — ask explicitly. An Always-allow grant pins
+    // the exact raw command string.
+    const opaque = subs.map(stripEnvPrefixes).find((sub) => {
+      const argv0 = sub.split(/\s+/)[0] ?? ''
+      if (OPAQUE_EXECUTORS.has(argv0)) return true
+      return INLINE_INTERPRETERS.test(argv0) && /(?:^|\s)(?:-c|-e|--eval)\b/.test(sub)
+    })
+    if (opaque !== undefined) {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'pattern', command)) {
+        return { kind: 'allow', source: 'grant:command' }
+      }
+      return {
+        kind: 'ask',
+        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code — approve explicitly`,
+        source: 'scan:opaque-executor',
+        grantTier: 'pattern',
+        pattern: command,
+      }
+    }
+    // Fail-safe 2: hidden surfaces: an otherwise-allowed command that embeds
     // a dangerous verb inside substitution/wrapper syntax asks explicitly.
     // An Always-allow grant pins the exact raw command string.
     if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
