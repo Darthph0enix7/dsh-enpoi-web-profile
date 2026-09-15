@@ -110,6 +110,30 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'ls', agent: 'designer', config: designerCfg }).kind).toBe('ask')
   })
 
+  it('hidden surfaces: substitution/wrapper with a dangerous verb asks', () => {
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo $(rm -rf /tmp/x)', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'bash -c "rm -rf /tmp/x"', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'find . | xargs rm', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo `rm file`', config: EMPTY }).kind).toBe('ask')
+    // plain dangerous commands already ask structurally
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/x', config: EMPTY }).kind).toBe('ask')
+    // a benign hidden surface stays allowed
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo $(date)', config: EMPTY }).kind).toBe('allow')
+    // git rm is structurally matched by `git *` and has no hidden surface
+    expect(resolvePolicy({ toolName: 'bash', command: 'git rm file.txt', config: EMPTY }).kind).toBe('allow')
+  })
+
+  it('multi-line compound commands evaluate every line', () => {
+    expect(resolvePolicy({ toolName: 'bash', command: 'ls -la\nrm -rf /tmp/x', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'ls -la\necho done', config: EMPTY }).kind).toBe('allow')
+  })
+
+  it('memory tools are allowed by default (sub-agents remember)', () => {
+    expect(resolvePolicy({ toolName: 'memory_save', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'memory_search', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'memory_rescind', config: EMPTY }).kind).toBe('allow')
+  })
+
   it('mcp wildcards: exact > server > family > default', () => {
     const cfg: PermissionPolicyConfig = { tools: { 'mcp__plane__*': 'ask' } }
     expect(resolvePolicy({ toolName: 'mcp__plane__create_page', config: cfg }).kind).toBe('ask')

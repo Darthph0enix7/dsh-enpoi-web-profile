@@ -26,10 +26,15 @@ describe('evidence fencing (doc 54 §6, Oracle amendment #2)', () => {
   })
 
   it('anti-leak core is intact in both tiers', () => {
-    for (const t of ['send_message', 'subagent', 'bash', 'edit', 'write', 'memory_save']) {
+    // bash and memory_search are now ENABLED for seats (operator default:
+    // seats may run analysis commands and search their own memory).
+    for (const t of ['send_message', 'subagent', 'edit', 'write', 'memory_save']) {
       expect(DEBATER_DENIED_TOOLS).toContain(t)
       expect(COUNCIL_DENIED_TOOLS).toContain(t)
     }
+    expect(DEBATER_DENIED_TOOLS).not.toContain('bash')
+    expect(COUNCIL_DENIED_TOOLS).not.toContain('memory_search')
+    expect(DEBATER_DENIED_TOOLS).not.toContain('memory_search')
   })
 
   it('never names run_code (reserved PTC transport)', () => {

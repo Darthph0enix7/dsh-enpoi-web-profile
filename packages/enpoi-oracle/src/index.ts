@@ -59,8 +59,7 @@ const ORACLE_TOOL_FILTER = {
     'subagent_claude_code', 'roundtable', 'chorus',
     'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal',
     'ralph', 'workflow', 'job_output', 'job_list', 'job_kill',
-    'bash', 'edit', 'write', 'str_replace_editor', 'skill', 'ask_user_question',
-    'todo_write', 'memory_save', 'memory_rescind', 'memory_confirm', 'memory_search',
+    'ask_user_question',
     'send_message', 'interrupt_agent', 'list_agents',
   ],
 }

@@ -92,9 +92,9 @@ export function estimateTokens(text: string): number {
 export const COUNCIL_DENIED_TOOLS = [
   'send_message',
   'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
-  'subagent_claude_code', 'bash', 'edit', 'write', 'str_replace_editor',
-  'todo_write', 'plan_mode', 'goal', 'roundtable', 'chorus',
-  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
+  'subagent_claude_code', 'edit', 'write', 'str_replace_editor',
+  'plan_mode', 'goal', 'roundtable', 'chorus',
+  'memory_save', 'memory_rescind', 'memory_confirm',
   'workflow', 'ralph',
   'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode',
   'job_output', 'job_list', 'job_kill',

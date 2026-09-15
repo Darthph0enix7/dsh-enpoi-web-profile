@@ -52,7 +52,7 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   read: 'allow', glob: 'allow', grep: 'allow', read_image: 'allow',
   web_search: 'allow', web_fetch: 'allow',
   todo_write: 'allow', todo_read: 'allow',
-  memory_search: 'allow', memory_save: 'ask', memory_rescind: 'ask', memory_confirm: 'ask',
+  memory_search: 'allow', memory_save: 'allow', memory_rescind: 'allow', memory_confirm: 'allow',
   oracle_review: 'allow', request_evidence: 'allow',
   roundtable: 'allow', chorus: 'allow', subagent: 'allow', task: 'allow',
   job_output: 'allow', job_list: 'allow', job_kill: 'ask',
@@ -215,6 +215,20 @@ export function grantsShortCircuit(
   return false
 }
 
+/**
+ * Shell constructs that can hide a command from per-sub-command evaluation:
+ * command substitution, backticks, wrapper shells, eval, xargs, find -exec,
+ * process substitution, heredocs.
+ */
+const HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</
+
+/**
+ * Dangerous verbs anywhere in the raw text (word-boundary), used ONLY when a
+ * hidden surface is present — a plain `git rm` never trips this because its
+ * sub-command is evaluated structurally and matched by `git *`.
+ */
+const DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/
+
 /** One sub-command's decision through the four tiers (no grants, no compound). */
 function decideSubCommand(
   sub: string,
@@ -306,6 +320,21 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
         return { kind: 'allow', source: 'grant:tool' }
       }
       return sawAsk
+    }
+    // Fail-safe for hidden surfaces: an otherwise-allowed command that embeds
+    // a dangerous verb inside substitution/wrapper syntax asks explicitly.
+    // An Always-allow grant pins the exact raw command string.
+    if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'pattern', command)) {
+        return { kind: 'allow', source: 'grant:command' }
+      }
+      return {
+        kind: 'ask',
+        reason: 'command embeds a shell expansion or wrapper containing a destructive verb — approve explicitly',
+        source: 'scan:hidden-danger',
+        grantTier: 'pattern',
+        pattern: command,
+      }
     }
     return { kind: 'allow', source: firstAllow?.source ?? 'policy:all-subcommands-allowed' }
   }

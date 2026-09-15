@@ -163,9 +163,9 @@ var SHIPPED_TOOL_DEFAULTS = {
   todo_write: "allow",
   todo_read: "allow",
   memory_search: "allow",
-  memory_save: "ask",
-  memory_rescind: "ask",
-  memory_confirm: "ask",
+  memory_save: "allow",
+  memory_rescind: "allow",
+  memory_confirm: "allow",
   oracle_review: "allow",
   request_evidence: "allow",
   roundtable: "allow",
@@ -300,6 +300,8 @@ function grantsShortCircuit(toolName, agent, grants, tier, pattern) {
   }
   return false;
 }
+var HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</;
+var DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/;
 function decideSubCommand(sub, config, agent) {
   const agentCfg = agent !== void 0 ? config.agents?.[agent] : void 0;
   const agentPatterns = agentCfg?.bashPatterns;
@@ -362,6 +364,18 @@ function resolvePolicy(input) {
         return { kind: "allow", source: "grant:tool" };
       }
       return sawAsk;
+    }
+    if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
+        return { kind: "allow", source: "grant:command" };
+      }
+      return {
+        kind: "ask",
+        reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly",
+        source: "scan:hidden-danger",
+        grantTier: "pattern",
+        pattern: command
+      };
     }
     return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
   }
