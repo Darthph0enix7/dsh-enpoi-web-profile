@@ -8,13 +8,19 @@ import {
   type Config,
 } from '../src/index'
 
-/** Minimal session mock satisfying frameInput + append + seq reads. */
+/**
+ * Minimal session mock satisfying the keeper's reads: `frameInput` walks
+ * `snapshotEvents()`, and the distill path reads the log tail for its causal
+ * snapshot sequence — both must reflect the appended events.
+ */
 function makeSession(events: Array<{ type: string; seq: number; data: unknown }> = []) {
+  const log = [...events]
   return {
     id: 'test-session',
-    seq: events.length > 0 ? events[events.length - 1]!.seq : 0,
-    events,
-    append: vi.fn(),
+    get seq() { return log.length > 0 ? log[log.length - 1]!.seq : 0 },
+    events: log,
+    snapshotEvents: (): Array<{ type: string; seq: number; data: unknown }> => [...log],
+    append: vi.fn((event: { type: string; seq: number; data: unknown }) => { log.push(event) }),
   }
 }
 

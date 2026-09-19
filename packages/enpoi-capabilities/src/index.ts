@@ -53,6 +53,11 @@ export const OrchestrationSettingsSchema = Schema.object({
   mcpServers: Schema.dict(Schema.any()).default({}),
   mcpStatus: Schema.dict(Schema.any()).default({}),
   personas: Schema.dict(Schema.any()).default({}),
+  // Operator-defined specialist roles and councils (doc 59): declared here so
+  // the namespace contract is explicit rather than relying on unknown-key
+  // survival — both remain opaque plugin-owned vocabularies.
+  roles: Schema.dict(Schema.any()).default({}),
+  councils: Schema.dict(Schema.any()).default({}),
   parameters: Schema.any(),
   uiPreferences: Schema.any(),
   permissions: Schema.any(),

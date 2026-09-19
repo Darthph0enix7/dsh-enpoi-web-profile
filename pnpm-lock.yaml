@@ -102,12 +102,6 @@ importers:
         specifier: workspace:*
         version: link:../enpoi-contracts
 
-  packages/enpoi-dispatcher:
-    dependencies:
-      dsh-enpoi-memory:
-        specifier: workspace:*
-        version: link:../enpoi-memory
-
   packages/enpoi-file-revert:
     dependencies:
       dsh-enpoi-contracts:

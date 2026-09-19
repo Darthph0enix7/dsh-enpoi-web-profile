@@ -888,20 +888,16 @@ describe('Oracle B-fixes: applyResolution hardening', () => {
     // whose manifest carries a false flag from a pre-fix plugin write).
     env.manifest.records[1].isInterleaved = true
     await writeFile(join(env.work, 'a.txt'), 'v2')
-    // Restore-all: the target record (turn 2, post=v2) is interleaved → the
-    // target IS unreliable → the plugin's executeFileTransition degrades it to
-    // UNAVAILABLE (prompt). This is the Oracle E-class safety: the boundary
-    // post-state is genuinely ambiguous.
+    // Manifest healing recomputes interleaving from the chain itself, so the
+    // planted stale flag cannot degrade a target whose pre/post chain is
+    // consistent: the target resolves clean and, with the disk already at the
+    // boundary state, no write is attempted (no spurious conflict prompt).
     const target = env.manifest.resolveRestoreTarget('a.txt', null)
-    expect(target.isInterleaved).toBe(true)
+    expect(target.postBlobSha).toBe(sha256Of(Buffer.from('v2')))
+    expect(target.isInterleaved).toBe(false)
     const entry = env.manifest.aggregateSpan(10).get('a.txt')!
     const evalResult = evaluateBoundary(entry, target, sha256Of(Buffer.from('v2')))
-    // The evaluator alone returns a clean action; the plugin-level degrade
-    // (mode==='restore' && target.isInterleaved && action!=='prompt'/'skip')
-    // converts it to UNAVAILABLE. Assert the clean action + the flag that
-    // triggers the degrade.
     expect(evalResult.state).toBe(STATE.ALREADY_CLEAN)
-    expect(target.isInterleaved).toBe(true)
   })
 
   it('manifest init heals null/null records and recomputes stale interleaved flags', async () => {
