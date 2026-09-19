@@ -296,19 +296,4 @@
     # remain first-class native tools the model can call directly.
     mode: both
 
-# ── deliverables, runtime inspection, profile plugin management ──────────────
-# Upstream 0.1.6-alpha.2: the deliverables tool presents a turn's changed
-# files as review cards; tool-cordis inspects the Host/Client API surface; the
-# plugin manager installs persistent bundles into this profile.
-
-- id: present
-  name: '@deepseek-ai/dsh-tool-present'
-
-- id: tool-cordis
-  name: '@deepseek-ai/dsh-tool-cordis'
-
-- id: tool-plugin-manager
-  name: '@deepseek-ai/dsh-plugin-manager/tools'
-
-- id: command-goal
-  name: '@deepseek-ai/dsh-command-goal'
+# (new 0.1.6-alpha.2 tool rows intentionally not mounted here — allocation rule.)
