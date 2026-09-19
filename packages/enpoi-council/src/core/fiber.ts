@@ -101,6 +101,8 @@ export const COUNCIL_DENIED_TOOLS = [
   'skill', 'ask_user_question',
   // Councils cannot register sub-councils (amendment #10)
   'council_register',
+  // Read-only registry listing is an operator surface, not a seat surface.
+  'council_list',
   // Seats request evidence through the epoch broker (NEED_EVIDENCE), not the
   // synchronous request_evidence tool — one evidence ingress per seat.
   'request_evidence',

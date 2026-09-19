@@ -504,6 +504,8 @@ function apply(ctx) {
   import("@deepseek-ai/dsh-mcp-client").then(async (mcpClient) => {
     const mounted = /* @__PURE__ */ new Map();
     const mountedPending = /* @__PURE__ */ new Set();
+    const mountErrors = /* @__PURE__ */ new Map();
+    const publishedMountErrors = /* @__PURE__ */ new Map();
     function getServerCatalog() {
       try {
         const settings = ctx.get("settings");
@@ -529,6 +531,11 @@ function apply(ctx) {
       const want = new Set(
         Object.entries(catalog).filter(([id]) => state.mcp[id] === true).map(([id]) => id)
       );
+      for (const id of [...mountErrors.keys()]) {
+        if (want.has(id)) continue;
+        mountErrors.delete(id);
+        publishedMountErrors.delete(id);
+      }
       if (want.size > 0 || mounted.size > 0) {
         process.stderr.write(`[enpoi-capabilities] mcp sync: want=[${[...want].join(",")}] mounted=[${[...mounted.keys()].join(",")}]
 `);
@@ -560,9 +567,18 @@ function apply(ctx) {
           });
           await fiber;
           mounted.set(id, fiber);
+          mountErrors.delete(id);
+          publishedMountErrors.delete(id);
         } catch (error) {
-          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${String(error)}
+          const message = error instanceof Error ? error.message : String(error);
+          mountErrors.set(id, message);
+          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${message}
 `);
+          if (publishedMountErrors.get(id) !== message) {
+            publishedMountErrors.set(id, message);
+            void probeAll().catch(() => {
+            });
+          }
         } finally {
           mountedPending.delete(id);
         }
@@ -610,7 +626,13 @@ function apply(ctx) {
           continue;
         }
         const probe = await probeServer(id, def);
-        next[id] = { state: probe.state, mounted: false, checkedAt: Date.now(), ...probe.authError ? { authError: true } : {} };
+        next[id] = {
+          state: probe.state,
+          mounted: false,
+          checkedAt: Date.now(),
+          ...probe.authError ? { authError: true } : {},
+          ...mountErrors.has(id) ? { error: mountErrors.get(id) } : {}
+        };
       }
       const json = JSON.stringify(next);
       if (json === lastWrittenJson) return;

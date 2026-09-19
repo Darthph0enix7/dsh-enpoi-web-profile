@@ -123,6 +123,10 @@ export function apply(ctx: Context): void {
     type Fiber = { dispose: () => Promise<void> } & PromiseLike<unknown>
     const mounted = new Map<string, Fiber>()
     const mountedPending = new Set<string>()
+    /** Last mount failure per server id; surfaced through the status heartbeat. */
+    const mountErrors = new Map<string, string>()
+    /** Mount errors already pushed to `mcpStatus` (dedupe of the retry-triggering write). */
+    const publishedMountErrors = new Map<string, string>()
 
     function getServerCatalog(): Record<string, { serverName?: string; transport?: string; url?: string; headers?: Record<string, string>; toolCallTimeoutMs?: number; apiKeyEnv?: string }> {
       try {
@@ -160,6 +164,13 @@ export function apply(ctx: Context): void {
           .filter(([id]) => state.mcp[id] === true)
           .map(([id]) => id),
       )
+      // A server that left the catalog (removed) or was toggled off no longer
+      // has a failure to report; drop its error before publishing status.
+      for (const id of [...mountErrors.keys()]) {
+        if (want.has(id)) continue
+        mountErrors.delete(id)
+        publishedMountErrors.delete(id)
+      }
       if (want.size > 0 || mounted.size > 0) {
         process.stderr.write(`[enpoi-capabilities] mcp sync: want=[${[...want].join(',')}] mounted=[${[...mounted.keys()].join(',')}]\n`)
       }
@@ -191,8 +202,19 @@ export function apply(ctx: Context): void {
           }) as unknown as Fiber
           await fiber
           mounted.set(id, fiber)
+          mountErrors.delete(id)
+          publishedMountErrors.delete(id)
         } catch (error) {
-          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${String(error)}\n`)
+          const message = error instanceof Error ? error.message : String(error)
+          mountErrors.set(id, message)
+          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${message}\n`)
+          // Publish the failure once per message: the status write itself emits
+          // `settings/updated`, which retries the mount, so an unguarded publish
+          // would spin. A different message re-publishes; a successful mount clears it.
+          if (publishedMountErrors.get(id) !== message) {
+            publishedMountErrors.set(id, message)
+            void probeAll().catch(() => {})
+          }
         } finally {
           mountedPending.delete(id)
         }
@@ -210,7 +232,7 @@ export function apply(ctx: Context): void {
     //     INDEPENDENT of the enable toggle. green=mounted, blue=running but
     //     toggled off, grey=unreachable. Results land in
     //     enpoi-orchestration.mcpStatus so every client renders the same dots.
-    interface McpStatusEntry { state: 'online' | 'down'; mounted: boolean; checkedAt: number; authError?: boolean }
+    interface McpStatusEntry { state: 'online' | 'down'; mounted: boolean; checkedAt: number; authError?: boolean; error?: string }
     let lastWrittenJson = ''
 
     /** One Streamable-HTTP liveness handshake; any HTTP response ⇒ online. */
@@ -251,7 +273,13 @@ export function apply(ctx: Context): void {
           continue
         }
         const probe = await probeServer(id, def)
-        next[id] = { state: probe.state, mounted: false, checkedAt: Date.now(), ...(probe.authError ? { authError: true } : {}) }
+        next[id] = {
+          state: probe.state,
+          mounted: false,
+          checkedAt: Date.now(),
+          ...(probe.authError ? { authError: true } : {}),
+          ...(mountErrors.has(id) ? { error: mountErrors.get(id) } : {}),
+        }
       }
       const json = JSON.stringify(next)
       if (json === lastWrittenJson) return

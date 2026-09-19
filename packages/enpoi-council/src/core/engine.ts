@@ -30,7 +30,7 @@ import { Ledger } from './ledger.ts'
 import { afterChallenge, evaluate, initialRuntime, trackFlipRun, type StoppingRuntime } from './stopping.ts'
 import { extractProposals, runRefereePass } from './referee.ts'
 import type { CouncilParams } from './spec.ts'
-import type { CouncilSpec } from './spec.ts'
+import type { CouncilSpec, DeclarativeCouncilSpec } from './spec.ts'
 import { EvidenceVault } from './vault.ts'
 
 export interface CouncilRuntimeResult {
@@ -56,6 +56,13 @@ export interface RunCouncilOptions {
   signal: AbortSignal
   /** Round-cap override from the tool call (safety net only). */
   maxRoundsOverride?: number
+  /**
+   * Chair prompt override for settings-defined councils. `systemPrompt`
+   * replaces the Chair persona; `userPromptTemplate` replaces the compiled
+   * synthesis prompt with the documented placeholders substituted. Omitted for
+   * the built-in councils — their chair prompts stay byte-identical.
+   */
+  chairTemplate?: DeclarativeCouncilSpec['chairTemplate']
   onRound?: (info: { epoch: number; audit: Record<string, unknown> }) => void
 }
 
@@ -404,6 +411,7 @@ export async function runCouncil(
     try {
       deliverable = await runChair(ctx, parent, spec, {
         query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
+        chairTemplate: opts.chairTemplate,
       })
     } catch (firstErr) {
       if (signal.aborted) throw firstErr
@@ -412,6 +420,7 @@ export async function runCouncil(
       try {
         deliverable = await runChair(ctx, parent, spec, {
           query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
+          chairTemplate: opts.chairTemplate,
         })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -609,26 +618,48 @@ async function runChair(
   ctx: Context,
   parent: Agent,
   spec: CouncilSpec,
-  input: { query: string; ledger: Ledger; vault: EvidenceVault; transcriptNote: string; signal: AbortSignal; timeoutMs: number },
+  input: {
+    query: string
+    ledger: Ledger
+    vault: EvidenceVault
+    transcriptNote: string
+    signal: AbortSignal
+    timeoutMs: number
+    chairTemplate?: DeclarativeCouncilSpec['chairTemplate']
+  },
 ): Promise<{ text: string; tokens: number }> {
   const sections = spec.deliverableSections.join(', ')
-  const prompt = [
+  const ledgerText = renderLedger(input.ledger, spec)
+  const evidenceText = input.vault.render()
+  const defaultPrompt = [
     `COUNCIL: ${spec.label}`,
     `QUERY: ${input.query}`,
-    `FINAL LEDGER:\n${renderLedger(input.ledger, spec)}`,
-    `EVIDENCE VAULT:\n${input.vault.render()}`,
+    `FINAL LEDGER:\n${ledgerText}`,
+    `EVIDENCE VAULT:\n${evidenceText}`,
     input.transcriptNote ? `NOTE: some evidence requests failed (${input.transcriptNote}) — reflect uncertainty where it matters.` : '',
     `Compile the final ${spec.label} deliverable with EXACTLY these sections: ${sections}.`,
     'Zero data loss: every ledger entry and its disposition must be reflected. Falsified paths appear with their refutations. Dissents are preserved verbatim in spirit.',
     'Output the deliverable document only — no meta commentary.',
   ].filter(Boolean).join('\n\n')
+  const persona = input.chairTemplate?.systemPrompt
+    ?? `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools.`
+  const prompt = input.chairTemplate === undefined
+    ? defaultPrompt
+    : fillChairTemplate(input.chairTemplate.userPromptTemplate, {
+      label: spec.label,
+      query: input.query,
+      ledger: ledgerText,
+      evidence: evidenceText,
+      sections,
+      note: input.transcriptNote,
+    })
 
   let fiber: { childId: string } | undefined
   try {
     fiber = await startSeatFiber(ctx, parent, {
       seatId: 'chair',
       label: `council chair: ${spec.id}`,
-      persona: `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools.`,
+      persona,
       initialPrompt: prompt,
       denyTools: DEBATER_DENIED_TOOLS,
     }, input.signal)
@@ -639,6 +670,19 @@ async function runChair(
       try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
     }
   }
+}
+
+/**
+ * Substitute the documented chair-template placeholders (`{{label}}`,
+ * `{{query}}`, `{{ledger}}`, `{{evidence}}`, `{{sections}}`, `{{note}}`).
+ * Unknown placeholders stay verbatim; a template without placeholders is used
+ * as-is.
+ * @param template - the registered `chairTemplate.userPromptTemplate`.
+ * @param vars - placeholder values.
+ * @returns the synthesis prompt sent to the chair.
+ */
+function fillChairTemplate(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (match, name: string) => vars[name] ?? match)
 }
 
 /**

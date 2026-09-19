@@ -39,6 +39,7 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
   const truncCounter = new Set<string>()
   const appends: Array<{ type: string; data: unknown }> = []
   const spawnedLabels: string[] = []
+  const spawnedPrompts: Array<{ label: string; persona?: string; prompt: string }> = []
 
   const nextText = (): string => {
     const t = script[readSeq] ?? 'generic scripted turn'
@@ -91,9 +92,14 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
     tools: { get: () => undefined },
     agents: { get: () => undefined },
     subagents: {
-      startContinuable: async (spec: { label: string }) => {
+      startContinuable: async (spec: { label: string; request?: { prompt?: Array<{ text?: string }>; persona?: string } }) => {
         spawnSeq += 1
         spawnedLabels.push(spec.label)
+        spawnedPrompts.push({
+          label: spec.label,
+          persona: spec.request?.persona,
+          prompt: spec.request?.prompt?.map(part => part.text ?? '').join('') ?? '',
+        })
         const childId = `child-${String(spawnSeq).padStart(4, '0')}-aaaa-bbbb-cccc-dddddddddddd`
         childLabel.set(childId, spec.label)
         return { childId }
@@ -110,7 +116,7 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
     },
     options: { provider: 'p', model: 'm' },
   }
-  return { ctx, parent, appends, spawnedLabels, reads: () => readSeq }
+  return { ctx, parent, appends, spawnedLabels, spawnedPrompts, reads: () => readSeq }
 }
 
 // ── Script helpers ──────────────────────────────────────────────────────────
@@ -337,6 +343,48 @@ describe('council engine — scripted full runs', () => {
     expect(result.deliverable).toContain('Harvest')
     expect(result.ledgerState.entries.length).toBeGreaterThanOrEqual(5)
     expect(result.ledgerState.edges.length).toBe(0) // edges come from parsed ops in v2; entries carry the ideas
+  })
+})
+
+describe('declarative chair template (settings-defined councils)', () => {
+  it('uses the registered chair persona and substitutes the documented placeholders', async () => {
+    const customSpec = {
+      ...ROUNDTABLE_SPEC,
+      id: 'myreview',
+      label: 'My Review',
+      seats: ROUNDTABLE_SPEC.seats.slice(0, 2),
+      deliverableSections: ['Decision'],
+    }
+    const script = [
+      BLIND, BLIND,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'A real dispute about leases.', author: 'skeptic' }] }),
+      ARGUE, ARGUE,
+      refereeJson({ flips: [{ id: 'C-1', to: 'contested', reason: 'genuine' }] }),
+      ARGUE, ARGUE,
+      refereeJson({}),
+      ARGUE, ARGUE,
+      refereeJson({}),
+      CONCUR, CONCUR,
+      refereeJson({}),
+      CHAIR,
+    ]
+    const { ctx, parent, spawnedPrompts } = makeCtx(script)
+    const result = await runCouncil(ctx, parent, {
+      spec: customSpec,
+      query: 'which database?',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+      chairTemplate: {
+        systemPrompt: 'CHAIR-PERSONA',
+        userPromptTemplate: 'TPL {{label}} :: {{query}} :: sections={{sections}} :: note={{note}} :: unknown={{nope}}',
+      },
+    })
+    expect(result.deliverable).toContain('Decision')
+    const chair = spawnedPrompts.find(entry => entry.label.includes('council chair'))
+    expect(chair).toBeDefined()
+    expect(chair!.persona).toBe('CHAIR-PERSONA')
+    expect(chair!.prompt).toContain('TPL My Review :: which database? :: sections=Decision')
+    expect(chair!.prompt).toContain('unknown={{nope}}')
   })
 })
 

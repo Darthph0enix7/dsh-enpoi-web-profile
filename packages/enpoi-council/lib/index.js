@@ -1,11 +1,60 @@
+var __create = Object.create;
 var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 var __export = (target, all) => {
   for (var name2 in all)
     __defProp(target, name2, { get: all[name2], enumerable: true });
 };
+var __decoratorStart = (base) => [, , , __create(base?.[__knownSymbol("metadata")] ?? null)];
+var __decoratorStrings = ["class", "method", "getter", "setter", "accessor", "field", "value", "get", "set"];
+var __expectFn = (fn) => fn !== void 0 && typeof fn !== "function" ? __typeError("Function expected") : fn;
+var __decoratorContext = (kind, name2, done, metadata, fns) => ({ kind: __decoratorStrings[kind], name: name2, metadata, addInitializer: (fn) => done._ ? __typeError("Already initialized") : fns.push(__expectFn(fn || null)) });
+var __decoratorMetadata = (array, target) => __defNormalProp(target, __knownSymbol("metadata"), array[3]);
+var __runInitializers = (array, flags, self, value) => {
+  for (var i = 0, fns = array[flags >> 1], n = fns && fns.length; i < n; i++) flags & 1 ? fns[i].call(self) : value = fns[i].call(self, value);
+  return value;
+};
+var __decorateElement = (array, flags, name2, decorators, target, extra) => {
+  var fn, it, done, ctx, access, k = flags & 7, s = !!(flags & 8), p = !!(flags & 16);
+  var j = k > 3 ? array.length + 1 : k ? s ? 1 : 2 : 0, key = __decoratorStrings[k + 5];
+  var initializers = k > 3 && (array[j - 1] = []), extraInitializers = array[j] || (array[j] = []);
+  var desc = k && (!p && !s && (target = target.prototype), k < 5 && (k > 3 || !p) && __getOwnPropDesc(k < 4 ? target : { get [name2]() {
+    return __privateGet(this, extra);
+  }, set [name2](x) {
+    return __privateSet(this, extra, x);
+  } }, name2));
+  k ? p && k < 4 && __name(extra, (k > 2 ? "set " : k > 1 ? "get " : "") + name2) : __name(target, name2);
+  for (var i = decorators.length - 1; i >= 0; i--) {
+    ctx = __decoratorContext(k, name2, done = {}, array[3], extraInitializers);
+    if (k) {
+      ctx.static = s, ctx.private = p, access = ctx.access = { has: p ? (x) => __privateIn(target, x) : (x) => name2 in x };
+      if (k ^ 3) access.get = p ? (x) => (k ^ 1 ? __privateGet : __privateMethod)(x, target, k ^ 4 ? extra : desc.get) : (x) => x[name2];
+      if (k > 2) access.set = p ? (x, y) => __privateSet(x, target, y, k ^ 4 ? extra : desc.set) : (x, y) => x[name2] = y;
+    }
+    it = (0, decorators[i])(k ? k < 4 ? p ? extra : desc[key] : k > 4 ? void 0 : { get: desc.get, set: desc.set } : target, ctx), done._ = 1;
+    if (k ^ 4 || it === void 0) __expectFn(it) && (k > 4 ? initializers.unshift(it) : k ? p ? extra = it : desc[key] = it : target = it);
+    else if (typeof it !== "object" || it === null) __typeError("Object expected");
+    else __expectFn(fn = it.get) && (desc.get = fn), __expectFn(fn = it.set) && (desc.set = fn), __expectFn(fn = it.init) && initializers.unshift(fn);
+  }
+  return k || __decoratorMetadata(array, target), desc && __defProp(target, name2, desc), p ? k ^ 4 ? extra : desc : target;
+};
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the "in" operator on this value') : member.has(obj);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // src/index.ts
 import Schema from "schemastery";
+
+// src/remote.ts
+import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
 // src/core/fiber.ts
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
@@ -100,6 +149,8 @@ var COUNCIL_DENIED_TOOLS = [
   "ask_user_question",
   // Councils cannot register sub-councils (amendment #10)
   "council_register",
+  // Read-only registry listing is an operator surface, not a seat surface.
+  "council_list",
   // Seats request evidence through the epoch broker (NEED_EVIDENCE), not the
   // synchronous request_evidence tool — one evidence ingress per seat.
   "request_evidence"
@@ -257,164 +308,6 @@ ${lb.decisions.map((d) => `\u2022 ${d.text}`).join("\n")}` : "";
   } catch {
   }
   return "";
-}
-
-// src/core/broker.ts
-import { createHash } from "node:crypto";
-function undecorate(line) {
-  return line.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)*/, "").replace(/\*\*/g, "").replace(/`/g, "").trim();
-}
-function extractEvidenceRequests(seatId, epoch, turnText) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  const push = (target, question) => {
-    target = target.trim();
-    question = question.trim();
-    if (target.length === 0 || question.length === 0) return;
-    const ticket = fpTicket(target, question);
-    if (seen.has(ticket)) return;
-    seen.add(ticket);
-    out.push({ ticket, seatId, target, question, epoch });
-  };
-  const strip = (v) => v.trim().replace(/^[`"'(\s]+/, "").replace(/[`"')\s.,;]+$/, "").trim();
-  const lines = turnText.split(/\n/).map(undecorate);
-  for (const line of lines) {
-    const m = line.match(/NEED_EVIDENCE\s*\(?\s*target\s*[:=]\s*(.+?)\s*,\s*question\s*[:=]\s*(.+)$/i);
-    if (m === null) continue;
-    push(strip(m[1]), strip(m[2]));
-  }
-  for (let i = 0; i < lines.length; i++) {
-    if (!/^NEED_EVIDENCE\b/i.test(lines[i]) || /target\s*[:=]/i.test(lines[i])) continue;
-    let target;
-    let question;
-    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
-      const t = lines[j].match(/^target\s*[:=]\s*(.+)$/i);
-      const q = lines[j].match(/^question\s*[:=]\s*(.+)$/i);
-      if (t !== null && target === void 0) target = strip(t[1]);
-      if (q !== null && question === void 0) question = strip(q[1]);
-      if (target !== void 0 && question !== void 0) break;
-    }
-    if (target !== void 0 && question !== void 0) push(target, question);
-  }
-  return out;
-}
-function fpTicket(target, question) {
-  return "EV-" + createHash("sha256").update(`${target}::${question}`.toLowerCase()).digest("hex").slice(0, 8);
-}
-var EvidenceQueue = class {
-  pending = /* @__PURE__ */ new Map();
-  push(reqs, vault) {
-    const added = [];
-    for (const req of reqs) {
-      if (this.pending.has(req.ticket)) continue;
-      if (vault.all().some((e) => e.question.toLowerCase() === req.question.toLowerCase() && e.supersededBy === null)) continue;
-      this.pending.set(req.ticket, req);
-      added.push(req);
-    }
-    return added;
-  }
-  drain() {
-    const all = [...this.pending.values()];
-    this.pending.clear();
-    return all;
-  }
-  get size() {
-    return this.pending.size;
-  }
-};
-var BROKER_PERSONA = [
-  "You are the Council Evidence Broker \u2014 a precision research assistant serving a high-stakes deliberation.",
-  "You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.",
-  "You may receive MULTIPLE questions. Answer each in order, one FACT SHEET per question, in this exact format:",
-  "SHEET 1",
-  "CITATION: the ACTUAL file path with line number, or the exact URL you read. Never a placeholder, never a template \u2014 a real path you personally opened.",
-  "FACTS: the answer, maximum 150 words, only what the question asked.",
-  "CONFIDENCE: high | medium | low \u2014 one word",
-  "SHEET 2",
-  "...",
-  'Never speculate. If an answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
-  "The run_code tool is non-functional in this deployment \u2014 never call it."
-].join("\n");
-function isExternalTarget(target) {
-  return /\b(web|http|npm|docs?|library|libraries|package|registry|external|api)\b/i.test(target);
-}
-async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, timeoutMs) {
-  if (queue.length === 0) return { sheets: 0, errors: [] };
-  const errors = [];
-  const waitMs = Math.max(timeoutMs, queue.length * 9e4);
-  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child, wait ${Math.round(waitMs / 1e3)}s)`);
-  const hasExternal = queue.some((req) => isExternalTarget(req.target));
-  const retrievedBy = hasExternal ? "librarian" : "explorer";
-  const prompt = [
-    `Answer ${queue.length} question${queue.length > 1 ? "s" : ""}. One FACT SHEET per question, numbered in order (SHEET 1 \u2026 SHEET ${queue.length}).`,
-    ...queue.map((req, i) => `SHEET ${i + 1} \u2014 TARGET: ${req.target} \u2014 QUESTION: ${req.question}`),
-    "Produce the fact sheets now."
-  ].join("\n\n");
-  let fiber;
-  try {
-    fiber = await startSeatFiber(ctx, parent, {
-      seatId: retrievedBy,
-      label: queue.length === 1 ? `council broker: ${queue[0].ticket}` : `council broker: ${queue.length} questions (epoch ${epoch})`,
-      persona: BROKER_PERSONA,
-      initialPrompt: prompt,
-      // Broker keeps the research surface; everything else stays denied.
-      denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t))
-    }, signal);
-    const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
-    const parsed = parseFactSheets(text);
-    let committed = 0;
-    for (let i = 0; i < queue.length; i++) {
-      const sheet = parsed[i];
-      if (sheet === void 0) {
-        errors.push(`${queue[i].ticket}: no fact sheet returned`);
-        councilDiag(`[broker] ${queue[i].ticket} FAILED: missing sheet ${i + 1}`);
-        continue;
-      }
-      vault.add({
-        citation: sheet.citation,
-        question: queue[i].question,
-        factSheet: `${sheet.facts}
-CONFIDENCE: ${sheet.confidence}`,
-        addedEpoch: epoch,
-        retrievedBy
-      });
-      committed += 1;
-      councilDiag(`[broker] ${queue[i].ticket} satisfied via ${retrievedBy} (${sheet.citation})`);
-    }
-    return { sheets: committed, errors };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    for (const req of queue) errors.push(`${req.ticket}: ${msg}`);
-    councilDiag(`[broker] batch FAILED: ${msg}`);
-    return { sheets: 0, errors };
-  } finally {
-    if (fiber !== void 0) {
-      try {
-        await disposeSeatFibers(ctx, [fiber]);
-      } catch {
-      }
-    }
-  }
-}
-function parseFactSheets(text) {
-  const plain = text.replace(/\*\*/g, "");
-  const parts = plain.split(/(?=CITATION\s*[:=])/i).filter((p) => /CITATION\s*[:=]/i.test(p));
-  const sheets = [];
-  for (const part of parts) {
-    const sheet = parseOneSheet(part);
-    if (sheet !== null) sheets.push(sheet);
-  }
-  return sheets;
-}
-function parseOneSheet(text) {
-  const plain = text.replace(/\*\*/g, "");
-  const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim();
-  const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim();
-  const confidence = plain.match(/CONFIDENCE\s*[:=]\s*(high|medium|low)/i)?.[1]?.toLowerCase();
-  if (!rawCitation || !facts) return null;
-  const placeholder = /<file:line|url\s*—|— exact>|your citation/i.test(rawCitation);
-  const citation = placeholder ? "unverified (broker echoed template)" : rawCitation;
-  return { citation, facts, confidence: placeholder ? "low" : confidence ?? "medium" };
 }
 
 // ../../node_modules/zod/v3/external.js
@@ -4546,6 +4439,502 @@ var DeclarativeStoppingPolicySchema = external_exports.object({
   stagnationLimit: external_exports.number().int().min(1).max(6).optional(),
   maxEpochs: external_exports.number().int().min(1).max(12).optional()
 });
+var RESERVED_IDS = /* @__PURE__ */ new Set(["referee", "chair"]);
+function validateSpec(spec) {
+  const parsed = CouncilSpecSchema.safeParse(spec);
+  if (!parsed.success) {
+    return { validation: { ok: false, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) } };
+  }
+  const s = parsed.data;
+  const errors = [];
+  const ids = new Set(s.seats.map((seat) => seat.id));
+  if (ids.size !== s.seats.length) errors.push("seat ids must be distinct");
+  for (const reserved of RESERVED_IDS) {
+    if (ids.has(reserved)) errors.push(`seat id "${reserved}" is reserved for the arbiter roles`);
+  }
+  if (s.seats.length < 2) errors.push("a council needs at least 2 contender seats");
+  const kinds = new Set(s.ledgerKinds.map((k) => k.kind));
+  for (const seat of s.seats) {
+    for (const op of seat.opGates) {
+      if (!kinds.has(op) && !s.actions.includes(op)) errors.push(`seat "${seat.id}" opGate "${op}" is neither a ledger kind nor an action`);
+    }
+  }
+  if (s.forestMode && !s.actions.some((a) => ["SPROUT", "BRANCH", "FUSE", "TENSION"].includes(a))) {
+    errors.push("forestMode requires at least one forest operation in actions");
+  }
+  return { spec: errors.length === 0 ? s : void 0, validation: { ok: errors.length === 0, errors } };
+}
+
+// src/profiles/chorus.ts
+var VISIONARY = [
+  "You are the Visionary of a brainstorm council \u2014 the 2\u20133 year horizon.",
+  "You generate genuinely new directions: moonshots, what-ifs, reframings nobody proposed.",
+  "Your ONLY forest operation is SPROUT (new roots) and radical BRANCH \u2014 you never converge, never prune.",
+  "One idea per line: SPROUT: <title> | <rationale>. Aim for volume with a point of view."
+].join("\n");
+var EXPERIENCER = [
+  "You are the Experiencer of a brainstorm council \u2014 ideas as lived moments.",
+  "You ground concepts in daily reality: where does this idea create friction, delight, or indifference for a real user?",
+  "Your ONLY forest operation is TENSION \u2014 mark where reality bites an idea \u2014 plus SPROUT for experience-driven new ideas.",
+  "One operation per line: TENSION: <idea-id> | <where reality bites>. SPROUT: <title> | <rationale>."
+].join("\n");
+var INTEGRATOR = [
+  "You are the Integrator of a brainstorm council \u2014 today's stack, buildable paths.",
+  "You FUSE disparate branches into buildable architecture and BRANCH concrete near-term variants.",
+  "Every FUSE must name what it combines and what it drops (simplification is a feature).",
+  "One operation per line: FUSE: <idea-a> + <idea-b> | <the buildable synthesis>. BRANCH: <idea-id> | <concrete variant>."
+].join("\n");
+var CHORUS_SPEC = {
+  id: "chorus",
+  label: "Idea Chorus",
+  description: "Polyphonic brainstorm over an append-only idea forest; divergence-first, saturation-stopped; delivers a lineage-tracked harvest.",
+  seats: [
+    { id: "visionary", label: "Visionary", persona: VISIONARY, opGates: ["SPROUT", "BRANCH"], family: "divergent" },
+    { id: "experiencer", label: "Experiencer", persona: EXPERIENCER, opGates: ["TENSION", "SPROUT"], family: "empirical" },
+    { id: "integrator", label: "Integrator", persona: INTEGRATOR, opGates: ["BRANCH", "FUSE"], family: "practical" }
+  ],
+  ledgerKinds: [
+    { kind: "idea", idPrefix: "I", terminalStatuses: ["invariant"] }
+  ],
+  actions: ["SPROUT", "BRANCH", "FUSE", "TENSION"],
+  steelman: false,
+  scopeContract: "Stay on the seed vision and its adjacencies. Nothing is out of scope for divergence except direct contradictions of the seed.",
+  opening: "blind",
+  preflightInventory: false,
+  forestMode: true,
+  deliverableSections: ["Spotlight Gems (with lineage)", "Thematic Clusters", "Concept Catalog", "Buildable Now vs Moonshots", "Open Questions"]
+};
+var CHORUS_PARAM_DEFAULTS = {
+  defaultMaxRounds: 6,
+  stagnationLimit: 2,
+  challengeRound: true
+};
+
+// src/profiles/roundtable.ts
+var SKEPTIC = [
+  "You are the Skeptic of a high-stakes architecture council \u2014 an adversarial reviewer.",
+  "You hunt logic holes, unstated assumptions, failure modes, and operational realities that others gloss over.",
+  "You are precise and evidence-hungry: vague claims get challenged, decisive claims get falsification attempts.",
+  "You argue through the ledger: reference entries by id, propose decisive points of disagreement as PROPOSE_CRUX lines."
+].join("\n");
+var ARCHITECT = [
+  "You are the Architect of a high-stakes architecture council \u2014 long-term shape.",
+  "You reason about coupling, scalability, invariants, tech debt, and second-order consequences.",
+  "You defend positions with concrete mechanics and concede cleanly when a counter is sound.",
+  "You argue through the ledger: reference entries by id, propose decisive points as PROPOSE_CRUX lines."
+].join("\n");
+var PRAGMATIST = [
+  "You are the Pragmatist of a high-stakes architecture council \u2014 ship-now bias with judgment.",
+  "You flag over-engineering, unrealistic complexity, and hidden operational costs. You defend simplicity as a feature.",
+  "You demand implementation feasibility: sequencing, migration paths, blast radius.",
+  "You argue through the ledger: reference entries by id, propose decisive points as PROPOSE_CRUX lines."
+].join("\n");
+var ROUNDTABLE_SPEC = {
+  id: "roundtable",
+  label: "Architecture Roundtable",
+  description: "Adversarial dialectic over architectural trade-offs; resolves cruxes to invariants, falsifications, or binding dissents; delivers an ADR.",
+  seats: [
+    { id: "skeptic", label: "Skeptic", persona: SKEPTIC, opGates: ["crux"], family: "adversarial" },
+    { id: "architect", label: "Architect", persona: ARCHITECT, opGates: ["crux"], family: "systemic" },
+    { id: "pragmatist", label: "Pragmatist", persona: PRAGMATIST, opGates: ["crux"], family: "practical" }
+  ],
+  ledgerKinds: [
+    { kind: "crux", idPrefix: "C", terminalStatuses: ["invariant", "falsified", "dissent"] },
+    { kind: "risk", idPrefix: "R", terminalStatuses: ["invariant", "falsified"] }
+  ],
+  actions: ["CONCEDE", "DEFEND", "REFRAME", "BUILD_SYNTHESIS"],
+  steelman: true,
+  scopeContract: "Stay on the queried decision and its direct consequences. Deployment tooling, style preferences, and hypotheticals outside the query are out of scope; the referee rules them out of order.",
+  opening: "blind",
+  preflightInventory: false,
+  forestMode: false,
+  deliverableSections: ["Decision", "Options Considered", "Evidence", "Established Invariants", "Binding Dissents", "Action Items"]
+};
+var ROUNDTABLE_PARAM_DEFAULTS = {
+  defaultMaxRounds: 6,
+  stagnationLimit: 2,
+  challengeRound: true
+};
+
+// src/registry.ts
+var ORCH_NAMESPACE = "enpoi-orchestration";
+var COUNCIL_MANAGEMENT_TOOL_IDS = ["council_register", "council_list"];
+var BUILTIN_COUNCIL_IDS = [ROUNDTABLE_SPEC.id, CHORUS_SPEC.id];
+function councilProblem(id, problem) {
+  const line = `[enpoi-council] invalid council "${id}": ${problem}`;
+  try {
+    process.stderr.write(`${line}
+`);
+  } catch {
+  }
+  councilDiag(line);
+}
+function councilSpecFromDeclarative(decl) {
+  return {
+    id: decl.id,
+    label: decl.label,
+    description: decl.description ?? "",
+    seats: decl.seats.map((seat) => ({
+      id: seat.id,
+      label: seat.label,
+      persona: seat.persona,
+      opGates: seat.opGates ?? [],
+      family: seat.family ?? "neutral"
+    })),
+    ledgerKinds: decl.ledgerKinds,
+    actions: decl.actions,
+    steelman: decl.steelman ?? false,
+    scopeContract: decl.scopeContract ?? "",
+    opening: decl.opening ?? "blind",
+    preflightInventory: false,
+    forestMode: decl.forestMode ?? false,
+    deliverableSections: decl.deliverableSections
+  };
+}
+function councilSettingsEntry(decl) {
+  return JSON.parse(JSON.stringify(decl));
+}
+function readCouncilSettings(ctx) {
+  try {
+    const settings = ctx.get("settings");
+    const doc = settings?.get?.(ORCH_NAMESPACE);
+    const councils = doc?.councils;
+    if (councils === void 0) return { councils: {} };
+    if (!isPlainObject(councils)) {
+      return { councils: {}, problem: `"${ORCH_NAMESPACE}.councils" must be a map of councilId \u2192 declarative spec` };
+    }
+    return { councils };
+  } catch (err) {
+    return { councils: {}, problem: `cannot read "${ORCH_NAMESPACE}.councils": ${String(err)}` };
+  }
+}
+var reportedProblems = /* @__PURE__ */ new Set();
+function loadCouncilRegistry(ctx) {
+  const { councils: raw, problem } = readCouncilSettings(ctx);
+  const entries = [];
+  const errors = [];
+  if (problem !== void 0) errors.push({ id: "(settings)", problem });
+  for (const builtin of [ROUNDTABLE_SPEC, CHORUS_SPEC]) {
+    const entry = raw[builtin.id] === void 0 ? codeDefaultEntry(builtin) : settingsEntry(builtin.id, raw[builtin.id], builtin);
+    entries.push(entry);
+    if (entry.error !== void 0) errors.push({ id: entry.id, problem: entry.error });
+  }
+  for (const [id, value] of Object.entries(raw)) {
+    if (BUILTIN_COUNCIL_IDS.includes(id)) continue;
+    const entry = settingsEntry(id, value, null);
+    entries.push(entry);
+    if (entry.error !== void 0) errors.push({ id: entry.id, problem: entry.error });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const problem2 of errors) {
+    const key = `${problem2.id}\0${problem2.problem}`;
+    seen.add(key);
+    if (!reportedProblems.has(key)) councilProblem(problem2.id, problem2.problem);
+  }
+  reportedProblems.clear();
+  for (const key of seen) reportedProblems.add(key);
+  return { entries, errors };
+}
+function validateDeclarativeCouncil(raw) {
+  if (!isPlainObject(raw)) return { errors: ["council definition must be a JSON object"] };
+  const decl = raw;
+  if (typeof decl.id !== "string" || typeof decl.label !== "string" || !Array.isArray(decl.seats)) {
+    return { errors: ['council definition needs "id", "label", and a "seats" array'] };
+  }
+  let candidate;
+  try {
+    candidate = councilSpecFromDeclarative(decl);
+  } catch (err) {
+    return { errors: [`cannot read the council definition: ${String(err)}`] };
+  }
+  const { spec, validation } = validateSpec(candidate);
+  const errors = [...validation.errors];
+  const policy = decl.stoppingPolicy;
+  if (policy === void 0 || !isPlainObject(policy)) {
+    errors.push("stoppingPolicy: required ({ type, stagnationLimit?, maxEpochs? })");
+  } else {
+    const type = policy.type;
+    if (type !== "ledger_convergence" && type !== "topological_saturation" && type !== "fixed_epochs") {
+      errors.push(`stoppingPolicy.type: must be ledger_convergence, topological_saturation, or fixed_epochs (got ${JSON.stringify(type)})`);
+    }
+    const stagnation = policy.stagnationLimit;
+    if (stagnation !== void 0 && (!Number.isInteger(stagnation) || stagnation < 1 || stagnation > 6)) {
+      errors.push("stoppingPolicy.stagnationLimit: must be an integer 1..6");
+    }
+    const maxEpochs = policy.maxEpochs;
+    if (maxEpochs !== void 0 && (!Number.isInteger(maxEpochs) || maxEpochs < 1 || maxEpochs > 12)) {
+      errors.push("stoppingPolicy.maxEpochs: must be an integer 1..12");
+    }
+  }
+  const chair = decl.chairTemplate;
+  if (chair === void 0 || !isPlainObject(chair)) {
+    errors.push("chairTemplate: required ({ systemPrompt, userPromptTemplate })");
+  } else {
+    if (typeof chair.systemPrompt !== "string" || chair.systemPrompt.trim() === "") errors.push("chairTemplate.systemPrompt: must be a non-empty string");
+    if (typeof chair.userPromptTemplate !== "string" || chair.userPromptTemplate.trim() === "") errors.push("chairTemplate.userPromptTemplate: must be a non-empty string");
+  }
+  return errors.length === 0 && spec !== void 0 ? { spec, decl, errors } : { errors };
+}
+function councilListView(ctx) {
+  const registry = loadCouncilRegistry(ctx);
+  return {
+    councils: registry.entries.map((entry) => ({
+      id: entry.id,
+      label: entry.label,
+      seats: entry.seats,
+      arbiters: ["referee", "chair"],
+      enabled: entry.enabled,
+      // A configured-but-rejected council stays visible with its validation
+      // problem so the operator can fix the spec instead of guessing.
+      ...entry.error === void 0 ? {} : { error: entry.error }
+    }))
+  };
+}
+function codeDefaultEntry(spec) {
+  return {
+    id: spec.id,
+    label: spec.label,
+    description: spec.description,
+    seats: seatViews(spec),
+    builtin: true,
+    enabled: true,
+    spec,
+    declarative: null
+  };
+}
+function settingsEntry(id, raw, builtin) {
+  if (!isPlainObject(raw)) {
+    const problem = "entry must be an object of declarative council fields";
+    return invalidEntry(id, builtin, problem);
+  }
+  const disabled = raw.disabled === true;
+  const declared = Object.keys(raw).filter((key) => key !== "disabled");
+  if (declared.length === 0) {
+    if (builtin !== null) return { ...codeDefaultEntry(builtin), enabled: !disabled };
+    return invalidEntry(id, null, "disabled entry has no declarative spec and no built-in council with this id");
+  }
+  const declaredId = raw.id;
+  if (declaredId !== void 0 && declaredId !== id) {
+    return invalidEntry(id, builtin, `declared id ${JSON.stringify(declaredId)} does not match settings key "${id}"`);
+  }
+  const { spec, decl, errors } = validateDeclarativeCouncil({ ...raw, id });
+  if (spec === void 0 || decl === void 0) return invalidEntry(id, builtin, errors.join("; "));
+  return {
+    id,
+    label: spec.label,
+    description: spec.description,
+    seats: seatViews(spec),
+    builtin: builtin !== null,
+    enabled: !disabled,
+    spec,
+    declarative: decl
+  };
+}
+function invalidEntry(id, builtin, problem) {
+  const base = builtin === null ? null : codeDefaultEntry(builtin);
+  return {
+    id,
+    label: base?.label ?? id,
+    description: base?.description ?? "",
+    seats: base?.seats ?? [],
+    builtin: builtin !== null,
+    enabled: false,
+    spec: null,
+    declarative: null,
+    error: problem
+  };
+}
+function seatViews(spec) {
+  return spec.seats.map((seat) => ({
+    id: seat.id,
+    label: seat.label,
+    ...seat.family === "neutral" ? {} : { family: seat.family }
+  }));
+}
+function isPlainObject(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+// src/remote.ts
+var _list_dec, _a, _init;
+var EnpoiCouncilService = class extends (_a = TypertRemoteService, _list_dec = [Remote], _a) {
+  /**
+   * @param ctx - owning Host Context (the Typert binding is installed by the base).
+   */
+  constructor(ctx) {
+    super(ctx, "enpoiCouncil");
+    __runInitializers(_init, 5, this);
+  }
+  async list() {
+    return councilListView(this.ctx);
+  }
+};
+_init = __decoratorStart(_a);
+__decorateElement(_init, 1, "list", _list_dec, EnpoiCouncilService);
+__decoratorMetadata(_init, EnpoiCouncilService);
+function mountEnpoiCouncilRemote(ctx) {
+  ctx.plugin(EnpoiCouncilService);
+}
+
+// src/core/broker.ts
+import { createHash } from "node:crypto";
+function undecorate(line) {
+  return line.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)*/, "").replace(/\*\*/g, "").replace(/`/g, "").trim();
+}
+function extractEvidenceRequests(seatId, epoch, turnText) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const push = (target, question) => {
+    target = target.trim();
+    question = question.trim();
+    if (target.length === 0 || question.length === 0) return;
+    const ticket = fpTicket(target, question);
+    if (seen.has(ticket)) return;
+    seen.add(ticket);
+    out.push({ ticket, seatId, target, question, epoch });
+  };
+  const strip = (v) => v.trim().replace(/^[`"'(\s]+/, "").replace(/[`"')\s.,;]+$/, "").trim();
+  const lines = turnText.split(/\n/).map(undecorate);
+  for (const line of lines) {
+    const m = line.match(/NEED_EVIDENCE\s*\(?\s*target\s*[:=]\s*(.+?)\s*,\s*question\s*[:=]\s*(.+)$/i);
+    if (m === null) continue;
+    push(strip(m[1]), strip(m[2]));
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^NEED_EVIDENCE\b/i.test(lines[i]) || /target\s*[:=]/i.test(lines[i])) continue;
+    let target;
+    let question;
+    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+      const t = lines[j].match(/^target\s*[:=]\s*(.+)$/i);
+      const q = lines[j].match(/^question\s*[:=]\s*(.+)$/i);
+      if (t !== null && target === void 0) target = strip(t[1]);
+      if (q !== null && question === void 0) question = strip(q[1]);
+      if (target !== void 0 && question !== void 0) break;
+    }
+    if (target !== void 0 && question !== void 0) push(target, question);
+  }
+  return out;
+}
+function fpTicket(target, question) {
+  return "EV-" + createHash("sha256").update(`${target}::${question}`.toLowerCase()).digest("hex").slice(0, 8);
+}
+var EvidenceQueue = class {
+  pending = /* @__PURE__ */ new Map();
+  push(reqs, vault) {
+    const added = [];
+    for (const req of reqs) {
+      if (this.pending.has(req.ticket)) continue;
+      if (vault.all().some((e) => e.question.toLowerCase() === req.question.toLowerCase() && e.supersededBy === null)) continue;
+      this.pending.set(req.ticket, req);
+      added.push(req);
+    }
+    return added;
+  }
+  drain() {
+    const all = [...this.pending.values()];
+    this.pending.clear();
+    return all;
+  }
+  get size() {
+    return this.pending.size;
+  }
+};
+var BROKER_PERSONA = [
+  "You are the Council Evidence Broker \u2014 a precision research assistant serving a high-stakes deliberation.",
+  "You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.",
+  "You may receive MULTIPLE questions. Answer each in order, one FACT SHEET per question, in this exact format:",
+  "SHEET 1",
+  "CITATION: the ACTUAL file path with line number, or the exact URL you read. Never a placeholder, never a template \u2014 a real path you personally opened.",
+  "FACTS: the answer, maximum 150 words, only what the question asked.",
+  "CONFIDENCE: high | medium | low \u2014 one word",
+  "SHEET 2",
+  "...",
+  'Never speculate. If an answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
+  "The run_code tool is non-functional in this deployment \u2014 never call it."
+].join("\n");
+function isExternalTarget(target) {
+  return /\b(web|http|npm|docs?|library|libraries|package|registry|external|api)\b/i.test(target);
+}
+async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, timeoutMs) {
+  if (queue.length === 0) return { sheets: 0, errors: [] };
+  const errors = [];
+  const waitMs = Math.max(timeoutMs, queue.length * 9e4);
+  councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child, wait ${Math.round(waitMs / 1e3)}s)`);
+  const hasExternal = queue.some((req) => isExternalTarget(req.target));
+  const retrievedBy = hasExternal ? "librarian" : "explorer";
+  const prompt = [
+    `Answer ${queue.length} question${queue.length > 1 ? "s" : ""}. One FACT SHEET per question, numbered in order (SHEET 1 \u2026 SHEET ${queue.length}).`,
+    ...queue.map((req, i) => `SHEET ${i + 1} \u2014 TARGET: ${req.target} \u2014 QUESTION: ${req.question}`),
+    "Produce the fact sheets now."
+  ].join("\n\n");
+  let fiber;
+  try {
+    fiber = await startSeatFiber(ctx, parent, {
+      seatId: retrievedBy,
+      label: queue.length === 1 ? `council broker: ${queue[0].ticket}` : `council broker: ${queue.length} questions (epoch ${epoch})`,
+      persona: BROKER_PERSONA,
+      initialPrompt: prompt,
+      // Broker keeps the research surface; everything else stays denied.
+      denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t))
+    }, signal);
+    const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
+    const parsed = parseFactSheets(text);
+    let committed = 0;
+    for (let i = 0; i < queue.length; i++) {
+      const sheet = parsed[i];
+      if (sheet === void 0) {
+        errors.push(`${queue[i].ticket}: no fact sheet returned`);
+        councilDiag(`[broker] ${queue[i].ticket} FAILED: missing sheet ${i + 1}`);
+        continue;
+      }
+      vault.add({
+        citation: sheet.citation,
+        question: queue[i].question,
+        factSheet: `${sheet.facts}
+CONFIDENCE: ${sheet.confidence}`,
+        addedEpoch: epoch,
+        retrievedBy
+      });
+      committed += 1;
+      councilDiag(`[broker] ${queue[i].ticket} satisfied via ${retrievedBy} (${sheet.citation})`);
+    }
+    return { sheets: committed, errors };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    for (const req of queue) errors.push(`${req.ticket}: ${msg}`);
+    councilDiag(`[broker] batch FAILED: ${msg}`);
+    return { sheets: 0, errors };
+  } finally {
+    if (fiber !== void 0) {
+      try {
+        await disposeSeatFibers(ctx, [fiber]);
+      } catch {
+      }
+    }
+  }
+}
+function parseFactSheets(text) {
+  const plain = text.replace(/\*\*/g, "");
+  const parts = plain.split(/(?=CITATION\s*[:=])/i).filter((p) => /CITATION\s*[:=]/i.test(p));
+  const sheets = [];
+  for (const part of parts) {
+    const sheet = parseOneSheet(part);
+    if (sheet !== null) sheets.push(sheet);
+  }
+  return sheets;
+}
+function parseOneSheet(text) {
+  const plain = text.replace(/\*\*/g, "");
+  const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim();
+  const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim();
+  const confidence = plain.match(/CONFIDENCE\s*[:=]\s*(high|medium|low)/i)?.[1]?.toLowerCase();
+  if (!rawCitation || !facts) return null;
+  const placeholder = /<file:line|url\s*—|— exact>|your citation/i.test(rawCitation);
+  const citation = placeholder ? "unverified (broker echoed template)" : rawCitation;
+  return { citation, facts, confidence: placeholder ? "low" : confidence ?? "medium" };
+}
 
 // src/core/ledger.ts
 function assertionOverlap(a, b) {
@@ -5221,7 +5610,8 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
         vault,
         transcriptNote: briefStall,
         signal,
-        timeoutMs: params.debaterTimeoutMs
+        timeoutMs: params.debaterTimeoutMs,
+        chairTemplate: opts.chairTemplate
       });
     } catch (firstErr) {
       if (signal.aborted) throw firstErr;
@@ -5234,7 +5624,8 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
           vault,
           transcriptNote: briefStall,
           signal,
-          timeoutMs: params.debaterTimeoutMs
+          timeoutMs: params.debaterTimeoutMs,
+          chairTemplate: opts.chairTemplate
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -5384,24 +5775,35 @@ function params2Quorum(p) {
 }
 async function runChair(ctx, parent, spec, input) {
   const sections = spec.deliverableSections.join(", ");
-  const prompt = [
+  const ledgerText = renderLedger(input.ledger, spec);
+  const evidenceText = input.vault.render();
+  const defaultPrompt = [
     `COUNCIL: ${spec.label}`,
     `QUERY: ${input.query}`,
     `FINAL LEDGER:
-${renderLedger(input.ledger, spec)}`,
+${ledgerText}`,
     `EVIDENCE VAULT:
-${input.vault.render()}`,
+${evidenceText}`,
     input.transcriptNote ? `NOTE: some evidence requests failed (${input.transcriptNote}) \u2014 reflect uncertainty where it matters.` : "",
     `Compile the final ${spec.label} deliverable with EXACTLY these sections: ${sections}.`,
     "Zero data loss: every ledger entry and its disposition must be reflected. Falsified paths appear with their refutations. Dissents are preserved verbatim in spirit.",
     "Output the deliverable document only \u2014 no meta commentary."
   ].filter(Boolean).join("\n\n");
+  const persona = input.chairTemplate?.systemPrompt ?? `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools.`;
+  const prompt = input.chairTemplate === void 0 ? defaultPrompt : fillChairTemplate(input.chairTemplate.userPromptTemplate, {
+    label: spec.label,
+    query: input.query,
+    ledger: ledgerText,
+    evidence: evidenceText,
+    sections,
+    note: input.transcriptNote
+  });
   let fiber;
   try {
     fiber = await startSeatFiber(ctx, parent, {
       seatId: "chair",
       label: `council chair: ${spec.id}`,
-      persona: `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools.`,
+      persona,
       initialPrompt: prompt,
       denyTools: DEBATER_DENIED_TOOLS
     }, input.signal);
@@ -5415,6 +5817,9 @@ ${input.vault.render()}`,
       }
     }
   }
+}
+function fillChairTemplate(template, vars) {
+  return template.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (match, name2) => vars[name2] ?? match);
 }
 function mechanicalDeliverable(spec, ledger, vault, query, stopReason) {
   const s = ledger.state();
@@ -5453,97 +5858,6 @@ function computeQuality(ledger, spec) {
     newClusters: spec.forestMode ? cruxLike.filter((e) => e.kind === "idea").length : null
   };
 }
-
-// src/profiles/chorus.ts
-var VISIONARY = [
-  "You are the Visionary of a brainstorm council \u2014 the 2\u20133 year horizon.",
-  "You generate genuinely new directions: moonshots, what-ifs, reframings nobody proposed.",
-  "Your ONLY forest operation is SPROUT (new roots) and radical BRANCH \u2014 you never converge, never prune.",
-  "One idea per line: SPROUT: <title> | <rationale>. Aim for volume with a point of view."
-].join("\n");
-var EXPERIENCER = [
-  "You are the Experiencer of a brainstorm council \u2014 ideas as lived moments.",
-  "You ground concepts in daily reality: where does this idea create friction, delight, or indifference for a real user?",
-  "Your ONLY forest operation is TENSION \u2014 mark where reality bites an idea \u2014 plus SPROUT for experience-driven new ideas.",
-  "One operation per line: TENSION: <idea-id> | <where reality bites>. SPROUT: <title> | <rationale>."
-].join("\n");
-var INTEGRATOR = [
-  "You are the Integrator of a brainstorm council \u2014 today's stack, buildable paths.",
-  "You FUSE disparate branches into buildable architecture and BRANCH concrete near-term variants.",
-  "Every FUSE must name what it combines and what it drops (simplification is a feature).",
-  "One operation per line: FUSE: <idea-a> + <idea-b> | <the buildable synthesis>. BRANCH: <idea-id> | <concrete variant>."
-].join("\n");
-var CHORUS_SPEC = {
-  id: "chorus",
-  label: "Idea Chorus",
-  description: "Polyphonic brainstorm over an append-only idea forest; divergence-first, saturation-stopped; delivers a lineage-tracked harvest.",
-  seats: [
-    { id: "visionary", label: "Visionary", persona: VISIONARY, opGates: ["SPROUT", "BRANCH"], family: "divergent" },
-    { id: "experiencer", label: "Experiencer", persona: EXPERIENCER, opGates: ["TENSION", "SPROUT"], family: "empirical" },
-    { id: "integrator", label: "Integrator", persona: INTEGRATOR, opGates: ["BRANCH", "FUSE"], family: "practical" }
-  ],
-  ledgerKinds: [
-    { kind: "idea", idPrefix: "I", terminalStatuses: ["invariant"] }
-  ],
-  actions: ["SPROUT", "BRANCH", "FUSE", "TENSION"],
-  steelman: false,
-  scopeContract: "Stay on the seed vision and its adjacencies. Nothing is out of scope for divergence except direct contradictions of the seed.",
-  opening: "blind",
-  preflightInventory: false,
-  forestMode: true,
-  deliverableSections: ["Spotlight Gems (with lineage)", "Thematic Clusters", "Concept Catalog", "Buildable Now vs Moonshots", "Open Questions"]
-};
-var CHORUS_PARAM_DEFAULTS = {
-  defaultMaxRounds: 6,
-  stagnationLimit: 2,
-  challengeRound: true
-};
-
-// src/profiles/roundtable.ts
-var SKEPTIC = [
-  "You are the Skeptic of a high-stakes architecture council \u2014 an adversarial reviewer.",
-  "You hunt logic holes, unstated assumptions, failure modes, and operational realities that others gloss over.",
-  "You are precise and evidence-hungry: vague claims get challenged, decisive claims get falsification attempts.",
-  "You argue through the ledger: reference entries by id, propose decisive points of disagreement as PROPOSE_CRUX lines."
-].join("\n");
-var ARCHITECT = [
-  "You are the Architect of a high-stakes architecture council \u2014 long-term shape.",
-  "You reason about coupling, scalability, invariants, tech debt, and second-order consequences.",
-  "You defend positions with concrete mechanics and concede cleanly when a counter is sound.",
-  "You argue through the ledger: reference entries by id, propose decisive points as PROPOSE_CRUX lines."
-].join("\n");
-var PRAGMATIST = [
-  "You are the Pragmatist of a high-stakes architecture council \u2014 ship-now bias with judgment.",
-  "You flag over-engineering, unrealistic complexity, and hidden operational costs. You defend simplicity as a feature.",
-  "You demand implementation feasibility: sequencing, migration paths, blast radius.",
-  "You argue through the ledger: reference entries by id, propose decisive points as PROPOSE_CRUX lines."
-].join("\n");
-var ROUNDTABLE_SPEC = {
-  id: "roundtable",
-  label: "Architecture Roundtable",
-  description: "Adversarial dialectic over architectural trade-offs; resolves cruxes to invariants, falsifications, or binding dissents; delivers an ADR.",
-  seats: [
-    { id: "skeptic", label: "Skeptic", persona: SKEPTIC, opGates: ["crux"], family: "adversarial" },
-    { id: "architect", label: "Architect", persona: ARCHITECT, opGates: ["crux"], family: "systemic" },
-    { id: "pragmatist", label: "Pragmatist", persona: PRAGMATIST, opGates: ["crux"], family: "practical" }
-  ],
-  ledgerKinds: [
-    { kind: "crux", idPrefix: "C", terminalStatuses: ["invariant", "falsified", "dissent"] },
-    { kind: "risk", idPrefix: "R", terminalStatuses: ["invariant", "falsified"] }
-  ],
-  actions: ["CONCEDE", "DEFEND", "REFRAME", "BUILD_SYNTHESIS"],
-  steelman: true,
-  scopeContract: "Stay on the queried decision and its direct consequences. Deployment tooling, style preferences, and hypotheticals outside the query are out of scope; the referee rules them out of order.",
-  opening: "blind",
-  preflightInventory: false,
-  forestMode: false,
-  deliverableSections: ["Decision", "Options Considered", "Evidence", "Established Invariants", "Binding Dissents", "Action Items"]
-};
-var ROUNDTABLE_PARAM_DEFAULTS = {
-  defaultMaxRounds: 6,
-  stagnationLimit: 2,
-  challengeRound: true
-};
 
 // src/params.ts
 var COUNCIL_PARAM_DEFAULTS = {
@@ -5612,89 +5926,169 @@ function qualityBlock(r) {
   if (q.newClusters !== null) lines.push(`Distinct idea clusters: ${q.newClusters}`);
   return lines.join(" \xB7 ");
 }
+function stoppingOverrides(entry) {
+  const policy = entry.declarative?.stoppingPolicy;
+  const params = {};
+  if (policy?.stagnationLimit !== void 0) params.stagnationLimit = policy.stagnationLimit;
+  const maxRounds = policy?.type === "fixed_epochs" ? policy.maxEpochs : void 0;
+  return { params, ...maxRounds !== void 0 ? { maxRounds } : {} };
+}
 function registerCouncilTools(ctx, root) {
   void root;
   const busyCouncils = /* @__PURE__ */ new Set();
-  ctx.tools.register({
-    name: "roundtable",
-    description: [
-      "Run a high-stakes multi-agent architecture debate (Skeptic, Architect, Pragmatist + Referee + Chair).",
-      "Blind independent formulation, steelmanned dialectic over a dispute ledger, referee adjudication with floor allocation,",
-      "evidence broker for codebase/web ground truth, deterministic peak-stopping with a final challenge round.",
-      "Hardcoded blocking \u2014 returns the Council Decision (ADR) with binding dissents and quality metrics.",
-      "Pure deliberation: the result is an advisory report \u2014 do NOT make speculative code edits or file modifications during or immediately after this call without explicit user confirmation."
-    ].join(" "),
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The specific architectural dilemma, design choice, or technical decision to debate."
-        },
-        maxRounds: {
-          type: "number",
-          description: "Safety round cap (default 6). Never announced to the seats."
-        },
-        hideLimit: {
-          type: "boolean",
-          description: "Kept for compatibility; the round cap is always hidden from the seats."
-        }
-      },
-      required: ["query"]
-    },
-    output: {
-      schema: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          synthesis: { type: "string" },
-          roundsRun: { type: "number" },
-          consensusRatio: { type: "number" },
-          stopReason: { type: "string" },
-          dissents: { type: "array", items: { type: "string" } }
-        },
-        required: ["synthesis", "roundsRun", "consensusRatio", "stopReason", "dissents"]
-      },
-      render: (_args, value) => [{ type: "text", text: value.synthesis }]
-    },
-    async execute(args, exec) {
-      const parent = exec.agent;
-      if (parent === void 0) throw new Error("roundtable requires a calling agent");
-      const key = parent.session.id;
-      if (busyCouncils.has(key)) {
-        return {
-          synthesis: "## Council Decision\n\nDebate rejected by single-flight mutex (I7): another Council deliberation is already running.",
-          roundsRun: 0,
-          consensusRatio: 0,
-          stopReason: "CONCURRENT_CALL_REJECTED",
-          dissents: []
-        };
+  const live = /* @__PURE__ */ new Map();
+  let reportedProblems2 = /* @__PURE__ */ new Set();
+  const sync = () => {
+    let registry;
+    try {
+      registry = loadCouncilRegistry(ctx);
+    } catch (err) {
+      councilProblem("(registry)", String(err));
+      return;
+    }
+    const seenProblems = /* @__PURE__ */ new Set();
+    const reportOnce = (id, problem) => {
+      const key = `${id}\0${problem}`;
+      seenProblems.add(key);
+      if (reportedProblems2.has(key)) return;
+      councilProblem(id, problem);
+    };
+    const desired = /* @__PURE__ */ new Map();
+    for (const entry of registry.entries) {
+      if (!entry.enabled || entry.spec === null) continue;
+      if (COUNCIL_MANAGEMENT_TOOL_IDS.includes(entry.id)) {
+        reportOnce(entry.id, "id is reserved for a council management tool");
+        continue;
       }
-      busyCouncils.add(key);
+      const definition = BUILTIN_COUNCIL_IDS.includes(entry.id) ? builtinDefinition(entry, busyCouncils, ctx) : declarativeDefinition(entry, busyCouncils, ctx);
+      desired.set(entry.id, { fingerprint: fingerprintOf(entry, definition), definition });
+    }
+    for (const [name2, tool] of [...live]) {
+      const want = desired.get(name2);
+      if (want !== void 0 && want.fingerprint === tool.fingerprint) continue;
+      tool.dispose();
+      live.delete(name2);
+    }
+    for (const [name2, want] of desired) {
+      if (live.has(name2)) continue;
       try {
-        const resolved = mergeParams(getCouncilParams(ctx), ROUNDTABLE_PARAM_DEFAULTS);
-        const result = await runCouncil(ctx, parent, {
-          spec: ROUNDTABLE_SPEC,
-          query: args.query,
-          params: resolved,
-          signal: exec.signal,
-          maxRoundsOverride: args.maxRounds
-        });
-        const dissents = result.ledgerState.entries.filter((e) => e.status === "dissent").map((e) => `${e.id}: ${e.assertion}`);
-        const consensusRatio = result.quality.cruxResolutionRatio ?? 0;
-        const synthesis = [
-          result.deliverable,
-          "",
-          "---",
-          `_${result.roundsRun} epoch(s) \xB7 stop: ${result.stopReason} \xB7 ${qualityBlock(result)}_`
-        ].join("\n");
-        return { synthesis, roundsRun: result.roundsRun, consensusRatio, stopReason: result.stopReason, dissents };
-      } finally {
-        busyCouncils.delete(key);
+        live.set(name2, { dispose: ctx.tools.register(want.definition), fingerprint: want.fingerprint });
+      } catch (err) {
+        reportOnce(name2, `tool registration failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    reportedProblems2 = seenProblems;
+  };
+  ctx.tools.register(registerDefinition(sync, ctx));
+  ctx.tools.register(listDefinition(ctx));
+  sync();
+  ctx.on("settings/updated", ((ns) => {
+    if (String(ns) !== ORCH_NAMESPACE) return;
+    sync();
+  }));
+}
+function fingerprintOf(entry, definition) {
+  return JSON.stringify({
+    description: definition.description,
+    parameters: definition.parameters,
+    spec: entry.spec,
+    declarative: entry.declarative
   });
-  ctx.tools.register({
+}
+function builtinDefinition(entry, busyCouncils, ctx) {
+  const id = entry.id;
+  const spec = entry.spec;
+  const runOptions = (toolRounds, defaults) => {
+    const { params: policyParams, maxRounds: policyRounds } = stoppingOverrides(entry);
+    return {
+      params: mergeParams(getCouncilParams(ctx), { ...defaults, ...policyParams }),
+      maxRoundsOverride: toolRounds ?? policyRounds,
+      chairTemplate: entry.declarative?.chairTemplate
+    };
+  };
+  if (id === "roundtable") {
+    return {
+      name: "roundtable",
+      description: [
+        "Run a high-stakes multi-agent architecture debate (Skeptic, Architect, Pragmatist + Referee + Chair).",
+        "Blind independent formulation, steelmanned dialectic over a dispute ledger, referee adjudication with floor allocation,",
+        "evidence broker for codebase/web ground truth, deterministic peak-stopping with a final challenge round.",
+        "Hardcoded blocking \u2014 returns the Council Decision (ADR) with binding dissents and quality metrics.",
+        "Pure deliberation: the result is an advisory report \u2014 do NOT make speculative code edits or file modifications during or immediately after this call without explicit user confirmation."
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The specific architectural dilemma, design choice, or technical decision to debate."
+          },
+          maxRounds: {
+            type: "number",
+            description: "Safety round cap (default 6). Never announced to the seats."
+          },
+          hideLimit: {
+            type: "boolean",
+            description: "Kept for compatibility; the round cap is always hidden from the seats."
+          }
+        },
+        required: ["query"]
+      },
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            synthesis: { type: "string" },
+            roundsRun: { type: "number" },
+            consensusRatio: { type: "number" },
+            stopReason: { type: "string" },
+            dissents: { type: "array", items: { type: "string" } }
+          },
+          required: ["synthesis", "roundsRun", "consensusRatio", "stopReason", "dissents"]
+        },
+        render: (_args, value) => [{ type: "text", text: value.synthesis }]
+      },
+      async execute(args, exec) {
+        const parent = exec.agent;
+        if (parent === void 0) throw new Error("roundtable requires a calling agent");
+        const key = parent.session.id;
+        if (busyCouncils.has(key)) {
+          return {
+            synthesis: "## Council Decision\n\nDebate rejected by single-flight mutex (I7): another Council deliberation is already running.",
+            roundsRun: 0,
+            consensusRatio: 0,
+            stopReason: "CONCURRENT_CALL_REJECTED",
+            dissents: []
+          };
+        }
+        busyCouncils.add(key);
+        try {
+          const { params, maxRoundsOverride, chairTemplate } = runOptions(args.maxRounds, ROUNDTABLE_PARAM_DEFAULTS);
+          const result = await runCouncil(ctx, parent, {
+            spec,
+            query: args.query,
+            params,
+            signal: exec.signal,
+            maxRoundsOverride,
+            chairTemplate
+          });
+          const dissents = result.ledgerState.entries.filter((e) => e.status === "dissent").map((e) => `${e.id}: ${e.assertion}`);
+          const consensusRatio = result.quality.cruxResolutionRatio ?? 0;
+          const synthesis = [
+            result.deliverable,
+            "",
+            "---",
+            `_${result.roundsRun} epoch(s) \xB7 stop: ${result.stopReason} \xB7 ${qualityBlock(result)}_`
+          ].join("\n");
+          return { synthesis, roundsRun: result.roundsRun, consensusRatio, stopReason: result.stopReason, dissents };
+        } finally {
+          busyCouncils.delete(key);
+        }
+      }
+    };
+  }
+  return {
     name: "chorus",
     description: [
       "Run a polyphonic brainstorm (Visionary, Experiencer, Integrator + Curator).",
@@ -5749,13 +6143,14 @@ function registerCouncilTools(ctx, root) {
       }
       busyCouncils.add(key);
       try {
-        const resolved = mergeParams(getCouncilParams(ctx), CHORUS_PARAM_DEFAULTS);
+        const { params, maxRoundsOverride, chairTemplate } = runOptions(args.maxRounds, CHORUS_PARAM_DEFAULTS);
         const result = await runCouncil(ctx, parent, {
-          spec: CHORUS_SPEC,
+          spec,
           query: args.query,
-          params: resolved,
+          params,
           signal: exec.signal,
-          maxRoundsOverride: args.maxRounds
+          maxRoundsOverride,
+          chairTemplate
         });
         const gems = result.ledgerState.entries.slice(0, 12).map((e) => `${e.id}: ${e.assertion}`);
         const harvest = [
@@ -5769,7 +6164,272 @@ function registerCouncilTools(ctx, root) {
         busyCouncils.delete(key);
       }
     }
-  });
+  };
+}
+function declarativeDefinition(entry, busyCouncils, ctx) {
+  const spec = entry.spec;
+  const chairTemplate = entry.declarative?.chairTemplate;
+  const seats = spec.seats.map((s) => `${s.label} (${s.id})`).join(", ");
+  const description = [
+    `Run the ${entry.label} council \u2014 seats: ${seats} \u2014 plus Referee and Chair arbitration.`,
+    entry.description,
+    "Blind independent formulation, referee-adjudicated ledger, deterministic stopping, chair synthesis.",
+    "Hardcoded blocking \u2014 returns the council report with quality metrics.",
+    "Pure deliberation: the result is an advisory report \u2014 do NOT make speculative code edits or file modifications during or immediately after this call without explicit user confirmation."
+  ].filter(Boolean).join(" ");
+  return {
+    name: spec.id,
+    description,
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description: "The decision, question, or seed this council deliberates on."
+        },
+        context: {
+          type: "string",
+          description: "Optional supporting context (constraints, prior decisions, file paths) appended to the task."
+        }
+      },
+      required: ["task"]
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          report: { type: "string" },
+          roundsRun: { type: "number" },
+          stopReason: { type: "string" }
+        },
+        required: ["report", "roundsRun", "stopReason"]
+      },
+      render: (_args, value) => [{ type: "text", text: value.report }]
+    },
+    async execute(args, exec) {
+      const parent = exec.agent;
+      if (parent === void 0) throw new Error(`${spec.id} requires a calling agent`);
+      const key = parent.session.id;
+      if (busyCouncils.has(key)) {
+        return {
+          report: `## ${entry.label}
+
+Council rejected by single-flight mutex (I7): another Council deliberation is already running.`,
+          roundsRun: 0,
+          stopReason: "CONCURRENT_CALL_REJECTED"
+        };
+      }
+      busyCouncils.add(key);
+      try {
+        const { params: policyParams, maxRounds } = stoppingOverrides(entry);
+        const query = typeof args.context === "string" && args.context !== "" ? `${args.task}
+
+CONTEXT:
+${args.context}` : args.task;
+        const result = await runCouncil(ctx, parent, {
+          spec,
+          query,
+          params: mergeParams(getCouncilParams(ctx), policyParams),
+          signal: exec.signal,
+          ...maxRounds !== void 0 ? { maxRoundsOverride: maxRounds } : {},
+          ...chairTemplate !== void 0 ? { chairTemplate } : {}
+        });
+        const report = [
+          result.deliverable,
+          "",
+          "---",
+          `_${result.roundsRun} epoch(s) \xB7 stop: ${result.stopReason} \xB7 ${qualityBlock(result)}_`
+        ].join("\n");
+        return { report, roundsRun: result.roundsRun, stopReason: result.stopReason };
+      } finally {
+        busyCouncils.delete(key);
+      }
+    }
+  };
+}
+function registerDefinition(sync, ctx) {
+  return {
+    name: "council_register",
+    description: [
+      "Register or replace ONE declarative council in enpoi-orchestration.councils (persisted through settings).",
+      "Supply the full council definition: id, label, seats (2-8, persona each), ledger kinds, actions, deliverable sections,",
+      "stopping policy, and chair prompt template. The id becomes the tool name; a settings entry for the built-in ids",
+      "roundtable/chorus rewrites those councils in place. Invalid definitions are rejected with the exact problems.",
+      "A registered council hot-swaps its tool immediately (no restart)."
+    ].join(" "),
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Council id: /^[a-z0-9_-]{2,32}$/ \u2014 also the tool name." },
+        label: { type: "string", description: "Human label shown in the UI (1-64 chars)." },
+        description: { type: "string", description: "One-line description of what the council deliberates." },
+        seats: {
+          type: "array",
+          minItems: 2,
+          maxItems: 8,
+          description: 'Contender seats; "referee" and "chair" are reserved arbiter ids.',
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Seat id: /^[a-z0-9_-]{2,32}$/; also the personas routing key." },
+              label: { type: "string", description: "Seat label (1-64 chars)." },
+              persona: { type: "string", description: "Persona text injected as the seat system context." },
+              opGates: { type: "array", items: { type: "string" }, description: "Ledger kinds / actions this seat may propose." },
+              family: { type: "string", enum: ["adversarial", "systemic", "practical", "divergent", "empirical", "neutral"], description: "Model-family hint for default routing." }
+            },
+            required: ["id", "label", "persona"]
+          }
+        },
+        ledgerKinds: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              kind: { type: "string" },
+              idPrefix: { type: "string", description: "1-4 chars; ledger ids are PREFIX-N." },
+              terminalStatuses: {
+                type: "array",
+                minItems: 1,
+                items: { type: "string", enum: ["open", "contested", "invariant", "falsified", "dissent"] }
+              }
+            },
+            required: ["kind", "idPrefix", "terminalStatuses"]
+          }
+        },
+        actions: { type: "array", minItems: 1, items: { type: "string" }, description: "Ops a contender turn may propose (e.g. CONCEDE, DEFEND)." },
+        steelman: { type: "boolean", description: "Require a steelman before attacks (debate councils)." },
+        scopeContract: { type: "string", description: "Out-of-scope rules the referee enforces." },
+        opening: { type: "string", enum: ["blind", "open"], description: "blind = independent epoch-0 formulation; open = straight to rounds." },
+        forestMode: { type: "boolean", description: "Idea-forest council (SPROUT/BRANCH/FUSE/TENSION); nothing is ever pruned." },
+        deliverableSections: { type: "array", minItems: 1, items: { type: "string" }, description: "Exact sections the chair compiles." },
+        stoppingPolicy: {
+          type: "object",
+          properties: {
+            type: { type: "string", enum: ["ledger_convergence", "topological_saturation", "fixed_epochs"] },
+            stagnationLimit: { type: "number", description: "Epochs without movement before the final challenge (1-6)." },
+            maxEpochs: { type: "number", description: "Hard epoch bound for fixed_epochs (1-12)." }
+          },
+          required: ["type"]
+        },
+        chairTemplate: {
+          type: "object",
+          description: "Chair prompts; placeholders {{label}}, {{query}}, {{ledger}}, {{evidence}}, {{sections}}, {{note}} are substituted in userPromptTemplate.",
+          properties: {
+            systemPrompt: { type: "string" },
+            userPromptTemplate: { type: "string" }
+          },
+          required: ["systemPrompt", "userPromptTemplate"]
+        }
+      },
+      required: ["id", "label", "seats", "ledgerKinds", "actions", "deliverableSections", "stoppingPolicy", "chairTemplate"]
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          enabled: { type: "boolean" }
+        },
+        required: ["id", "enabled"]
+      },
+      render: (_args, value) => [{ type: "text", text: `Council "${value.id}" registered and enabled (tool: ${value.id}).` }]
+    },
+    async execute(args) {
+      const { decl, errors } = validateDeclarativeCouncil(args);
+      if (decl === void 0) {
+        throw new Error(`council_register rejected the definition: ${errors.join("; ")}`);
+      }
+      await persistCouncil(ctx, decl.id, decl);
+      sync();
+      return { id: decl.id, enabled: true };
+    }
+  };
+}
+function listDefinition(ctx) {
+  return {
+    name: "council_list",
+    description: [
+      "List the councils available in this session: the built-in roundtable and chorus plus every council registered under",
+      "enpoi-orchestration.councils. Shows each council id, label, seats, whether its tool is enabled, and any validation problem."
+    ].join(" "),
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          councils: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                id: { type: "string" },
+                label: { type: "string" },
+                builtin: { type: "boolean" },
+                enabled: { type: "boolean" },
+                seats: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: { id: { type: "string" }, label: { type: "string" }, family: { type: "string" } },
+                    required: ["id", "label"]
+                  }
+                },
+                error: { type: "string" }
+              },
+              required: ["id", "label", "builtin", "enabled", "seats"]
+            }
+          }
+        },
+        required: ["councils"]
+      },
+      render: (_args, value) => [{
+        type: "text",
+        text: value.councils.map(
+          (c) => `${c.enabled ? "\u25CF" : "\u25CB"} ${c.id} \u2014 ${c.label} [${c.seats.map((s) => s.id).join(", ")}]${c.error !== void 0 ? ` \u2014 invalid: ${c.error}` : ""}`
+        ).join("\n")
+      }]
+    },
+    async execute() {
+      const registry = loadCouncilRegistry(ctx);
+      return {
+        councils: registry.entries.map((entry) => ({
+          id: entry.id,
+          label: entry.label,
+          builtin: entry.builtin,
+          enabled: entry.enabled,
+          seats: entry.seats.map((seat) => ({
+            id: seat.id,
+            label: seat.label,
+            ...seat.family !== void 0 ? { family: seat.family } : {}
+          })),
+          ...entry.error !== void 0 ? { error: entry.error } : {}
+        }))
+      };
+    }
+  };
+}
+async function persistCouncil(ctx, id, decl) {
+  const settings = ctx.get("settings");
+  if (settings?.mutate === void 0) {
+    throw new Error("council_register needs a writable settings service (enpoi-orchestration.councils is the registry source of truth)");
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const revision = settings.describe?.().find((entry) => entry.ns === ORCH_NAMESPACE)?.revision;
+    try {
+      await settings.mutate(ORCH_NAMESPACE, [{ op: "set", path: ["councils", id], value: councilSettingsEntry(decl) }], revision);
+      return;
+    } catch (err) {
+      if (err.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
+      throw err;
+    }
+  }
+  throw new Error(`council_register could not persist "${id}": the settings namespace kept changing under it`);
 }
 
 // src/index.ts
@@ -5782,6 +6442,7 @@ var PersonaModelSchema = Schema.object({
 });
 var OrchestrationSettingsSchema = Schema.object({
   personas: Schema.dict(PersonaModelSchema).default({}),
+  councils: Schema.dict(Schema.any()).default({}),
   uiPreferences: Schema.object({
     hiddenModels: Schema.any(),
     favorites: Schema.any(),
@@ -5790,6 +6451,7 @@ var OrchestrationSettingsSchema = Schema.object({
   }).default({})
 });
 function apply(ctx) {
+  mountEnpoiCouncilRemote(ctx);
   ctx.inject(["tools", "subagents", "sessionPersistence", "sessions", "agents"], (injected) => {
     registerCouncilTools(injected, ctx);
   });

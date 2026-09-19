@@ -1,4 +1,0 @@
-# dsh-enpoi-dispatcher — mounts the task-dispatch tool into the web profile.
-- insert:
-    - id: enpoi-dispatcher
-      name: 'dsh-enpoi-dispatcher'

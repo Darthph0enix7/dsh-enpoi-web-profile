@@ -127,12 +127,17 @@ export interface McpStatusEntry {
   mounted: boolean
   checkedAt: number
   authError?: boolean
+  /** Last mount failure reported by the host; cleared by a successful mount. */
+  error?: string
 }
 
 /** Server catalog entries (enpoi-orchestration.mcpServers). */
 export interface McpServerEntry {
   serverName?: string
+  transport?: string
   url?: string
+  apiKeyEnv?: string
+  headers?: Record<string, string>
 }
 
 let globalMcpStatus: Record<string, McpStatusEntry> = {}
@@ -210,6 +215,171 @@ export async function refreshMcpStatus(): Promise<void> {
   } catch {
     // keep last known status on transient failures
   }
+}
+
+/** One describe view of the enpoi-orchestration namespace with its write fence. */
+interface OrchestrationSidebarView {
+  revision?: number
+  value?: { mcpServers?: Record<string, McpServerEntry> }
+}
+
+/** Read the enpoi-orchestration namespace (revision + catalog) through the live gateway. */
+async function describeOrchestrationSidebar(): Promise<OrchestrationSidebarView | undefined> {
+  try {
+    const res = await fetch('/api/settings.describe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', method: 'settings/describe', rpcId: `mcp-catalog-describe-${Date.now()}`, payload: { args: {} } }),
+    })
+    if (!res.ok) return undefined
+    const json = await res.json() as { result?: { value?: { namespaces?: Array<{ ns?: string; revision?: number; value?: { mcpServers?: Record<string, McpServerEntry> } }> } } }
+    const namespaces = json?.result?.value?.namespaces
+    return Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Outcome of one MCP catalog write: persisted, or the reason to show the operator. */
+export type McpWriteResult = { ok: true } | { ok: false; reason: string }
+
+/** One path op inside the enpoi-orchestration namespace. */
+interface McpSettingsOp {
+  op: 'set' | 'unset'
+  path: string[]
+  value?: unknown
+}
+
+/** How many times a fenced catalog write re-reads and retries on conflict. */
+const MAX_MCP_WRITE_RETRIES = 3
+
+/** Whether a string is an http(s) URL the mount machinery can dial. */
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/** Post one catalog write fenced by the revision read from describe. */
+async function postMcpMutation(ops: McpSettingsOp[], expectedRevision: number | undefined): Promise<{ ok: boolean; conflict: boolean }> {
+  const args: Record<string, unknown> = { ns: 'enpoi-orchestration', ops }
+  if (expectedRevision !== undefined) args.expectedRevision = expectedRevision
+  try {
+    const res = await fetch('/api/settings.mutate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings/mutate',
+        rpcId: `mcp-catalog-mutate-${Date.now()}`,
+        payload: { args },
+      }),
+    })
+    if (!res.ok) return { ok: false, conflict: false }
+    const json = await res.json() as { result?: { ok?: boolean; error?: { code?: string } } }
+    if (json?.result?.ok === true) return { ok: true, conflict: false }
+    return { ok: false, conflict: json?.result?.error?.code === 'settings/conflict' }
+  } catch {
+    // Transport failure: not a revision conflict, so the caller stops retrying.
+    return { ok: false, conflict: false }
+  }
+}
+
+/** One add-server form submission. */
+export interface McpServerInput {
+  serverName: string
+  url: string
+  apiKeyEnv?: string
+  headers?: Record<string, string>
+}
+
+/**
+ * Add one MCP server at `enpoi-orchestration.mcpServers.<id>`. Validation
+ * rejects an empty id, a non-http(s) url, and an id already in the live
+ * catalog. The row is published optimistically at 0ms and rolls back when the
+ * write does not persist; the write is fenced by the namespace revision read
+ * from describe, and a `settings/conflict` re-reads and retries.
+ * @param input - the form's values.
+ * @returns whether the entry persisted, or the reason it did not.
+ */
+export async function addMcpServer(input: McpServerInput): Promise<McpWriteResult> {
+  const id = input.serverName.trim()
+  if (id === '') return { ok: false, reason: 'server id is required' }
+  const url = input.url.trim()
+  if (!isHttpUrl(url)) return { ok: false, reason: 'url must be an http(s) address' }
+  if (globalMcpServers[id] !== undefined) return { ok: false, reason: `server id "${id}" already exists` }
+  const entry: McpServerEntry = {
+    serverName: id,
+    transport: 'streamable-http',
+    url,
+    ...(input.apiKeyEnv !== undefined && input.apiKeyEnv.trim() !== '' ? { apiKeyEnv: input.apiKeyEnv.trim() } : {}),
+    ...(input.headers !== undefined && Object.keys(input.headers).length > 0 ? { headers: { ...input.headers } } : {}),
+  }
+  const previous = globalMcpServers
+  globalMcpServers = { ...globalMcpServers, [id]: entry }
+  notify()
+  for (let attempt = 0; attempt <= MAX_MCP_WRITE_RETRIES; attempt++) {
+    const view = await describeOrchestrationSidebar()
+    if (view === undefined) {
+      globalMcpServers = previous
+      notify()
+      return { ok: false, reason: 'settings service is unavailable' }
+    }
+    if (view.value?.mcpServers?.[id] !== undefined) {
+      // Another client added the id first: keep the server's catalog, drop ours.
+      globalMcpServers = view.value.mcpServers
+      notify()
+      return { ok: false, reason: `server id "${id}" already exists` }
+    }
+    const outcome = await postMcpMutation([{ op: 'set', path: ['mcpServers', id], value: entry }], view.revision)
+    if (outcome.ok) return { ok: true }
+    if (!outcome.conflict) {
+      globalMcpServers = previous
+      notify()
+      return { ok: false, reason: 'settings write was rejected' }
+    }
+  }
+  globalMcpServers = previous
+  notify()
+  return { ok: false, reason: 'settings write conflicted repeatedly' }
+}
+
+/**
+ * Remove one MCP server from the catalog (`unset` of its
+ * `enpoi-orchestration.mcpServers.<id>` key), fenced by the namespace revision
+ * read from describe with the same conflict retry as {@link addMcpServer}.
+ * The row disappears optimistically and returns when the write does not persist.
+ * @param id - catalog key to remove.
+ * @returns whether the removal persisted, or the reason it did not.
+ */
+export async function removeMcpServer(id: string): Promise<McpWriteResult> {
+  const previous = globalMcpServers
+  if (previous[id] === undefined) return { ok: true }
+  const next = { ...previous }
+  delete next[id]
+  globalMcpServers = next
+  notify()
+  for (let attempt = 0; attempt <= MAX_MCP_WRITE_RETRIES; attempt++) {
+    const view = await describeOrchestrationSidebar()
+    if (view === undefined) {
+      globalMcpServers = previous
+      notify()
+      return { ok: false, reason: 'settings service is unavailable' }
+    }
+    const outcome = await postMcpMutation([{ op: 'unset', path: ['mcpServers', id] }], view.revision)
+    if (outcome.ok) return { ok: true }
+    if (!outcome.conflict) {
+      globalMcpServers = previous
+      notify()
+      return { ok: false, reason: 'settings write was rejected' }
+    }
+  }
+  globalMcpServers = previous
+  notify()
+  return { ok: false, reason: 'settings write conflicted repeatedly' }
 }
 
 // Initial prime from describe
@@ -305,6 +475,17 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
   const view = useSyncExternalStore(subscribe, () => snapshotCache)
   const caps = view.caps
 
+  // Add-server form + per-row remove confirmation (MCP catalog edits).
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [addName, setAddName] = React.useState('')
+  const [addUrl, setAddUrl] = React.useState('')
+  const [addApiKeyEnv, setAddApiKeyEnv] = React.useState('')
+  const [addHeaders, setAddHeaders] = React.useState('')
+  const [addError, setAddError] = React.useState<string | null>(null)
+  const [addBusy, setAddBusy] = React.useState(false)
+  const [confirmRemove, setConfirmRemove] = React.useState<string | null>(null)
+  const [mcpActionError, setMcpActionError] = React.useState<string | null>(null)
+
   // Refresh the live skill catalog every time the drawer opens (and on mount),
   // so newly created/removed skill folders are reflected immediately.
   // MCP heartbeat + server catalog re-poll every 15s while visible.
@@ -318,6 +499,59 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
     const iv = window.setInterval(() => { void refreshMcpStatus() }, 15_000)
     return () => { window.clearInterval(iv) }
   }, [props.visible])
+
+  /** Parse the optional headers textarea into a flat string map (undefined when blank). */
+  const parseHeadersField = (text: string): Record<string, string> | undefined => {
+    const trimmed = text.trim()
+    if (trimmed === '') return undefined
+    const parsed = JSON.parse(trimmed) as unknown
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('headers must be a JSON object')
+    }
+    const headers: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value !== 'string') throw new Error(`header "${key}" must be a string`)
+      headers[key] = value
+    }
+    return headers
+  }
+
+  /** Submit the add-server form; failures render inline, never as a silent no-op. */
+  const submitAddServer = async (): Promise<void> => {
+    setAddError(null)
+    let headers: Record<string, string> | undefined
+    try {
+      headers = parseHeadersField(addHeaders)
+    } catch (err: unknown) {
+      setAddError(err instanceof Error ? err.message : String(err))
+      return
+    }
+    setAddBusy(true)
+    const result = await addMcpServer({
+      serverName: addName,
+      url: addUrl,
+      apiKeyEnv: addApiKeyEnv,
+      ...(headers !== undefined ? { headers } : {}),
+    })
+    setAddBusy(false)
+    if (!result.ok) {
+      setAddError(result.reason)
+      return
+    }
+    setAddName('')
+    setAddUrl('')
+    setAddApiKeyEnv('')
+    setAddHeaders('')
+    setAddOpen(false)
+  }
+
+  /** Confirm-and-remove one catalog server. */
+  const submitRemoveServer = async (id: string): Promise<void> => {
+    setMcpActionError(null)
+    const result = await removeMcpServer(id)
+    setConfirmRemove(null)
+    if (!result.ok) setMcpActionError(result.reason)
+  }
 
   const mcpList: CapabilityDescriptor[] = (() => {
     const rows = new Map<string, CapabilityDescriptor>()
@@ -345,7 +579,7 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
   const subagentList = KNOWN_CAPABILITIES.filter(c => c.kind === 'tool' && (c.category === 'supervision' || c.category === 'council' || c.category === 'workers'))
   const coreToolList = KNOWN_CAPABILITIES.filter(c => c.kind === 'tool' && c.category === 'core-tools')
 
-  const renderGroup = (title: string, icon: React.ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp') => {
+  const renderGroup = (title: string, icon: React.ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp', footer?: React.ReactNode) => {
     const activeCount = items.filter(item => {
       if (kind === 'tool') return caps.tools[item.id] !== false
       if (kind === 'skill') return caps.skills[item.id] !== false
@@ -399,16 +633,20 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
                   ? (caps.skills[item.id] !== false)
                   : (caps.mcp[item.id] === true)
 
-            // MCP rows: connection heartbeat instead of enable-dot.
+            // MCP rows: connection heartbeat instead of enable-dot. The host's
+            // last mount failure outranks online/down while it is fresh.
+            const st = kind === 'mcp' ? view.mcpStatus[item.id] : undefined
+            const stFresh = st !== undefined && Date.now() - st.checkedAt <= 45_000
             let dotColor = isEnabled ? '#34d399' : '#64748b'
             let dotGlow = isEnabled ? '0 0 5px rgba(52, 211, 153, 0.6)' : 'none'
             let connTitle = ''
-            if (kind === 'mcp') {
-              const st = view.mcpStatus[item.id]
-              const stale = !st || Date.now() - st.checkedAt > 45_000
-              if (stale) {
+            if (kind === 'mcp' && st !== undefined) {
+              if (!stFresh) {
                 dotColor = '#475569'; dotGlow = 'none'
                 connTitle = 'Checking availability…'
+              } else if (st.error !== undefined) {
+                dotColor = '#e5716f'; dotGlow = '0 0 4px rgba(229, 113, 111, 0.35)'
+                connTitle = `Mount failed — ${st.error}`
               } else if (st.state === 'down') {
                 dotColor = '#e5716f'; dotGlow = '0 0 4px rgba(229, 113, 111, 0.35)'
                 connTitle = 'Not reachable — server not running'
@@ -420,6 +658,7 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
                 connTitle = st.authError ? 'Server running · auth rejected' : 'Server running · toggled off'
               }
             }
+            const removable = kind === 'mcp' && view.mcpServers[item.id] !== undefined
 
             return (
               <div
@@ -473,53 +712,234 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                   }}>{item.description}</div>
+                  {kind === 'mcp' && stFresh && st?.error !== undefined && (
+                    <div title={st.error} style={{ fontSize: '9.5px', color: '#e5716f', overflowWrap: 'anywhere' }}>
+                      mount failed: {st.error}
+                    </div>
+                  )}
                 </div>
-                <label style={{
-                  position: 'relative',
-                  width: '28px',
-                  height: '16px',
-                  flexShrink: 0,
-                  marginLeft: '8px',
-                  cursor: isProtected ? 'not-allowed' : 'pointer',
-                  opacity: isProtected ? 0.5 : 1,
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={isEnabled}
-                    disabled={isProtected}
-                    style={{ opacity: 0, width: 0, height: 0, position: 'absolute' }}
-                    onChange={(e) => {
-                      void toggleCapability(kind, item.id, e.target.checked)
-                    }}
-                  />
-                  <span style={{
-                    position: 'absolute',
-                    inset: 0,
-                    borderRadius: '16px',
-                    background: isEnabled ? 'rgba(52, 211, 153, 0.3)' : 'rgba(255, 255, 255, 0.1)',
-                    border: `1px solid ${isEnabled ? 'rgba(52, 211, 153, 0.5)' : 'rgba(255, 255, 255, 0.1)'}`,
-                    transition: 'all 0.15s ease',
-                  }}>
-                    <span style={{
-                      position: 'absolute',
-                      height: '10px',
-                      width: '10px',
-                      left: isEnabled ? '13px' : '2px',
-                      top: '2px',
-                      borderRadius: '50%',
-                      background: isEnabled ? '#34d399' : '#94a3b8',
-                      boxShadow: isEnabled ? '0 0 6px rgba(52, 211, 153, 0.8)' : 'none',
-                      transition: 'all 0.15s ease',
-                    }} />
-                  </span>
-                </label>
+                {confirmRemove === item.id ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                    <span style={{ fontSize: '10px', color: '#e5716f', whiteSpace: 'nowrap' }}>Remove?</span>
+                    <button
+                      type="button"
+                      style={{
+                        minHeight: '24px',
+                        padding: '0 8px',
+                        borderRadius: '6px',
+                        background: 'rgba(229, 113, 111, 0.12)',
+                        border: '1px solid rgba(229, 113, 111, 0.35)',
+                        color: '#e5716f',
+                        fontSize: '10px',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => { void submitRemoveServer(item.id) }}
+                    >
+                      Remove
+                    </button>
+                    <button
+                      type="button"
+                      style={{
+                        minHeight: '24px',
+                        padding: '0 8px',
+                        borderRadius: '6px',
+                        background: 'rgba(255, 255, 255, 0.04)',
+                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                        color: '#94a3b8',
+                        fontSize: '10px',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => { setConfirmRemove(null) }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                    <label style={{
+                      position: 'relative',
+                      width: '28px',
+                      height: '16px',
+                      flexShrink: 0,
+                      marginLeft: '8px',
+                      cursor: isProtected ? 'not-allowed' : 'pointer',
+                      opacity: isProtected ? 0.5 : 1,
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={isEnabled}
+                        disabled={isProtected}
+                        style={{ opacity: 0, width: 0, height: 0, position: 'absolute' }}
+                        onChange={(e) => {
+                          void toggleCapability(kind, item.id, e.target.checked)
+                        }}
+                      />
+                      <span style={{
+                        position: 'absolute',
+                        inset: 0,
+                        borderRadius: '16px',
+                        background: isEnabled ? 'rgba(52, 211, 153, 0.3)' : 'rgba(255, 255, 255, 0.1)',
+                        border: `1px solid ${isEnabled ? 'rgba(52, 211, 153, 0.5)' : 'rgba(255, 255, 255, 0.1)'}`,
+                        transition: 'all 0.15s ease',
+                      }}>
+                        <span style={{
+                          position: 'absolute',
+                          height: '10px',
+                          width: '10px',
+                          left: isEnabled ? '13px' : '2px',
+                          top: '2px',
+                          borderRadius: '50%',
+                          background: isEnabled ? '#34d399' : '#94a3b8',
+                          boxShadow: isEnabled ? '0 0 6px rgba(52, 211, 153, 0.8)' : 'none',
+                          transition: 'all 0.15s ease',
+                        }} />
+                      </span>
+                    </label>
+                    {removable && (
+                      <button
+                        type="button"
+                        aria-label={`Remove ${item.name}`}
+                        title={`Remove ${item.name}`}
+                        style={{
+                          width: '20px',
+                          height: '20px',
+                          padding: 0,
+                          borderRadius: '5px',
+                          background: 'rgba(229, 113, 111, 0.08)',
+                          border: '1px solid rgba(229, 113, 111, 0.22)',
+                          color: '#e5716f',
+                          fontSize: '12px',
+                          lineHeight: 1,
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => { setMcpActionError(null); setConfirmRemove(item.id) }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )
           })}
         </div>
+        {footer}
       </div>
     )
   }
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    boxSizing: 'border-box',
+    minHeight: '24px',
+    padding: '3px 6px',
+    borderRadius: '5px',
+    background: 'rgba(255, 255, 255, 0.03)',
+    border: '1px solid rgba(255, 255, 255, 0.1)',
+    color: '#e2e8f0',
+    fontSize: '10.5px',
+    fontFamily: 'inherit',
+  }
+
+  /** Catalog editor: add-server form (collapsed by default) + action failures. */
+  const mcpFooter = (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '4px' }}>
+      {mcpActionError !== null && (
+        <div style={{ fontSize: '9.5px', color: '#e5716f', overflowWrap: 'anywhere' }}>{mcpActionError}</div>
+      )}
+      {addOpen ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          <input
+            aria-label="MCP server id"
+            placeholder="server-id"
+            value={addName}
+            onChange={(e) => { setAddName(e.target.value) }}
+            style={inputStyle}
+          />
+          <input
+            aria-label="MCP server URL"
+            placeholder="https://host/mcp"
+            value={addUrl}
+            onChange={(e) => { setAddUrl(e.target.value) }}
+            style={inputStyle}
+          />
+          <input
+            aria-label="MCP server API key env"
+            placeholder="API key env (optional)"
+            value={addApiKeyEnv}
+            onChange={(e) => { setAddApiKeyEnv(e.target.value) }}
+            style={inputStyle}
+          />
+          <textarea
+            aria-label="MCP server headers JSON"
+            placeholder='Headers JSON (optional), e.g. {"x-workspace-slug":"main"}'
+            rows={2}
+            value={addHeaders}
+            onChange={(e) => { setAddHeaders(e.target.value) }}
+            style={{ ...inputStyle, resize: 'vertical' }}
+          />
+          {addError !== null && (
+            <div style={{ fontSize: '9.5px', color: '#e5716f', overflowWrap: 'anywhere' }}>{addError}</div>
+          )}
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              type="button"
+              disabled={addBusy}
+              style={{
+                alignSelf: 'flex-start',
+                minHeight: '26px',
+                padding: '0 10px',
+                borderRadius: '6px',
+                background: 'rgba(103, 220, 231, 0.08)',
+                border: '1px solid rgba(103, 220, 231, 0.25)',
+                color: '#67dce7',
+                fontSize: '10.5px',
+                cursor: addBusy ? 'default' : 'pointer',
+                opacity: addBusy ? 0.6 : 1,
+              }}
+              onClick={() => { void submitAddServer() }}
+            >
+              {addBusy ? 'Adding…' : 'Add server'}
+            </button>
+            <button
+              type="button"
+              style={{
+                minHeight: '26px',
+                padding: '0 10px',
+                borderRadius: '6px',
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#94a3b8',
+                fontSize: '10.5px',
+                cursor: 'pointer',
+              }}
+              onClick={() => { setAddOpen(false); setAddError(null) }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          style={{
+            alignSelf: 'flex-start',
+            minHeight: '26px',
+            padding: '0 10px',
+            borderRadius: '6px',
+            background: 'rgba(103, 220, 231, 0.08)',
+            border: '1px solid rgba(103, 220, 231, 0.25)',
+            color: '#67dce7',
+            fontSize: '10.5px',
+            cursor: 'pointer',
+          }}
+          onClick={() => { setAddOpen(true); setAddError(null) }}
+        >
+          + Add MCP server
+        </button>
+      )}
+    </div>
+  )
 
   return (
     <div style={{
@@ -536,7 +956,7 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
         <p style={{ fontSize: '10.5px', color: '#94a3b8', margin: 0 }}>Toggle MCPs, Skills & Subagents in real time</p>
       </div>
 
-      {renderGroup('MCP Tool Suites', iconPlug(), mcpList, 'mcp')}
+      {renderGroup('MCP Tool Suites', iconPlug(), mcpList, 'mcp', mcpFooter)}
       {skillList.length > 0
         ? renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill')
         : (
