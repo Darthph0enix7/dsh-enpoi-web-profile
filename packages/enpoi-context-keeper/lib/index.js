@@ -45,6 +45,7 @@ var __callDispose = (stack, error, hasError) => {
 };
 
 // src/index.ts
+import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -131,22 +132,23 @@ var CLAIMS_PROMPT = [
   "No other text at all."
 ].join("\n");
 var STRUCTURAL_TYPES = /* @__PURE__ */ new Set(["user/message", "turn/end", "tool/call", "tool/result"]);
-function countStructuralAfter(session, fromSeq) {
-  let count = 0;
-  const events = session.snapshotEvents();
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
-    if (event.seq <= fromSeq) break;
+var structuralCounters = /* @__PURE__ */ new WeakMap();
+function structuralTotal(session) {
+  const known = structuralCounters.get(session);
+  if (known === void 0) {
+    let count2 = 0;
+    for (const event of session.snapshotEvents()) {
+      if (STRUCTURAL_TYPES.has(event.type)) count2 += 1;
+    }
+    structuralCounters.set(session, { seq: session.seq, total: count2 });
+    return count2;
+  }
+  if (session.seq <= known.seq) return known.total;
+  let count = known.total;
+  for (const event of session.snapshotEvents(SessionLogOffset(known.seq))) {
     if (STRUCTURAL_TYPES.has(event.type)) count += 1;
   }
-  return count;
-}
-function countStructuralUpTo(session, toSeq) {
-  let count = 0;
-  for (const event of session.snapshotEvents()) {
-    if (event.seq > toSeq) break;
-    if (STRUCTURAL_TYPES.has(event.type)) count += 1;
-  }
+  structuralCounters.set(session, { seq: session.seq, total: count });
   return count;
 }
 function resolveKeeperParams(ctx, config) {
@@ -203,7 +205,8 @@ function emptyEntry() {
     updatedAt: 0,
     negativeUntil: 0,
     inFlight: null,
-    inFlightSnapshotSeq: 0
+    inFlightSnapshotSeq: 0,
+    inFlightStructural: 0
   };
 }
 var BriefService = class {
@@ -235,13 +238,13 @@ var BriefService = class {
       return { ok: true, prose: entry.prose, model: entry.model, reason: "cache-hit" };
     }
     if (entry !== void 0 && entry.prose.length > 0) {
-      const distance = countStructuralAfter(session, entry.basedOnSeq);
+      const distance = structuralTotal(session) - entry.basedOnStructuralCount;
       if (distance <= (cfg.structuralDistanceK ?? 24)) {
         return { ok: true, prose: entry.prose, model: entry.model, reason: "cache-hit" };
       }
     }
     if (entry !== void 0 && entry.inFlight !== null) {
-      const inFlightDistance = countStructuralAfter(session, entry.inFlightSnapshotSeq);
+      const inFlightDistance = structuralTotal(session) - entry.inFlightStructural;
       if (inFlightDistance <= (cfg.structuralDistanceK ?? 24)) {
         try {
           return await entry.inFlight;
@@ -251,12 +254,13 @@ var BriefService = class {
         }
       }
     }
-    const snapshotSeq = session.snapshotEvents().at(-1)?.seq ?? session.seq;
+    const snapshotSeq = session.seq;
     const promise = this.distill(session, signal, snapshotSeq, cfg);
     this.cache.set(key, {
       ...entry ?? emptyEntry(),
       inFlight: promise,
-      inFlightSnapshotSeq: snapshotSeq
+      inFlightSnapshotSeq: snapshotSeq,
+      inFlightStructural: structuralTotal(session)
     });
     try {
       return await promise;
@@ -279,7 +283,7 @@ var BriefService = class {
         return { ok: false, prose: null, reason: "failed" };
       }
       const route = resolveKeeperRoute(this.ctx, cfg);
-      const snapshotStructural = countStructuralUpTo(session, snapshotSeq);
+      const snapshotStructural = structuralTotal(session);
       diag(`ensureFreshBrief: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`);
       const result = await summarize(this.ctx, cfg, session, input, combined, route, PROSE_PROMPT, false);
       const prose = cleanKeeperProse(result.text);
@@ -338,6 +342,10 @@ function apply(ctx, config) {
   const claimCounters = /* @__PURE__ */ new Map();
   const claimsRunning = /* @__PURE__ */ new Set();
   ctx.on("session/event", (session, event) => {
+    if (STRUCTURAL_TYPES.has(event.type)) {
+      const known = structuralCounters.get(session);
+      if (known !== void 0) structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 });
+    }
     if (event.type !== "turn/end") return;
     if (!keeperEnabled(ctx)) return;
     const reason = event.data.reason;

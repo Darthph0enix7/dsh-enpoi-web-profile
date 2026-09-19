@@ -17,9 +17,10 @@ function makeSession(events: Array<{ type: string; seq: number; data: unknown }>
   const log = [...events]
   return {
     id: 'test-session',
-    get seq() { return log.length > 0 ? log[log.length - 1]!.seq : 0 },
+    // The real Session reports `seq` as the next sequence number (log length).
+    get seq() { return log.length },
     events: log,
-    snapshotEvents: (): Array<{ type: string; seq: number; data: unknown }> => [...log],
+    snapshotEvents: (from = 0, to = log.length): Array<{ type: string; seq: number; data: unknown }> => log.slice(from, to),
     append: vi.fn((event: { type: string; seq: number; data: unknown }) => { log.push(event) }),
   }
 }
@@ -70,7 +71,9 @@ const baseConfig: Config = {
 /** A session with N structural events (user/message + turn/end pairs). */
 function sessionWithTurns(n: number) {
   const events: Array<{ type: string; seq: number; data: unknown }> = []
-  let seq = 1
+  // Zero-based sequence numbers, matching the runtime Session (event i has
+  // seq i; `session.seq` is the next number, i.e. the log length).
+  let seq = 0
   for (let i = 0; i < n; i++) {
     events.push({ type: 'user/message', seq: seq++, data: { content: `query ${i}`, source: { kind: 'user' } } })
     events.push({ type: 'assistant/message', seq: seq++, data: { text: `answer ${i}` } })

@@ -33,7 +33,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { BlockAssembler, createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { deadline } from '@deepseek-ai/dsh-timeout'
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -159,25 +159,38 @@ const CLAIMS_PROMPT = [
 /** Structural event types — the only events that age the brief (Oracle amendment 3). */
 const STRUCTURAL_TYPES = new Set(['user/message', 'turn/end', 'tool/call', 'tool/result'])
 
-/** Count structural events with seq > fromSeq (backwards scan, O(distance)). */
-function countStructuralAfter(session: Session, fromSeq: number): number {
-  let count = 0
-  const events = session.snapshotEvents()
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event.seq <= fromSeq) break
-    if (STRUCTURAL_TYPES.has(event.type)) count += 1
-  }
-  return count
-}
+/**
+ * Incremental structural-event totals per Session object (a WeakMap, so a
+ * disposed session takes its counter with it): seeded with ONE read per
+ * session, then maintained from committed events so freshness checks are O(1)
+ * (the synchronous history readers are deprecated; the runtime intends to stop
+ * keeping the sequence resident).
+ */
+const structuralCounters = new WeakMap<Session, { seq: number; total: number }>()
 
-/** Count structural events with seq <= toSeq (forward scan). */
-function countStructuralUpTo(session: Session, toSeq: number): number {
-  let count = 0
-  for (const event of session.snapshotEvents()) {
-    if (event.seq > toSeq) break
+/**
+ * Seed on first use, maintain from committed events, and catch up over any
+ * appended tail a missed delivery left behind — only the delta is read, so
+ * freshness checks stay O(1) instead of cloning the whole log.
+ */
+function structuralTotal(session: Session): number {
+  const known = structuralCounters.get(session)
+  if (known === undefined) {
+    let count = 0
+    for (const event of session.snapshotEvents()) {
+      if (STRUCTURAL_TYPES.has(event.type)) count += 1
+    }
+    structuralCounters.set(session, { seq: session.seq, total: count })
+    return count
+  }
+  // `session.seq` is the next sequence number (log length), so `known.seq`
+  // already points one past the last counted event.
+  if (session.seq <= known.seq) return known.total
+  let count = known.total
+  for (const event of session.snapshotEvents(SessionLogOffset(known.seq))) {
     if (STRUCTURAL_TYPES.has(event.type)) count += 1
   }
+  structuralCounters.set(session, { seq: session.seq, total: count })
   return count
 }
 
@@ -273,6 +286,8 @@ interface BriefCacheEntry {
   inFlight: Promise<BriefResult> | null
   /** The snapshot seq the in-flight pass is based on. */
   inFlightSnapshotSeq: number
+  /** Structural total when the in-flight pass started. */
+  inFlightStructural: number
 }
 
 function emptyEntry(): BriefCacheEntry {
@@ -285,6 +300,7 @@ function emptyEntry(): BriefCacheEntry {
     negativeUntil: 0,
     inFlight: null,
     inFlightSnapshotSeq: 0,
+    inFlightStructural: 0,
   }
 }
 
@@ -336,7 +352,7 @@ export class BriefService {
 
     // 3. Structural freshness: silence never invalidates prose.
     if (entry !== undefined && entry.prose.length > 0) {
-      const distance = countStructuralAfter(session, entry.basedOnSeq)
+      const distance = structuralTotal(session) - entry.basedOnStructuralCount
       if (distance <= (cfg.structuralDistanceK ?? 24)) {
         return { ok: true, prose: entry.prose, model: entry.model, reason: 'cache-hit' }
       }
@@ -344,7 +360,7 @@ export class BriefService {
 
     // 4. Single-flight: join an in-flight pass whose window is still fresh.
     if (entry !== undefined && entry.inFlight !== null) {
-      const inFlightDistance = countStructuralAfter(session, entry.inFlightSnapshotSeq)
+      const inFlightDistance = structuralTotal(session) - entry.inFlightStructural
       if (inFlightDistance <= (cfg.structuralDistanceK ?? 24)) {
         try {
           return await entry.inFlight
@@ -359,12 +375,13 @@ export class BriefService {
     }
 
     // 5. Distill (snapshot the seq BEFORE the async call — I3 causal ordering).
-    const snapshotSeq = session.snapshotEvents().at(-1)?.seq ?? session.seq
+    const snapshotSeq = session.seq
     const promise = this.distill(session, signal, snapshotSeq, cfg)
     this.cache.set(key, {
       ...(entry ?? emptyEntry()),
       inFlight: promise,
       inFlightSnapshotSeq: snapshotSeq,
+      inFlightStructural: structuralTotal(session),
     })
     try {
       return await promise
@@ -388,7 +405,7 @@ export class BriefService {
         return { ok: false, prose: null, reason: 'failed' }
       }
       const route = resolveKeeperRoute(this.ctx, cfg)
-      const snapshotStructural = countStructuralUpTo(session, snapshotSeq)
+      const snapshotStructural = structuralTotal(session)
       diag(`ensureFreshBrief: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`)
       const result = await summarize(this.ctx, cfg, session, input, combined, route, PROSE_PROMPT, false)
       const prose = cleanKeeperProse(result.text)
@@ -464,6 +481,12 @@ export function apply(ctx: Context, config: Config): void {
   const claimsRunning = new Set<string>()
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    // Structural events age the brief; keep the total incrementally (a session
+    // still unseeded is counted from its log on first use).
+    if (STRUCTURAL_TYPES.has(event.type)) {
+      const known = structuralCounters.get(session)
+      if (known !== undefined) structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 })
+    }
     if (event.type !== 'turn/end') return
     if (!keeperEnabled(ctx)) return // Capabilities toggle: keeper disabled
     const reason = (event.data as { reason: { kind: string } }).reason
