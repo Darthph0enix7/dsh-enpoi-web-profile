@@ -692,19 +692,30 @@ function apply(ctx) {
     return { kind: "ask", reason: decision.reason };
   }));
   ctx.effect(() => disposePolicy, "enpoi-capabilities: permission policy pre-execute");
-  function persistGrant(proposal) {
-    try {
-      const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-      const grant = { id, tool: proposal.tool, ...proposal.pattern !== void 0 ? { pattern: proposal.pattern } : {}, ...proposal.agent !== void 0 ? { agent: proposal.agent } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
-      const settings = ctx.get("settings");
+  async function persistGrant(proposal) {
+    const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const grant = { id, tool: proposal.tool, ...proposal.pattern !== void 0 ? { pattern: proposal.pattern } : {}, ...proposal.agent !== void 0 ? { agent: proposal.agent } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const settings = ctx.get("settings");
+    if (settings?.mutate === void 0) {
+      process.stderr.write("[enpoi-capabilities] grant persistence failed: settings service unavailable\n");
+      return;
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const revision = settings.describe?.().find((entry) => entry.ns === ORCH_NS)?.revision;
       const existing = readPermissionConfig().grants ?? {};
       const next = { ...existing, [id]: grant };
-      void settings?.mutate?.([{ op: "set", path: ["permissions", "grants"], value: next }], ORCH_NS);
-      process.stderr.write(`[enpoi-capabilities] standing grant persisted: ${grant.tool}${grant.pattern ? ` ${grant.pattern}` : ""}${grant.agent ? ` (agent ${grant.agent})` : ""}
+      try {
+        await settings.mutate(ORCH_NS, [{ op: "set", path: ["permissions", "grants"], value: next }], revision);
+        process.stderr.write(`[enpoi-capabilities] standing grant persisted: ${grant.tool}${grant.pattern ? ` ${grant.pattern}` : ""}${grant.agent ? ` (agent ${grant.agent})` : ""}
 `);
-    } catch (error) {
-      process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}
+        return;
+      } catch (error) {
+        const conflict = error;
+        if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
+        process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}
 `);
+        return;
+      }
     }
   }
   const disposeGrantWatch = ctx.on("session/event", ((session, event) => {
@@ -730,7 +741,10 @@ function apply(ctx) {
     if (callId === void 0) return void 0;
     const proposal = pendingGrants.get(callId);
     pendingGrants.delete(callId);
-    if (proposal !== void 0) persistGrant(proposal);
+    if (proposal !== void 0) void persistGrant(proposal).catch((error) => {
+      process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}
+`);
+    });
     return void 0;
   }));
   ctx.effect(() => disposeGrantWatch, "enpoi-capabilities: allow-always grant writer");

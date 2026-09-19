@@ -17,7 +17,8 @@
     "dsh-enpoi-memory": "workspace:*",
     "dsh-enpoi-oracle": "workspace:*",
     "dsh-enpoi-provider-sync": "workspace:*",
-    "dsh-enpoi-runtime-probe": "workspace:*"
+    "dsh-enpoi-runtime-probe": "workspace:*",
+    "dsh-enpoi-ui-state": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
@@ -40,7 +41,8 @@
         "dsh-enpoi-capabilities",
         "dsh-enpoi-file-revert",
         "dsh-enpoi-fs-ops",
-        "dsh-enpoi-git"
+        "dsh-enpoi-git",
+        "dsh-enpoi-ui-state"
       ]
     }
   },

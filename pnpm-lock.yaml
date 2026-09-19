@@ -56,6 +56,9 @@ importers:
       dsh-enpoi-runtime-probe:
         specifier: workspace:*
         version: link:packages/enpoi-runtime-probe
+      dsh-enpoi-ui-state:
+        specifier: workspace:*
+        version: link:packages/enpoi-ui-state
     devDependencies:
       '@types/node':
         specifier: ^26.3.0
@@ -135,6 +138,8 @@ importers:
         version: 3.18.0
 
   packages/enpoi-runtime-probe: {}
+
+  packages/enpoi-ui-state: {}
 
 packages:
 

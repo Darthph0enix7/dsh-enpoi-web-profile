@@ -370,19 +370,35 @@ export function apply(ctx: Context): void {
   // Host-side allow-always persistence (Oracle amendment 2): the card only
   // answers; the host observes the decided outcome and writes the standing
   // grant into settings under the file lock — no client-side read-modify-write.
-  function persistGrant(proposal: GrantProposal): void {
-    try {
-      const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-      const grant: StandingGrant = { id, tool: proposal.tool, ...(proposal.pattern !== undefined ? { pattern: proposal.pattern } : {}), ...(proposal.agent !== undefined ? { agent: proposal.agent } : {}), createdAt: new Date().toISOString() }
-      const settings = ctx.get('settings') as {
-        mutate?: (ops: Array<{ op: string; path: string[]; value?: unknown }>, ns?: string) => Promise<unknown> | unknown
-      } | undefined
+  async function persistGrant(proposal: GrantProposal): Promise<void> {
+    const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    const grant: StandingGrant = { id, tool: proposal.tool, ...(proposal.pattern !== undefined ? { pattern: proposal.pattern } : {}), ...(proposal.agent !== undefined ? { agent: proposal.agent } : {}), createdAt: new Date().toISOString() }
+    const settings = ctx.get('settings') as {
+      describe?: () => Array<{ ns: string; revision?: number }>
+      mutate?: (ns: string, ops: Array<{ op: string; path: string[]; value?: unknown }>, expectedRevision?: number) => Promise<unknown>
+    } | undefined
+    if (settings?.mutate === undefined) {
+      process.stderr.write('[enpoi-capabilities] grant persistence failed: settings service unavailable\n')
+      return
+    }
+    // The grants map is written as a whole leaf value, so the write is fenced
+    // with the namespace revision and re-applied onto the fresh map on a
+    // conflict (another writer won the race); the operator's grant is never
+    // silently dropped and never clobbers a concurrent grant.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const revision = settings.describe?.().find(entry => entry.ns === ORCH_NS)?.revision
       const existing = readPermissionConfig().grants ?? {}
       const next = { ...existing, [id]: grant }
-      void settings?.mutate?.([{ op: 'set', path: ['permissions', 'grants'], value: next }], ORCH_NS)
-      process.stderr.write(`[enpoi-capabilities] standing grant persisted: ${grant.tool}${grant.pattern ? ` ${grant.pattern}` : ''}${grant.agent ? ` (agent ${grant.agent})` : ''}\n`)
-    } catch (error) {
-      process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}\n`)
+      try {
+        await settings.mutate(ORCH_NS, [{ op: 'set', path: ['permissions', 'grants'], value: next }], revision)
+        process.stderr.write(`[enpoi-capabilities] standing grant persisted: ${grant.tool}${grant.pattern ? ` ${grant.pattern}` : ''}${grant.agent ? ` (agent ${grant.agent})` : ''}\n`)
+        return
+      } catch (error) {
+        const conflict = error as { code?: string }
+        if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
+        process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}\n`)
+        return
+      }
     }
   }
 
@@ -412,7 +428,9 @@ export function apply(ctx: Context): void {
     if (callId === undefined) return undefined
     const proposal = pendingGrants.get(callId)
     pendingGrants.delete(callId)
-    if (proposal !== undefined) persistGrant(proposal)
+    if (proposal !== undefined) void persistGrant(proposal).catch((error: unknown) => {
+      process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}\n`)
+    })
     return undefined
   }) as (...args: unknown[]) => unknown)
   ctx.effect(() => disposeGrantWatch, 'enpoi-capabilities: allow-always grant writer')
