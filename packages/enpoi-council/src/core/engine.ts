@@ -13,7 +13,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   COUNCIL_DENIED_TOOLS,
-  DEBATER_DENIED_TOOLS,
   councilDiag,
   disposeSeatFibers,
   ensureBriefWithin,
@@ -26,6 +25,8 @@ import {
   type SeatTurn,
 } from './fiber.ts'
 import { EvidenceQueue, extractEvidenceRequests, serviceEvidenceQueue } from './broker.ts'
+import { councilDenyList } from './fiber.ts'
+import { loadCouncilRegistry } from '../registry.ts'
 import { Ledger } from './ledger.ts'
 import { afterChallenge, evaluate, initialRuntime, trackFlipRun, type StoppingRuntime } from './stopping.ts'
 import { extractProposals, runRefereePass } from './referee.ts'
@@ -507,12 +508,29 @@ interface GenerateArgs {
 }
 
 /** Parallel seat generation over the current floor (spawn epoch 0+1, followup after). */
+/**
+ * The seat deny list for one run: the static base plus every enabled council's
+ * tool id, so a seat can never invoke another council (settings-registered
+ * councils included). A registry read failure must never fail a debate — the
+ * static list stands.
+ */
+function seatDenyList(ctx: Context): string[] {
+  try {
+    return councilDenyList(
+      loadCouncilRegistry(ctx).entries.filter(entry => entry.enabled).map(entry => String(entry.id)),
+    )
+  } catch {
+    return councilDenyList([])
+  }
+}
+
 async function generateParallel(
   ctx: Context,
   parent: Agent,
   spec: CouncilSpec,
   args: GenerateArgs,
 ): Promise<{ turns: SeatTurn[]; tokens: number }> {
+  const denyTools = seatDenyList(ctx)
   const seats = (args.only ?? spec.seats.map(s => s.id))
     .filter(id => !args.deadSeats.has(id))
     .map(id => spec.seats.find(s => s.id === id))
@@ -541,7 +559,7 @@ async function generateParallel(
             label: `${spec.id} seat: ${seat.id}`,
             persona: seat.persona,
             initialPrompt: prompt,
-            denyTools: DEBATER_DENIED_TOOLS,
+            denyTools,
           }, args.signal)
           args.fibers.set(seat.id, fiber)
         } else {
@@ -654,6 +672,7 @@ async function runChair(
       note: input.transcriptNote,
     })
 
+  const denyTools = seatDenyList(ctx)
   let fiber: { childId: string } | undefined
   try {
     fiber = await startSeatFiber(ctx, parent, {
@@ -661,7 +680,7 @@ async function runChair(
       label: `council chair: ${spec.id}`,
       persona,
       initialPrompt: prompt,
-      denyTools: DEBATER_DENIED_TOOLS,
+      denyTools,
     }, input.signal)
     const chairTurn = await waitForSeatTurnDetailed(ctx, fiber.childId, input.signal, input.timeoutMs)
     return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) }

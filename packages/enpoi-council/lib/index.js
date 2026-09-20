@@ -157,6 +157,9 @@ var COUNCIL_DENIED_TOOLS = [
 ];
 var RETRIEVAL_TOOLS = ["read", "glob", "grep", "read_image", "web_search", "web_fetch"];
 var DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS];
+function councilDenyList(registeredCouncilTools) {
+  return [.../* @__PURE__ */ new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter((id) => id !== "roundtable" && id !== "chorus")])];
+}
 var BROKER_KEPT_TOOLS = [...RETRIEVAL_TOOLS];
 function resolvePersonaModel(ctx, persona) {
   try {
@@ -5690,7 +5693,17 @@ function renderLedger(ledger, spec) {
   const edgeLines = s.edges.map((e) => `${e.op} ${e.from ?? "\u2205"} \u2192 ${e.to} (epoch ${e.epoch}, ${e.seat})`);
   return [...lines, ...edgeLines].join("\n");
 }
+function seatDenyList(ctx) {
+  try {
+    return councilDenyList(
+      loadCouncilRegistry(ctx).entries.filter((entry) => entry.enabled).map((entry) => String(entry.id))
+    );
+  } catch {
+    return councilDenyList([]);
+  }
+}
 async function generateParallel(ctx, parent, spec, args) {
+  const denyTools = seatDenyList(ctx);
   const seats = (args.only ?? spec.seats.map((s) => s.id)).filter((id) => !args.deadSeats.has(id)).map((id) => spec.seats.find((s) => s.id === id)).filter((s) => s !== void 0);
   const tasks = seats.map(async (seat) => {
     const prompt = args.promptBuilder(seat.id);
@@ -5712,7 +5725,7 @@ async function generateParallel(ctx, parent, spec, args) {
             label: `${spec.id} seat: ${seat.id}`,
             persona: seat.persona,
             initialPrompt: prompt,
-            denyTools: DEBATER_DENIED_TOOLS
+            denyTools
           }, args.signal);
           args.fibers.set(seat.id, fiber);
         } else {
@@ -5798,6 +5811,7 @@ ${evidenceText}`,
     sections,
     note: input.transcriptNote
   });
+  const denyTools = seatDenyList(ctx);
   let fiber;
   try {
     fiber = await startSeatFiber(ctx, parent, {
@@ -5805,7 +5819,7 @@ ${evidenceText}`,
       label: `council chair: ${spec.id}`,
       persona,
       initialPrompt: prompt,
-      denyTools: DEBATER_DENIED_TOOLS
+      denyTools
     }, input.signal);
     const chairTurn = await waitForSeatTurnDetailed(ctx, fiber.childId, input.signal, input.timeoutMs);
     return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) };

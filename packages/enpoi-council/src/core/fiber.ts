@@ -115,6 +115,17 @@ export const RETRIEVAL_TOOLS = ['read', 'glob', 'grep', 'read_image', 'web_searc
 
 export const DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS]
 
+/**
+ * The deny list for one fiber: the base list plus every REGISTERED council's
+ * tool id (settings-registered councils included), so a seat can never invoke
+ * another council — the static list can only name the built-ins.
+ * @param registeredCouncilTools - council ids that expose a tool right now.
+ * @returns the deny names passed to the subagent toolFilter.
+ */
+export function councilDenyList(registeredCouncilTools: readonly string[]): string[] {
+  return [...new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter(id => id !== 'roundtable' && id !== 'chorus')])]
+}
+
 // The BROKER child keeps the research surface (it is the errand boy's door).
 export const BROKER_KEPT_TOOLS = [...RETRIEVAL_TOOLS]
 
