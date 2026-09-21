@@ -17,7 +17,6 @@
   z-index: -1;
   pointer-events: none;
   background: linear-gradient(180deg, transparent 0px, var(--dsw-alias-bg-base) 36px);
-  -webkit-backdrop-filter: blur(34px) saturate(150%);
   backdrop-filter: blur(34px) saturate(150%);
 }
 
@@ -39,12 +38,14 @@ a:visited {
   color: #b18df0;
 }
 
-/* Floating glass surfaces: frosted blur, inner highlight, diffuse shadow. */
+/* Floating glass surfaces: frosted blur, inner highlight, diffuse shadow.
+   `-webkit-backdrop-filter` is deliberately absent: lightningcss dedupes it
+   against the standard property and emits only the prefixed one, which
+   Chromium then ignores (all blur lost). */
 [role="dialog"],
 [role="menu"],
 [role="listbox"],
 [data-gitgraph-dialog] {
-  -webkit-backdrop-filter: blur(30px) saturate(145%);
   backdrop-filter: blur(30px) saturate(145%);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
@@ -58,8 +59,27 @@ a:visited {
   );
 }
 
+/* The chat header's sub-agent hover list: portalled to body as a bare
+   role="tree" (outside the role set above), so it stayed blur-less and the
+   chat text under it read through. Same glass, token-driven strength. */
+body > [role="tree"] {
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 10px 30px rgba(0, 7, 18, 0.25);
+}
+
+/* Upstream Plugins page (add / activate / remove): the panel scrolls straight
+   on the app frame with no surface of its own, so the wallpaper kept full
+   contrast behind its rows. Give it the composer card's darkened + blurred
+   glass, hot-swappable from the skin-center input-card blur setting. */
+[data-plugin-panel] {
+  background: var(--dsw-specific-input-major, rgba(13, 20, 35, 0.65));
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+}
+
 [role="tooltip"] {
-  -webkit-backdrop-filter: blur(20px) saturate(135%);
   backdrop-filter: blur(20px) saturate(135%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 10px 28px rgba(0, 7, 18, 0.3);
   /* The skin re-points --dsw-static-neutral-bluish-00 at its darkest navy for
