@@ -5,6 +5,7 @@
     "@linxin666/dsh-client-ui-skin-center": "^0.3.21",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "dsh-enpoi-agent-switch": "workspace:*",
     "dsh-enpoi-capabilities": "workspace:*",
     "dsh-enpoi-cascade": "workspace:*",
     "dsh-enpoi-context-keeper": "workspace:*",
@@ -42,7 +43,8 @@
         "dsh-enpoi-file-revert",
         "dsh-enpoi-fs-ops",
         "dsh-enpoi-git",
-        "dsh-enpoi-ui-state"
+        "dsh-enpoi-ui-state",
+        "dsh-enpoi-agent-switch"
       ]
     }
   },
