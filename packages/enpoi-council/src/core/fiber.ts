@@ -135,6 +135,125 @@ export interface PersonaModelConfig {
   reasoningEffort?: string
 }
 
+/** One resolved chain snapshot as the `modelChains` service answers it (doc 60). */
+interface ChainSnapshotLink {
+  provider: string
+  model: string
+  effort?: string
+}
+
+interface ChainSnapshot {
+  id: string
+  links: ChainSnapshotLink[]
+  attempts?: number
+  onCut?: 'failover' | 'continue'
+}
+
+/**
+ * Resolve a model-chain snapshot through the `modelChains` service (provided
+ * by dsh-enpoi-model-chains). Fail-open: a missing service, an unknown or
+ * disabled id, a malformed payload, or any read error answers `undefined` and
+ * the caller keeps its single-model behaviour.
+ */
+function resolveChainSnapshot(ctx: Context, id: unknown): ChainSnapshot | undefined {
+  if (typeof id !== 'string' || id.trim() === '') return undefined
+  try {
+    const service = ctx.get('modelChains') as { resolve?: (id: string) => unknown } | undefined
+    const snapshot = service?.resolve?.(id.trim())
+    if (snapshot === null || typeof snapshot !== 'object') return undefined
+    const record = snapshot as { id?: unknown; links?: unknown; attempts?: unknown; onCut?: unknown }
+    if (!Array.isArray(record.links)) return undefined
+    const links: ChainSnapshotLink[] = []
+    for (const raw of record.links) {
+      if (raw === null || typeof raw !== 'object') continue
+      const link = raw as { provider?: unknown; model?: unknown; effort?: unknown }
+      const provider = typeof link.provider === 'string' ? link.provider.trim() : ''
+      const model = typeof link.model === 'string' ? link.model.trim() : ''
+      if (provider === '' || model === '') continue
+      const effort = typeof link.effort === 'string' && link.effort.trim() !== '' ? link.effort.trim() : undefined
+      links.push({ provider, model, ...(effort !== undefined ? { effort } : {}) })
+    }
+    if (links.length === 0) return undefined
+    const attempts = typeof record.attempts === 'number' && Number.isFinite(record.attempts) && record.attempts >= 1
+      ? Math.floor(record.attempts)
+      : undefined
+    return {
+      id: typeof record.id === 'string' && record.id !== '' ? record.id : id.trim(),
+      links,
+      ...(attempts !== undefined ? { attempts } : {}),
+      onCut: record.onCut === 'continue' ? 'continue' : 'failover',
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** A seat's chain assignment: frozen ordered links plus the cut policy. */
+export interface PersonaChainConfig {
+  id: string
+  links: PersonaModelConfig[]
+  onCut: 'failover' | 'continue'
+  /**
+   * Whether the persona's ACTIVE link is the chain's head, so the fork's
+   * `AgentOptions.chain` can be carried without its link resolution overriding
+   * the seat's own first route (it starts at the request's named link).
+   */
+  carryId: boolean
+}
+
+/**
+ * Resolve a persona's model chain (doc 60) into an ordered link list.
+ *
+ * `personas[seat].chain` names the chain; the persona's provider/model (when
+ * present) is the ACTIVE link and the chain's remaining links follow in order.
+ * The returned list is a detached snapshot: callers keep it for the whole
+ * seat/run and never re-read settings between attempts. `chain` link `effort`
+ * maps onto the existing `reasoningEffort` field so spawns stay unchanged.
+ * @param ctx - owning plugin context.
+ * @param persona - seat/persona id.
+ * @returns the chain snapshot, or undefined (no chain/dangling/disabled/fail-open).
+ */
+export function resolvePersonaChain(ctx: Context, persona: string): PersonaChainConfig | undefined {
+  try {
+    const settings = ctx.get('settings') as {
+      get?: (ns: string) => {
+        personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }>
+      } | undefined
+    } | undefined
+    const doc = settings?.get?.('enpoi-orchestration')
+    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
+    const entry = doc?.personas?.[key]
+    const snapshot = resolveChainSnapshot(ctx, entry?.chain)
+    if (snapshot === undefined) return undefined
+    const toModel = (link: ChainSnapshotLink): PersonaModelConfig => ({
+      provider: link.provider,
+      model: link.model,
+      ...(link.effort !== undefined ? { reasoningEffort: link.effort } : {}),
+    })
+    const active: PersonaModelConfig = entry !== undefined && entry.provider && entry.model
+      ? {
+          provider: entry.provider,
+          model: entry.model,
+          ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
+        }
+      : toModel(snapshot.links[0]!)
+    const links: PersonaModelConfig[] = [
+      active,
+      ...snapshot.links.map(toModel).filter(link => !(link.provider === active.provider && link.model === active.model)),
+    ]
+    const head = snapshot.links[0]!
+    return {
+      id: snapshot.id,
+      links,
+      onCut: snapshot.onCut ?? 'failover',
+      carryId: head.provider === active.provider && head.model === active.model,
+    }
+  } catch (err: unknown) {
+    councilDiag(`resolvePersonaChain error for ${persona}: ${String(err)}`)
+    return undefined
+  }
+}
+
 export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
   try {
     const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
@@ -200,10 +319,21 @@ export async function startSeatFiber(
     persona: string
     initialPrompt: string
     denyTools: readonly string[]
+    /**
+     * Explicit link override for chain-aware seats (doc 60). Absent = resolve
+     * the persona assignment as before; present = spawn on exactly this link.
+     */
+    model?: PersonaModelConfig
+    /**
+     * Chain id carried on `AgentOptions.chain` (the fork's field) so the
+     * child's own step retries can escalate pre-commit failures. Only passed
+     * when the spawned link is the chain head.
+     */
+    chainId?: string
   },
   signal: AbortSignal,
 ): Promise<SeatFiber> {
-  const personaModel = resolvePersonaModel(ctx, opts.seatId)
+  const personaModel = opts.model ?? resolvePersonaModel(ctx, opts.seatId)
   const started = await ctx.subagents.startContinuable({
     provider: 'spawn',
     label: opts.label,
@@ -215,7 +345,11 @@ export async function startSeatFiber(
       quiet: true,
       toolFilter: opts.denyTools.length > 0 ? { deny: [...opts.denyTools] } : undefined,
       ...(personaModel !== undefined ? {
-        agentOptions: { provider: personaModel.provider, model: personaModel.model },
+        agentOptions: {
+          provider: personaModel.provider,
+          model: personaModel.model,
+          ...(opts.chainId !== undefined ? { chain: opts.chainId } : {}),
+        },
       } : {}),
     },
     signal,

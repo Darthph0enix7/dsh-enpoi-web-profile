@@ -19,6 +19,7 @@ import {
   estimateTokens,
   followupSeatFiber,
   getLivingBriefText,
+  resolvePersonaChain,
   startSeatFiber,
   waitForSeatTurnDetailed,
   type SeatFiber,
@@ -542,7 +543,12 @@ async function generateParallel(
     let fiber: SeatFiber
     let attempt = 0
     let lastError: Error | null = null
-    const maxAttempts = 1 + Math.min(2, 1)   // 1 retry
+    // Chain snapshot at seat start (doc 60): the persona's link list is frozen
+    // for this generation — never re-read between attempts — and a chain
+    // assigned mid-run applies on the next spawn (like personas).
+    const seatChain = resolvePersonaChain(ctx, seat.id)
+    let linkIndex = 0
+    const maxAttempts = seatChain !== undefined ? Math.max(2, seatChain.links.length) : 1 + Math.min(2, 1)
     while (attempt < maxAttempts) {
       attempt++
       try {
@@ -553,13 +559,22 @@ async function generateParallel(
         }
         const current = args.fibers.get(seat.id)
         if (current === undefined || attempt > 1) {
-          // fresh fiber (first turn, or retry after a dead fiber)
+          // fresh fiber (first turn, retry after a dead fiber, or chain advance)
+          const link = seatChain === undefined
+            ? undefined
+            : seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)]
           fiber = await startSeatFiber(ctx, parent, {
             seatId: seat.id,
             label: `${spec.id} seat: ${seat.id}`,
             persona: seat.persona,
             initialPrompt: prompt,
             denyTools,
+            ...(link !== undefined ? { model: link } : {}),
+            // Carry the group id whenever the spawned link is one of the
+            // chain's own (the fork starts at the request's named link, then
+            // escalates internally). Skipped only for the exotic case of a
+            // persona active link that the chain does not declare.
+            ...(seatChain !== undefined && (linkIndex > 0 || seatChain.carryId) ? { chainId: seatChain.id } : {}),
           }, args.signal)
           args.fibers.set(seat.id, fiber)
         } else {
@@ -569,9 +584,13 @@ async function generateParallel(
         let turn = await waitForSeatTurnDetailed(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs)
         // Auto-continue a turn the provider cut at the output-token cap: a
         // truncated seat position silently degrades the referee's reading.
-        // Bounded resumes; each continuation is appended verbatim.
+        // Bounded resumes on the SAME link; a chain whose policy is `failover`
+        // (the default) advances to the NEXT link instead — restart, not resume.
         let resumes = 0
         while (turn.truncated && resumes < 2 && !args.signal.aborted) {
+          if (seatChain !== undefined && seatChain.onCut === 'failover' && linkIndex + 1 < seatChain.links.length) {
+            throw new Error(`seat output cut at the output-token cap — advancing to chain link ${linkIndex + 2}`)
+          }
           resumes += 1
           councilDiag(`[epoch ${args.epoch}] seat ${seat.id} hit the output-token cap — resuming (${resumes}/2)`)
           await followupSeatFiber(ctx, parent, fiber, 'Your reply was cut at the output-token limit. Continue EXACTLY where you stopped — do not repeat or restate anything. Complete your turn.', args.signal)
@@ -586,6 +605,19 @@ async function generateParallel(
         lastError = err instanceof Error ? err : new Error(String(err))
         councilDiag(`[epoch ${args.epoch}] seat ${seat.id} attempt ${attempt} failed: ${lastError.message}`)
         if (args.signal.aborted) throw lastError
+        // Chain failover: this failure (timeout/error/cut) advances the seat to
+        // the NEXT link from the start-of-seat snapshot. The dead fiber is
+        // dropped so the next attempt spawns fresh on that link.
+        const nextLink = seatChain?.links[linkIndex + 1]
+        if (seatChain !== undefined && nextLink !== undefined) {
+          const failed = seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)]!
+          process.stderr.write(`[model-chain] ${seatChain.id}: link ${linkIndex + 1} (${failed.provider}/${failed.model}) FAILED → link ${linkIndex + 2} (${nextLink.provider}/${nextLink.model}): ${lastError.message}\n`)
+          linkIndex += 1
+          args.fibers.delete(seat.id)
+          if (attempt >= maxAttempts) break
+          await new Promise(r => setTimeout(r, 500))
+          continue
+        }
         if (attempt >= maxAttempts) break
         await new Promise(r => setTimeout(r, 500))
       }

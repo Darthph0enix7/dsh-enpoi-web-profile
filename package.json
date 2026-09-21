@@ -16,6 +16,7 @@
     "dsh-enpoi-git": "workspace:*",
     "dsh-enpoi-living-brief": "workspace:*",
     "dsh-enpoi-memory": "workspace:*",
+    "dsh-enpoi-model-chains": "workspace:*",
     "dsh-enpoi-oracle": "workspace:*",
     "dsh-enpoi-provider-sync": "workspace:*",
     "dsh-enpoi-runtime-probe": "workspace:*",
@@ -44,7 +45,8 @@
         "dsh-enpoi-fs-ops",
         "dsh-enpoi-git",
         "dsh-enpoi-ui-state",
-        "dsh-enpoi-agent-switch"
+        "dsh-enpoi-agent-switch",
+        "dsh-enpoi-model-chains"
       ]
     }
   },

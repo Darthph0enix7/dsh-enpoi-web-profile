@@ -195,12 +195,73 @@ function structuralTotal(session: Session): number {
 }
 
 /** Resolved model route for one keeper wake (Oracle: resolve once per run, never inside executeRoute). */
+export interface RouteChainLink {
+  provider: string
+  model: string
+  effort?: string
+}
+
 interface ResolvedRoute {
   provider: string
   model: string
   fallbackProvider: string
   fallbackModel: string
   reasoningEffort?: string
+  /** Chain id when the keeper persona assigned a model chain (doc 60). */
+  chainId?: string
+  /** Frozen chain link snapshot, taken when the run resolved its route. */
+  chainLinks?: RouteChainLink[]
+}
+
+/** One resolved chain snapshot as the `modelChains` service answers it. */
+interface ChainSnapshot {
+  id: string
+  links: Array<{ provider: string; model: string; effort?: string }>
+  attempts?: number
+  onCut?: 'failover' | 'continue'
+}
+
+/**
+ * Resolve a model-chain snapshot through the `modelChains` service (provided
+ * by dsh-enpoi-model-chains). Fail-open: a missing service, an unknown or
+ * disabled id, a malformed payload, or any read error answers `undefined` and
+ * the caller keeps its single-model behaviour.
+ * @param ctx - owning plugin context.
+ * @param id - candidate chain id (usually `personas.keeper.chain`).
+ * @returns the frozen link snapshot, or undefined.
+ */
+function resolveChainSnapshot(ctx: Context, id: unknown): ChainSnapshot | undefined {
+  if (typeof id !== 'string' || id.trim() === '') return undefined
+  try {
+    const service = ctx.get('modelChains') as { resolve?: (id: string) => unknown } | undefined
+    const snapshot = service?.resolve?.(id.trim())
+    if (snapshot === null || typeof snapshot !== 'object') return undefined
+    const record = snapshot as { id?: unknown; links?: unknown; attempts?: unknown; onCut?: unknown }
+    if (!Array.isArray(record.links)) return undefined
+    const links: ChainSnapshot['links'] = []
+    for (const raw of record.links) {
+      if (raw === null || typeof raw !== 'object') continue
+      const link = raw as { provider?: unknown; model?: unknown; effort?: unknown }
+      const provider = typeof link.provider === 'string' ? link.provider.trim() : ''
+      const model = typeof link.model === 'string' ? link.model.trim() : ''
+      if (provider === '' || model === '') continue
+      const effort = typeof link.effort === 'string' && link.effort.trim() !== '' ? link.effort.trim() : undefined
+      links.push({ provider, model, ...(effort !== undefined ? { effort } : {}) })
+    }
+    if (links.length === 0) return undefined
+    const attempts = typeof record.attempts === 'number' && Number.isFinite(record.attempts) && record.attempts >= 1
+      ? Math.floor(record.attempts)
+      : undefined
+    const onCut = record.onCut === 'continue' ? 'continue' as const : 'failover' as const
+    return {
+      id: typeof record.id === 'string' && record.id !== '' ? record.id : id.trim(),
+      links,
+      ...(attempts !== undefined ? { attempts } : {}),
+      onCut,
+    }
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -243,8 +304,36 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
   const fallbackProvider = config.fallbackProvider ?? 'antigravity'
   const fallbackModel = config.fallbackModel ?? 'gemini-3.7-flash-tiered'
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }> } } | undefined
     const entry = settings?.get?.('enpoi-orchestration')?.personas?.['keeper']
+    // Model chain (doc 60): `personas.keeper.chain` names a chain whose links
+    // replace the primary → fallback pair for this run. The persona's
+    // provider/model (when present) is the ACTIVE link; the chain's remaining
+    // links follow in order. Snapshot ownership stays here — summarize() never
+    // re-reads settings between attempts.
+    const chain = resolveChainSnapshot(ctx, entry?.chain)
+    if (chain !== undefined) {
+      const active: RouteChainLink = entry !== undefined && entry.provider && entry.model
+        ? {
+            provider: entry.provider,
+            model: entry.model,
+            ...(entry.reasoningEffort ? { effort: entry.reasoningEffort } : {}),
+          }
+        : { ...chain.links[0]! }
+      const links: RouteChainLink[] = [
+        active,
+        ...chain.links.filter(link => !(link.provider === active.provider && link.model === active.model)),
+      ]
+      return {
+        provider: active.provider,
+        model: active.model,
+        fallbackProvider,
+        fallbackModel,
+        ...(active.effort ? { reasoningEffort: active.effort } : {}),
+        chainId: chain.id,
+        chainLinks: links,
+      }
+    }
     if (entry && entry.provider && entry.model) {
       return {
         provider: entry.provider,
@@ -263,6 +352,37 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
     fallbackProvider,
     fallbackModel,
   }
+}
+
+/**
+ * The ordered attempts for one summarize call: the run's frozen chain link
+ * snapshot when the keeper persona assigned a chain, else the legacy
+ * primary → fallback pair. Attempts are one-per-link (the fork's adapter loop
+ * owns the per-link `attempts` budget); the consumer's validator is the cut
+ * detector, so a cut/error advances to the next link.
+ * @param route - the route resolved once per keeper run.
+ * @returns the ordered provider/model attempts.
+ */
+export function keeperAttempts(route: ResolvedRoute): Array<{ provider: string; model: string; reasoningEffort?: string }> {
+  if (route.chainLinks !== undefined && route.chainLinks.length > 0) {
+    return route.chainLinks.map(link => ({
+      provider: link.provider,
+      model: link.model,
+      ...(link.effort !== undefined ? { reasoningEffort: link.effort } : {}),
+    }))
+  }
+  return [
+    {
+      provider: route.provider,
+      model: route.model,
+      ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
+    },
+    {
+      provider: route.fallbackProvider,
+      model: route.fallbackModel,
+      ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
+    },
+  ]
 }
 
 /** Result of an ensureFreshBrief call. */
@@ -812,7 +932,7 @@ function validateKeeperOutput(text: string, finishKind?: string, expectClaims = 
 }
 
 /** One LLM completion with resolved primary route + fixed fallback (soft-degrading + cutoff shield). */
-async function summarize(
+export async function summarize(
   ctx: Context,
   config: Config,
   session: Session,
@@ -827,19 +947,23 @@ async function summarize(
     source: { kind: 'plugin', plugin: 'enpoi-context-keeper' },
   })]
   const base: GenerateOptions = {
-    provider: route.provider,
-    model: route.model,
     messages,
     system: systemPrompt,
     maxTokens: config.maxOutputTokens,
     sessionId: session.id,
     purpose: 'context-keeper',
     signal,
-    ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort as GenerateOptions['reasoningEffort'] } : {}),
   }
 
-  async function executeRoute(provider: string, model: string): Promise<string> {
-    const result = await streamTextWithMeta(ctx, { ...base, provider, model })
+  async function executeRoute(provider: string, model: string, reasoningEffort?: string): Promise<string> {
+    const result = await streamTextWithMeta(ctx, {
+      ...base,
+      provider,
+      model,
+      ...(reasoningEffort !== undefined ? { reasoningEffort: reasoningEffort as GenerateOptions['reasoningEffort'] } : {}),
+    })
+    // validateKeeperOutput stays the cut detector (truncation + unclosed
+    // CLAIMS JSON) — an invalid result throws, so the caller advances.
     const validation = validateKeeperOutput(result.text, result.finishKind, expectClaims)
     if (!validation.valid) {
       throw new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`)
@@ -847,25 +971,32 @@ async function summarize(
     return result.text
   }
 
-  try {
-    const text = await executeRoute(route.provider, route.model)
-    return { text, route: `${route.provider}/${route.model}` }
-  } catch (error) {
-    if (signal.aborted) throw error
-    ctx.logger.warn(`enpoi-context-keeper: primary route failed/cut off (${String(error)}), trying fallback`)
-    diag(`primary route failed/cut off (${String(error)}), switching to fallback ${route.fallbackProvider}/${route.fallbackModel}`)
-
+  // Frozen attempt list: chain links when the keeper persona assigned a chain,
+  // else primary → fallback. Never re-read between attempts.
+  const attempts = keeperAttempts(route)
+  let lastError: unknown
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index]!
     try {
-      const fallbackText = await executeRoute(route.fallbackProvider, route.fallbackModel)
-      return {
-        text: fallbackText,
-        route: `${route.fallbackProvider}/${route.fallbackModel}`,
+      const text = await executeRoute(attempt.provider, attempt.model, attempt.reasoningEffort)
+      if (index > 0) {
+        process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: recovered on link ${index + 1} (${attempt.provider}/${attempt.model})\n`)
       }
-    } catch (fallbackError) {
-      if (signal.aborted) throw fallbackError
-      throw new Error(`enpoi-context-keeper: all summary routes failed. Primary: ${String(error)}, Fallback: ${String(fallbackError)}`)
+      return { text, route: `${attempt.provider}/${attempt.model}` }
+    } catch (error) {
+      if (signal.aborted) throw error
+      lastError = error
+      const next = attempts[index + 1]
+      if (next === undefined) break
+      const message = error instanceof Error ? error.message : String(error)
+      // One stderr audit line per failover (this harness's logger drops
+      // info/warn, so stderr is the observable channel — doc 60).
+      process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: link ${index + 1} (${attempt.provider}/${attempt.model}) FAILED/CUT → link ${index + 2} (${next.provider}/${next.model}): ${message}\n`)
+      ctx.logger.warn(`enpoi-context-keeper: route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`)
+      diag(`route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`)
     }
   }
+  throw new Error(`enpoi-context-keeper: all summary routes failed (${attempts.length} attempt(s)). Last: ${String(lastError)}`)
 }
 
 /** Stream one completion into plain text and terminal metadata via BlockAssembler. */

@@ -151,6 +151,37 @@ function structuralTotal(session) {
   structuralCounters.set(session, { seq: session.seq, total: count });
   return count;
 }
+function resolveChainSnapshot(ctx, id) {
+  if (typeof id !== "string" || id.trim() === "") return void 0;
+  try {
+    const service = ctx.get("modelChains");
+    const snapshot = service?.resolve?.(id.trim());
+    if (snapshot === null || typeof snapshot !== "object") return void 0;
+    const record = snapshot;
+    if (!Array.isArray(record.links)) return void 0;
+    const links = [];
+    for (const raw of record.links) {
+      if (raw === null || typeof raw !== "object") continue;
+      const link = raw;
+      const provider = typeof link.provider === "string" ? link.provider.trim() : "";
+      const model = typeof link.model === "string" ? link.model.trim() : "";
+      if (provider === "" || model === "") continue;
+      const effort = typeof link.effort === "string" && link.effort.trim() !== "" ? link.effort.trim() : void 0;
+      links.push({ provider, model, ...effort !== void 0 ? { effort } : {} });
+    }
+    if (links.length === 0) return void 0;
+    const attempts = typeof record.attempts === "number" && Number.isFinite(record.attempts) && record.attempts >= 1 ? Math.floor(record.attempts) : void 0;
+    const onCut = record.onCut === "continue" ? "continue" : "failover";
+    return {
+      id: typeof record.id === "string" && record.id !== "" ? record.id : id.trim(),
+      links,
+      ...attempts !== void 0 ? { attempts } : {},
+      onCut
+    };
+  } catch {
+    return void 0;
+  }
+}
 function resolveKeeperParams(ctx, config) {
   try {
     const settings = ctx.get("settings");
@@ -178,6 +209,27 @@ function resolveKeeperRoute(ctx, config) {
   try {
     const settings = ctx.get("settings");
     const entry = settings?.get?.("enpoi-orchestration")?.personas?.["keeper"];
+    const chain = resolveChainSnapshot(ctx, entry?.chain);
+    if (chain !== void 0) {
+      const active = entry !== void 0 && entry.provider && entry.model ? {
+        provider: entry.provider,
+        model: entry.model,
+        ...entry.reasoningEffort ? { effort: entry.reasoningEffort } : {}
+      } : { ...chain.links[0] };
+      const links = [
+        active,
+        ...chain.links.filter((link) => !(link.provider === active.provider && link.model === active.model))
+      ];
+      return {
+        provider: active.provider,
+        model: active.model,
+        fallbackProvider,
+        fallbackModel,
+        ...active.effort ? { reasoningEffort: active.effort } : {},
+        chainId: chain.id,
+        chainLinks: links
+      };
+    }
     if (entry && entry.provider && entry.model) {
       return {
         provider: entry.provider,
@@ -195,6 +247,27 @@ function resolveKeeperRoute(ctx, config) {
     fallbackProvider,
     fallbackModel
   };
+}
+function keeperAttempts(route) {
+  if (route.chainLinks !== void 0 && route.chainLinks.length > 0) {
+    return route.chainLinks.map((link) => ({
+      provider: link.provider,
+      model: link.model,
+      ...link.effort !== void 0 ? { reasoningEffort: link.effort } : {}
+    }));
+  }
+  return [
+    {
+      provider: route.provider,
+      model: route.model,
+      ...route.reasoningEffort !== void 0 ? { reasoningEffort: route.reasoningEffort } : {}
+    },
+    {
+      provider: route.fallbackProvider,
+      model: route.fallbackModel,
+      ...route.reasoningEffort !== void 0 ? { reasoningEffort: route.reasoningEffort } : {}
+    }
+  ];
 }
 function emptyEntry() {
   return {
@@ -598,42 +671,50 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
     source: { kind: "plugin", plugin: "enpoi-context-keeper" }
   })];
   const base = {
-    provider: route.provider,
-    model: route.model,
     messages,
     system: systemPrompt,
     maxTokens: config.maxOutputTokens,
     sessionId: session.id,
     purpose: "context-keeper",
-    signal,
-    ...route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}
+    signal
   };
-  async function executeRoute(provider, model) {
-    const result = await streamTextWithMeta(ctx, { ...base, provider, model });
+  async function executeRoute(provider, model, reasoningEffort) {
+    const result = await streamTextWithMeta(ctx, {
+      ...base,
+      provider,
+      model,
+      ...reasoningEffort !== void 0 ? { reasoningEffort } : {}
+    });
     const validation = validateKeeperOutput(result.text, result.finishKind, expectClaims);
     if (!validation.valid) {
       throw new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`);
     }
     return result.text;
   }
-  try {
-    const text = await executeRoute(route.provider, route.model);
-    return { text, route: `${route.provider}/${route.model}` };
-  } catch (error) {
-    if (signal.aborted) throw error;
-    ctx.logger.warn(`enpoi-context-keeper: primary route failed/cut off (${String(error)}), trying fallback`);
-    diag(`primary route failed/cut off (${String(error)}), switching to fallback ${route.fallbackProvider}/${route.fallbackModel}`);
+  const attempts = keeperAttempts(route);
+  let lastError;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
     try {
-      const fallbackText = await executeRoute(route.fallbackProvider, route.fallbackModel);
-      return {
-        text: fallbackText,
-        route: `${route.fallbackProvider}/${route.fallbackModel}`
-      };
-    } catch (fallbackError) {
-      if (signal.aborted) throw fallbackError;
-      throw new Error(`enpoi-context-keeper: all summary routes failed. Primary: ${String(error)}, Fallback: ${String(fallbackError)}`);
+      const text = await executeRoute(attempt.provider, attempt.model, attempt.reasoningEffort);
+      if (index > 0) {
+        process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: recovered on link ${index + 1} (${attempt.provider}/${attempt.model})
+`);
+      }
+      return { text, route: `${attempt.provider}/${attempt.model}` };
+    } catch (error) {
+      if (signal.aborted) throw error;
+      lastError = error;
+      const next = attempts[index + 1];
+      if (next === void 0) break;
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: link ${index + 1} (${attempt.provider}/${attempt.model}) FAILED/CUT \u2192 link ${index + 2} (${next.provider}/${next.model}): ${message}
+`);
+      ctx.logger.warn(`enpoi-context-keeper: route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`);
+      diag(`route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`);
     }
   }
+  throw new Error(`enpoi-context-keeper: all summary routes failed (${attempts.length} attempt(s)). Last: ${String(lastError)}`);
 }
 async function streamTextWithMeta(ctx, options) {
   var _stack = [];
@@ -683,8 +764,10 @@ export {
   createBriefService,
   getBriefService,
   inject,
+  keeperAttempts,
   name,
   resolveKeeperParams,
   resolveKeeperRoute,
-  splitClaims
+  splitClaims,
+  summarize
 };

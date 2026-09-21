@@ -22,6 +22,8 @@ const PersonaModelSchema = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
   reasoningEffort: Schema.string(),
+  /** Model failover chain id (doc 60) assigned to the seat. */
+  chain: Schema.string(),
 })
 
 /**
@@ -33,6 +35,8 @@ const PersonaModelSchema = Schema.object({
 const OrchestrationSettingsSchema = Schema.object({
   personas: Schema.dict(PersonaModelSchema).default({}),
   councils: Schema.dict(Schema.any()).default({}),
+  /** Model failover chains (doc 60) consumed through the modelChains service. */
+  chains: Schema.dict(Schema.any()).default({}),
   uiPreferences: Schema.object({
     hiddenModels: Schema.any(),
     favorites: Schema.any(),

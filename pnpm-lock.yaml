@@ -50,6 +50,9 @@ importers:
       dsh-enpoi-memory:
         specifier: workspace:*
         version: link:packages/enpoi-memory
+      dsh-enpoi-model-chains:
+        specifier: workspace:*
+        version: link:packages/enpoi-model-chains
       dsh-enpoi-oracle:
         specifier: workspace:*
         version: link:packages/enpoi-oracle
@@ -131,6 +134,8 @@ importers:
         version: 3.25.76
 
   packages/enpoi-memory: {}
+
+  packages/enpoi-model-chains: {}
 
   packages/enpoi-oracle: {}
 

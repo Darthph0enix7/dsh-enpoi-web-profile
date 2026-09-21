@@ -247,7 +247,7 @@ export function resolveOracleTimeoutMs(ctx: Context): number {
 
 export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }> } } | undefined
     const doc = settings?.get?.('enpoi-orchestration')
     const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
     const entry = doc?.personas?.[key]
@@ -260,6 +260,108 @@ export function resolvePersonaModel(ctx: Context, persona: string): PersonaModel
     }
   } catch {}
   return undefined
+}
+
+/** One resolved chain snapshot as the `modelChains` service answers it (doc 60). */
+interface OracleChainSnapshotLink {
+  provider: string
+  model: string
+  effort?: string
+}
+
+interface OracleChainSnapshot {
+  id: string
+  links: OracleChainSnapshotLink[]
+  attempts?: number
+  onCut?: 'failover' | 'continue'
+}
+
+/**
+ * Resolve a model-chain snapshot through the `modelChains` service (provided
+ * by dsh-enpoi-model-chains). Fail-open: a missing service, an unknown or
+ * disabled id, a malformed payload, or any read error answers `undefined`.
+ */
+function resolveChainSnapshot(ctx: Context, id: unknown): OracleChainSnapshot | undefined {
+  if (typeof id !== 'string' || id.trim() === '') return undefined
+  try {
+    const service = ctx.get('modelChains') as { resolve?: (id: string) => unknown } | undefined
+    const snapshot = service?.resolve?.(id.trim())
+    if (snapshot === null || typeof snapshot !== 'object') return undefined
+    const record = snapshot as { id?: unknown; links?: unknown; attempts?: unknown; onCut?: unknown }
+    if (!Array.isArray(record.links)) return undefined
+    const links: OracleChainSnapshotLink[] = []
+    for (const raw of record.links) {
+      if (raw === null || typeof raw !== 'object') continue
+      const link = raw as { provider?: unknown; model?: unknown; effort?: unknown }
+      const provider = typeof link.provider === 'string' ? link.provider.trim() : ''
+      const model = typeof link.model === 'string' ? link.model.trim() : ''
+      if (provider === '' || model === '') continue
+      const effort = typeof link.effort === 'string' && link.effort.trim() !== '' ? link.effort.trim() : undefined
+      links.push({ provider, model, ...(effort !== undefined ? { effort } : {}) })
+    }
+    if (links.length === 0) return undefined
+    const attempts = typeof record.attempts === 'number' && Number.isFinite(record.attempts) && record.attempts >= 1
+      ? Math.floor(record.attempts)
+      : undefined
+    return {
+      id: typeof record.id === 'string' && record.id !== '' ? record.id : id.trim(),
+      links,
+      ...(attempts !== undefined ? { attempts } : {}),
+      onCut: record.onCut === 'continue' ? 'continue' : 'failover',
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** One ordered oracle child attempt: a chain link, or the persona/default route. */
+export interface OracleAttemptModel {
+  provider?: string
+  model?: string
+}
+
+/**
+ * The oracle child's ordered attempt routes, snapshotted at consultation start
+ * (doc 60): a persona-assigned chain's links (the persona's provider/model is
+ * the ACTIVE link), else exactly the legacy single persona/default route.
+ * @param ctx - owning plugin context.
+ * @param persona - persona key (`oracle`).
+ * @returns the chain id (when assigned) plus the ordered attempts; `carryId`
+ *   is true when the active link is the chain head, so the fork's
+ *   `AgentOptions.chain` can be carried without re-pointing the first route.
+ */
+export function resolveOracleChainAttempts(
+  ctx: Context,
+  persona: string,
+): { chainId?: string; carryId: boolean; attempts: OracleAttemptModel[] } {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }> } } | undefined
+    const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
+    const entry = settings?.get?.('enpoi-orchestration')?.personas?.[key]
+    const snapshot = resolveChainSnapshot(ctx, entry?.chain)
+    if (snapshot !== undefined) {
+      const active: OracleChainSnapshotLink = entry !== undefined && entry.provider && entry.model
+        ? { provider: entry.provider, model: entry.model }
+        : { ...snapshot.links[0]! }
+      const links = [
+        active,
+        ...snapshot.links.filter(link => !(link.provider === active.provider && link.model === active.model)),
+      ]
+      const head = snapshot.links[0]!
+      return {
+        chainId: snapshot.id,
+        carryId: head.provider === active.provider && head.model === active.model,
+        attempts: links.map(link => ({ provider: link.provider, model: link.model })),
+      }
+    }
+  } catch {
+    // settings unavailable — fall through to the persona/default route
+  }
+  const personaModel = resolvePersonaModel(ctx, persona)
+  return {
+    carryId: false,
+    attempts: personaModel !== undefined ? [{ provider: personaModel.provider, model: personaModel.model }] : [{}],
+  }
 }
 
 /** Extract the VERDICT BLOCK JSON from the oracle's final message. */
@@ -521,34 +623,83 @@ function registerOracleTools(ctx: Context, root: Context): void {
             : buildDelta(brief, args),
         }]
 
+        // Chain snapshot at consultation start (doc 60): the ordered routes are
+        // frozen here and never re-read between attempts. Without a chain this
+        // is exactly the legacy single persona/default route.
+        const { chainId, carryId, attempts: attemptModels } = resolveOracleChainAttempts(ctx, 'oracle')
+        const callSignal = (): AbortSignal => bg?.signal ?? exec.signal
+
+        /**
+         * Spawn one fresh oracle child on the given attempt route.
+         * @param attempt - provider/model route for this spawn.
+         * @param carriedChainId - `AgentOptions.chain` to carry (the fork's
+         *   step retry loop escalates internally from the named link).
+         */
+        const spawnOracleChild = async (attempt: OracleAttemptModel, carriedChainId?: string): Promise<SessionId> => {
+          const denied = ORACLE_TOOL_FILTER.deny
+          const started = await ctx.subagents.startContinuable({
+            provider: 'spawn',
+            label: `oracle review: ${args.request.slice(0, 60)}`,
+            quiet: true,
+            request: {
+              prompt,
+              parent,
+              persona: ORACLE_PERSONA,
+              quiet: true,
+              toolFilter: denied.length > 0 ? { deny: denied } : undefined,
+              ...(attempt.provider !== undefined ? {
+                agentOptions: {
+                  provider: attempt.provider,
+                  model: attempt.model,
+                  ...(carriedChainId !== undefined ? { chain: carriedChainId } : {}),
+                },
+              } : {}),
+            },
+            signal: callSignal(),
+          })
+          if (!started.childId || started.childId === 'null' || !started.childId.includes('-')) {
+            throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`)
+          }
+          return started.childId as SessionId
+        }
+
+        /**
+         * Wait for the child's turn; when it fails and the oracle persona is
+         * assigned a model chain, dispose the dead child, respawn the SAME full
+         * initial package on the NEXT link of the start-of-call snapshot, and
+         * wait again. Fail-open: without a chain (or for a delta turn) this is
+         * exactly one waitForChildTurn call.
+         */
+        const waitWithChainAdvance = async (firstChildId: SessionId, advance: boolean): Promise<string> => {
+          let childId = firstChildId
+          let lastError: unknown
+          for (let index = 0; index < attemptModels.length; index += 1) {
+            try {
+              return await waitForChildTurn(ctx, childId, callSignal(), resolveOracleTimeoutMs(ctx))
+            } catch (error) {
+              lastError = error
+              if (callSignal().aborted) throw error
+              const current = attemptModels[index]!
+              const next = advance ? attemptModels[index + 1] : undefined
+              if (next === undefined) break
+              const message = error instanceof Error ? error.message : String(error)
+              process.stderr.write(`[model-chain] ${chainId ?? 'oracle'}: link ${index + 1} (${current.provider ?? 'default'}/${current.model ?? 'default'}) FAILED → link ${index + 2} (${next.provider ?? 'default'}/${next.model ?? 'default'}): ${message}\n`)
+              try { await ctx.get('sessions')?.delete(childId) } catch { /* best-effort disposal */ }
+              // The advanced link is one of the chain's own, so carry the group
+              // id too; the fork starts at the named link and escalates from it.
+              childId = await spawnOracleChild(next, chainId)
+              fiber.childId = childId
+              fibers.set(key, fiber)
+            }
+          }
+          throw lastError instanceof Error ? lastError : new Error(String(lastError))
+        }
+
         if (fresh) {
           try {
-            const denied = ORACLE_TOOL_FILTER.deny
-            const personaModel = resolvePersonaModel(ctx, 'oracle')
-            const started = await ctx.subagents.startContinuable({
-              provider: 'spawn',
-              label: `oracle review: ${args.request.slice(0, 60)}`,
-              quiet: true,
-              request: {
-                prompt,
-                parent,
-                persona: ORACLE_PERSONA,
-                quiet: true,
-                toolFilter: denied.length > 0 ? { deny: denied } : undefined,
-                ...personaModel !== undefined ? {
-                  agentOptions: {
-                    provider: personaModel.provider,
-                    model: personaModel.model,
-                  },
-                } : {},
-              },
-              signal: bg?.signal ?? exec.signal,
-            })
-            if (!started.childId || started.childId === 'null' || !started.childId.includes('-')) {
-              throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`)
-            }
-            fiber.childId = started.childId
-            applyPersonaModel(ctx, started.childId, 'oracle')
+            const childId = await spawnOracleChild(attemptModels[0]!, carryId ? chainId : undefined)
+            fiber.childId = childId
+            applyPersonaModel(ctx, childId, 'oracle')
             fibers.set(key, fiber)
             // Oracle D2: consume the rollover entry only after the spawn
             // registered — a failed spawn retries from the same entry.
@@ -575,7 +726,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
           const childId = fiber.childId!
           void (async () => {
             try {
-              const t = await waitForChildTurn(ctx, childId, bg.signal, resolveOracleTimeoutMs(ctx))
+              const t = await waitWithChainAdvance(childId, fresh)
               const v = parseVerdict(t)
               fiber.consultations += 1
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns })
@@ -613,7 +764,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
 
         let verdictText = ''
         try {
-          verdictText = await waitForChildTurn(ctx, fiber.childId!, bg?.signal ?? exec.signal, resolveOracleTimeoutMs(ctx))
+          verdictText = await waitWithChainAdvance(fiber.childId!, fresh)
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : String(err)
           fibers.delete(key)

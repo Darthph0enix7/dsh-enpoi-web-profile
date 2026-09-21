@@ -465,6 +465,11 @@ var OrchestrationSettingsSchema = Schema.object({
   // survival — both remain opaque plugin-owned vocabularies.
   roles: Schema.dict(Schema.any()).default({}),
   councils: Schema.dict(Schema.any()).default({}),
+  // Operator-defined model failover chains (doc 60): id → { label?, links,
+  // attempts?, onCut?, disabled? }. Owned by enpoi-model-chains, declared here
+  // so the namespace contract admits the key rather than relying on
+  // unknown-key survival.
+  chains: Schema.dict(Schema.any()).default({}),
   parameters: Schema.any(),
   uiPreferences: Schema.any(),
   permissions: Schema.any()

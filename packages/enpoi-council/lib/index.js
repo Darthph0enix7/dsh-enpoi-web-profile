@@ -161,6 +161,70 @@ function councilDenyList(registeredCouncilTools) {
   return [.../* @__PURE__ */ new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter((id) => id !== "roundtable" && id !== "chorus")])];
 }
 var BROKER_KEPT_TOOLS = [...RETRIEVAL_TOOLS];
+function resolveChainSnapshot(ctx, id) {
+  if (typeof id !== "string" || id.trim() === "") return void 0;
+  try {
+    const service = ctx.get("modelChains");
+    const snapshot = service?.resolve?.(id.trim());
+    if (snapshot === null || typeof snapshot !== "object") return void 0;
+    const record = snapshot;
+    if (!Array.isArray(record.links)) return void 0;
+    const links = [];
+    for (const raw of record.links) {
+      if (raw === null || typeof raw !== "object") continue;
+      const link = raw;
+      const provider = typeof link.provider === "string" ? link.provider.trim() : "";
+      const model = typeof link.model === "string" ? link.model.trim() : "";
+      if (provider === "" || model === "") continue;
+      const effort = typeof link.effort === "string" && link.effort.trim() !== "" ? link.effort.trim() : void 0;
+      links.push({ provider, model, ...effort !== void 0 ? { effort } : {} });
+    }
+    if (links.length === 0) return void 0;
+    const attempts = typeof record.attempts === "number" && Number.isFinite(record.attempts) && record.attempts >= 1 ? Math.floor(record.attempts) : void 0;
+    return {
+      id: typeof record.id === "string" && record.id !== "" ? record.id : id.trim(),
+      links,
+      ...attempts !== void 0 ? { attempts } : {},
+      onCut: record.onCut === "continue" ? "continue" : "failover"
+    };
+  } catch {
+    return void 0;
+  }
+}
+function resolvePersonaChain(ctx, persona) {
+  try {
+    const settings = ctx.get("settings");
+    const doc = settings?.get?.("enpoi-orchestration");
+    const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
+    const entry = doc?.personas?.[key];
+    const snapshot = resolveChainSnapshot(ctx, entry?.chain);
+    if (snapshot === void 0) return void 0;
+    const toModel = (link) => ({
+      provider: link.provider,
+      model: link.model,
+      ...link.effort !== void 0 ? { reasoningEffort: link.effort } : {}
+    });
+    const active = entry !== void 0 && entry.provider && entry.model ? {
+      provider: entry.provider,
+      model: entry.model,
+      ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
+    } : toModel(snapshot.links[0]);
+    const links = [
+      active,
+      ...snapshot.links.map(toModel).filter((link) => !(link.provider === active.provider && link.model === active.model))
+    ];
+    const head = snapshot.links[0];
+    return {
+      id: snapshot.id,
+      links,
+      onCut: snapshot.onCut ?? "failover",
+      carryId: head.provider === active.provider && head.model === active.model
+    };
+  } catch (err) {
+    councilDiag(`resolvePersonaChain error for ${persona}: ${String(err)}`);
+    return void 0;
+  }
+}
 function resolvePersonaModel(ctx, persona) {
   try {
     const settings = ctx.get("settings");
@@ -180,7 +244,7 @@ function resolvePersonaModel(ctx, persona) {
   return void 0;
 }
 async function startSeatFiber(ctx, parent, opts, signal) {
-  const personaModel = resolvePersonaModel(ctx, opts.seatId);
+  const personaModel = opts.model ?? resolvePersonaModel(ctx, opts.seatId);
   const started = await ctx.subagents.startContinuable({
     provider: "spawn",
     label: opts.label,
@@ -192,7 +256,11 @@ async function startSeatFiber(ctx, parent, opts, signal) {
       quiet: true,
       toolFilter: opts.denyTools.length > 0 ? { deny: [...opts.denyTools] } : void 0,
       ...personaModel !== void 0 ? {
-        agentOptions: { provider: personaModel.provider, model: personaModel.model }
+        agentOptions: {
+          provider: personaModel.provider,
+          model: personaModel.model,
+          ...opts.chainId !== void 0 ? { chain: opts.chainId } : {}
+        }
       } : {}
     },
     signal
@@ -5711,7 +5779,9 @@ async function generateParallel(ctx, parent, spec, args) {
     let fiber;
     let attempt = 0;
     let lastError = null;
-    const maxAttempts = 1 + Math.min(2, 1);
+    const seatChain = resolvePersonaChain(ctx, seat.id);
+    let linkIndex = 0;
+    const maxAttempts = seatChain !== void 0 ? Math.max(2, seatChain.links.length) : 1 + Math.min(2, 1);
     while (attempt < maxAttempts) {
       attempt++;
       try {
@@ -5720,12 +5790,19 @@ async function generateParallel(ctx, parent, spec, args) {
         }
         const current = args.fibers.get(seat.id);
         if (current === void 0 || attempt > 1) {
+          const link = seatChain === void 0 ? void 0 : seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)];
           fiber = await startSeatFiber(ctx, parent, {
             seatId: seat.id,
             label: `${spec.id} seat: ${seat.id}`,
             persona: seat.persona,
             initialPrompt: prompt,
-            denyTools
+            denyTools,
+            ...link !== void 0 ? { model: link } : {},
+            // Carry the group id whenever the spawned link is one of the
+            // chain's own (the fork starts at the request's named link, then
+            // escalates internally). Skipped only for the exotic case of a
+            // persona active link that the chain does not declare.
+            ...seatChain !== void 0 && (linkIndex > 0 || seatChain.carryId) ? { chainId: seatChain.id } : {}
           }, args.signal);
           args.fibers.set(seat.id, fiber);
         } else {
@@ -5735,6 +5812,9 @@ async function generateParallel(ctx, parent, spec, args) {
         let turn = await waitForSeatTurnDetailed(ctx, fiber.childId, args.signal, args.params.debaterTimeoutMs);
         let resumes = 0;
         while (turn.truncated && resumes < 2 && !args.signal.aborted) {
+          if (seatChain !== void 0 && seatChain.onCut === "failover" && linkIndex + 1 < seatChain.links.length) {
+            throw new Error(`seat output cut at the output-token cap \u2014 advancing to chain link ${linkIndex + 2}`);
+          }
           resumes += 1;
           councilDiag(`[epoch ${args.epoch}] seat ${seat.id} hit the output-token cap \u2014 resuming (${resumes}/2)`);
           await followupSeatFiber(ctx, parent, fiber, "Your reply was cut at the output-token limit. Continue EXACTLY where you stopped \u2014 do not repeat or restate anything. Complete your turn.", args.signal);
@@ -5751,6 +5831,17 @@ ${next.text}`, truncated: next.truncated };
         lastError = err instanceof Error ? err : new Error(String(err));
         councilDiag(`[epoch ${args.epoch}] seat ${seat.id} attempt ${attempt} failed: ${lastError.message}`);
         if (args.signal.aborted) throw lastError;
+        const nextLink = seatChain?.links[linkIndex + 1];
+        if (seatChain !== void 0 && nextLink !== void 0) {
+          const failed = seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)];
+          process.stderr.write(`[model-chain] ${seatChain.id}: link ${linkIndex + 1} (${failed.provider}/${failed.model}) FAILED \u2192 link ${linkIndex + 2} (${nextLink.provider}/${nextLink.model}): ${lastError.message}
+`);
+          linkIndex += 1;
+          args.fibers.delete(seat.id);
+          if (attempt >= maxAttempts) break;
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
         if (attempt >= maxAttempts) break;
         await new Promise((r) => setTimeout(r, 500));
       }
@@ -6452,11 +6543,15 @@ var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var PersonaModelSchema = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
-  reasoningEffort: Schema.string()
+  reasoningEffort: Schema.string(),
+  /** Model failover chain id (doc 60) assigned to the seat. */
+  chain: Schema.string()
 });
 var OrchestrationSettingsSchema = Schema.object({
   personas: Schema.dict(PersonaModelSchema).default({}),
   councils: Schema.dict(Schema.any()).default({}),
+  /** Model failover chains (doc 60) consumed through the modelChains service. */
+  chains: Schema.dict(Schema.any()).default({}),
   uiPreferences: Schema.object({
     hiddenModels: Schema.any(),
     favorites: Schema.any(),

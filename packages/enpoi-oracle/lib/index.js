@@ -191,6 +191,63 @@ function resolvePersonaModel(ctx, persona) {
   }
   return void 0;
 }
+function resolveChainSnapshot(ctx, id) {
+  if (typeof id !== "string" || id.trim() === "") return void 0;
+  try {
+    const service = ctx.get("modelChains");
+    const snapshot = service?.resolve?.(id.trim());
+    if (snapshot === null || typeof snapshot !== "object") return void 0;
+    const record = snapshot;
+    if (!Array.isArray(record.links)) return void 0;
+    const links = [];
+    for (const raw of record.links) {
+      if (raw === null || typeof raw !== "object") continue;
+      const link = raw;
+      const provider = typeof link.provider === "string" ? link.provider.trim() : "";
+      const model = typeof link.model === "string" ? link.model.trim() : "";
+      if (provider === "" || model === "") continue;
+      const effort = typeof link.effort === "string" && link.effort.trim() !== "" ? link.effort.trim() : void 0;
+      links.push({ provider, model, ...effort !== void 0 ? { effort } : {} });
+    }
+    if (links.length === 0) return void 0;
+    const attempts = typeof record.attempts === "number" && Number.isFinite(record.attempts) && record.attempts >= 1 ? Math.floor(record.attempts) : void 0;
+    return {
+      id: typeof record.id === "string" && record.id !== "" ? record.id : id.trim(),
+      links,
+      ...attempts !== void 0 ? { attempts } : {},
+      onCut: record.onCut === "continue" ? "continue" : "failover"
+    };
+  } catch {
+    return void 0;
+  }
+}
+function resolveOracleChainAttempts(ctx, persona) {
+  try {
+    const settings = ctx.get("settings");
+    const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
+    const entry = settings?.get?.("enpoi-orchestration")?.personas?.[key];
+    const snapshot = resolveChainSnapshot(ctx, entry?.chain);
+    if (snapshot !== void 0) {
+      const active = entry !== void 0 && entry.provider && entry.model ? { provider: entry.provider, model: entry.model } : { ...snapshot.links[0] };
+      const links = [
+        active,
+        ...snapshot.links.filter((link) => !(link.provider === active.provider && link.model === active.model))
+      ];
+      const head = snapshot.links[0];
+      return {
+        chainId: snapshot.id,
+        carryId: head.provider === active.provider && head.model === active.model,
+        attempts: links.map((link) => ({ provider: link.provider, model: link.model }))
+      };
+    }
+  } catch {
+  }
+  const personaModel = resolvePersonaModel(ctx, persona);
+  return {
+    carryId: false,
+    attempts: personaModel !== void 0 ? [{ provider: personaModel.provider, model: personaModel.model }] : [{}]
+  };
+}
 function applyPersonaModel(ctx, childId, persona) {
   try {
     const entry = resolvePersonaModel(ctx, persona);
@@ -405,34 +462,66 @@ function registerOracleTools(ctx, root) {
           type: "text",
           text: fresh ? buildInitialPackage(brief, args, fiber.scorecard) : buildDelta(brief, args)
         }];
+        const { chainId, carryId, attempts: attemptModels } = resolveOracleChainAttempts(ctx, "oracle");
+        const callSignal = () => bg?.signal ?? exec.signal;
+        const spawnOracleChild = async (attempt, carriedChainId) => {
+          const denied = ORACLE_TOOL_FILTER.deny;
+          const started = await ctx.subagents.startContinuable({
+            provider: "spawn",
+            label: `oracle review: ${args.request.slice(0, 60)}`,
+            quiet: true,
+            request: {
+              prompt,
+              parent,
+              persona: ORACLE_PERSONA,
+              quiet: true,
+              toolFilter: denied.length > 0 ? { deny: denied } : void 0,
+              ...attempt.provider !== void 0 ? {
+                agentOptions: {
+                  provider: attempt.provider,
+                  model: attempt.model,
+                  ...carriedChainId !== void 0 ? { chain: carriedChainId } : {}
+                }
+              } : {}
+            },
+            signal: callSignal()
+          });
+          if (!started.childId || started.childId === "null" || !started.childId.includes("-")) {
+            throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`);
+          }
+          return started.childId;
+        };
+        const waitWithChainAdvance = async (firstChildId, advance) => {
+          let childId = firstChildId;
+          let lastError;
+          for (let index = 0; index < attemptModels.length; index += 1) {
+            try {
+              return await waitForChildTurn(ctx, childId, callSignal(), resolveOracleTimeoutMs(ctx));
+            } catch (error) {
+              lastError = error;
+              if (callSignal().aborted) throw error;
+              const current = attemptModels[index];
+              const next = advance ? attemptModels[index + 1] : void 0;
+              if (next === void 0) break;
+              const message = error instanceof Error ? error.message : String(error);
+              process.stderr.write(`[model-chain] ${chainId ?? "oracle"}: link ${index + 1} (${current.provider ?? "default"}/${current.model ?? "default"}) FAILED \u2192 link ${index + 2} (${next.provider ?? "default"}/${next.model ?? "default"}): ${message}
+`);
+              try {
+                await ctx.get("sessions")?.delete(childId);
+              } catch {
+              }
+              childId = await spawnOracleChild(next, chainId);
+              fiber.childId = childId;
+              fibers.set(key, fiber);
+            }
+          }
+          throw lastError instanceof Error ? lastError : new Error(String(lastError));
+        };
         if (fresh) {
           try {
-            const denied = ORACLE_TOOL_FILTER.deny;
-            const personaModel = resolvePersonaModel(ctx, "oracle");
-            const started = await ctx.subagents.startContinuable({
-              provider: "spawn",
-              label: `oracle review: ${args.request.slice(0, 60)}`,
-              quiet: true,
-              request: {
-                prompt,
-                parent,
-                persona: ORACLE_PERSONA,
-                quiet: true,
-                toolFilter: denied.length > 0 ? { deny: denied } : void 0,
-                ...personaModel !== void 0 ? {
-                  agentOptions: {
-                    provider: personaModel.provider,
-                    model: personaModel.model
-                  }
-                } : {}
-              },
-              signal: bg?.signal ?? exec.signal
-            });
-            if (!started.childId || started.childId === "null" || !started.childId.includes("-")) {
-              throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`);
-            }
-            fiber.childId = started.childId;
-            applyPersonaModel(ctx, started.childId, "oracle");
+            const childId = await spawnOracleChild(attemptModels[0], carryId ? chainId : void 0);
+            fiber.childId = childId;
+            applyPersonaModel(ctx, childId, "oracle");
             fibers.set(key, fiber);
             if (rolloverScorecard !== null && rolloverScorecards.has(key)) {
               rolloverScorecards.delete(key);
@@ -456,7 +545,7 @@ function registerOracleTools(ctx, root) {
           const childId = fiber.childId;
           void (async () => {
             try {
-              const t = await waitForChildTurn(ctx, childId, bg.signal, resolveOracleTimeoutMs(ctx));
+              const t = await waitWithChainAdvance(childId, fresh);
               const v = parseVerdict(t);
               fiber.consultations += 1;
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
@@ -494,7 +583,7 @@ ${t}`
         }
         let verdictText = "";
         try {
-          verdictText = await waitForChildTurn(ctx, fiber.childId, bg?.signal ?? exec.signal, resolveOracleTimeoutMs(ctx));
+          verdictText = await waitWithChainAdvance(fiber.childId, fresh);
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           fibers.delete(key);
@@ -664,6 +753,7 @@ export {
   isExternalEvidenceTarget,
   name,
   parseEvidenceSheet,
+  resolveOracleChainAttempts,
   resolveOracleTimeoutMs,
   resolvePersonaModel,
   textOfContent
