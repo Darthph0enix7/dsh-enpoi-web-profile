@@ -66,6 +66,11 @@ export const OrchestrationSettingsSchema = Schema.object({
   parameters: Schema.any(),
   uiPreferences: Schema.any(),
   permissions: Schema.any(),
+  // Pinned whiteboard (doc 66 §3c / doc 67 §B): orchestrator-authored
+  // core-context board, owned by enpoi-whiteboard and rendered into every
+  // runtime-context snapshot. Declared so the namespace contract admits the
+  // key rather than relying on unknown-key survival.
+  whiteboard: Schema.any(),
 })
 
 export function apply(ctx: Context): void {

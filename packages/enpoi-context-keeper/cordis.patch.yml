@@ -26,3 +26,8 @@
         # Claims batch: one pass per 8 non-aborted turn/ends or 5 minutes.
         claimsBatchSize: 8
         claimsBatchMinutes: 5
+        # State checkpoint staleness floor (doc 67 §A): refresh when >= N
+        # structural events or >= T hours passed since the last checkpoint,
+        # while token pressure is above half the context window.
+        checkpointStaleEvents: 12
+        checkpointStaleHours: 24

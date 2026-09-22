@@ -1,0 +1,14 @@
+# dsh-enpoi-whiteboard bundle patch — orchestrator-authored pinned context.
+#
+# The board is stored in the shared settings namespace
+# `enpoi-orchestration.whiteboard`, authored through the four whiteboard tools,
+# and injected into every assembly through the runtime-context seam
+# (systemPrompt.context(), order 140 — after the keeper's state checkpoint at
+# 130 and before the recent tail). A rendered board over the hard budget is
+# refused on write; path entries are flagged stale, never deleted.
+- insert:
+    - id: enpoi-whiteboard
+      name: 'dsh-enpoi-whiteboard'
+      config:
+        # Hard rendered-token budget (doc 67 §B).
+        budgetTokens: 1500

@@ -86,7 +86,9 @@ var Config = Schema.object({
   minRefreshMs: Schema.number().default(6e4),
   negativeCacheMs: Schema.number().default(12e4),
   claimsBatchSize: Schema.number().default(8),
-  claimsBatchMinutes: Schema.number().default(5)
+  claimsBatchMinutes: Schema.number().default(5),
+  checkpointStaleEvents: Schema.number().default(12),
+  checkpointStaleHours: Schema.number().default(24)
 });
 var PROSE_PROMPT = [
   "You are the Enpoi Harness context keeper \u2014 the master background summarizer and architectural keeper for this coding session.",
@@ -197,7 +199,9 @@ function resolveKeeperParams(ctx, config) {
       minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 6e4, 5e3, 3e5),
       negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 12e4, 5e3, 6e5),
       claimsBatchSize: clamp(p.claimsBatchSize, config.claimsBatchSize ?? 8, 1, 50),
-      claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60)
+      claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60),
+      checkpointStaleEvents: clamp(p.checkpointStaleEvents, config.checkpointStaleEvents ?? 12, 1, 500),
+      checkpointStaleHours: clamp(p.checkpointStaleHours, config.checkpointStaleHours ?? 24, 1, 168)
     };
   } catch {
     return config;
@@ -407,11 +411,333 @@ function getBriefService() {
 function createBriefService(ctx, config) {
   return new BriefService(ctx, config);
 }
+var CHECKPOINT_SOURCE = { kind: "plugin", plugin: "enpoi-context-keeper" };
+function checkpointTelemetry(session, meta) {
+  const day = (value) => {
+    if (value === void 0 || !Number.isFinite(value)) return "unknown";
+    try {
+      return new Date(value).toISOString().slice(0, 10);
+    } catch {
+      return "unknown";
+    }
+  };
+  const parts = [];
+  const startedAt = session.header?.createdAt;
+  parts.push(`session started ${day(startedAt)}`);
+  try {
+    const events = session.snapshotEvents();
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (event.type !== "turn/start") continue;
+      const turn = event.data.turn;
+      if (typeof turn === "number" && Number.isFinite(turn)) parts.push(`turn ${turn}`);
+      break;
+    }
+  } catch {
+  }
+  parts.push(`today ${day(Date.now())}`);
+  parts.push(`refreshed at seq ${meta.seq}`);
+  parts.push(`by ${meta.model}`);
+  parts.push(`via ${meta.via}`);
+  return parts.join(" \xB7 ");
+}
+function renderCheckpointBlock(data) {
+  const text = typeof data.text === "string" ? data.text.trim() : "";
+  return ["### State checkpoint", text, data.telemetry].filter((line) => line.length > 0).join("\n\n");
+}
+function buildTemplateCheckpoint(session) {
+  try {
+    const events = session.snapshotEvents();
+    let firstUser = "";
+    let lastUser = "";
+    let lastAssistant = "";
+    let lastError = "";
+    const docFiles = /* @__PURE__ */ new Set();
+    for (const event of events) {
+      if (event.type === "user/message") {
+        const text = messageText(event.data.content).trim();
+        if (text.length > 0) {
+          if (firstUser.length === 0) firstUser = text;
+          lastUser = text;
+        }
+      } else if (event.type === "assistant/message") {
+        const text = assistantMessageText(event.data);
+        if (text.length > 0) lastAssistant = text;
+      } else if (event.type === "tool/call") {
+        const args = event.data.arguments;
+        if (typeof args === "string") {
+          const matches = args.match(/["']([^"']*\.(?:md|json|yaml|yml))["']/g);
+          if (matches !== null) {
+            for (const match of matches) {
+              const clean = match.replace(/["']/g, "");
+              if (clean.length > 2 && docFiles.size < 8) docFiles.add(clean);
+            }
+          }
+        }
+      } else if (event.type === "tool/result") {
+        const error = event.data.error;
+        if (typeof error?.message === "string" && error.message.length > 0) lastError = error.message.slice(0, 300);
+      }
+    }
+    const clip = (text, max) => text.length > max ? `${text.slice(0, max)}\u2026` : text;
+    const sections = [];
+    if (firstUser.length > 0 || lastUser.length > 0) {
+      const goal = firstUser.length > 0 ? `- Objective: ${clip(firstUser.replace(/\s+/g, " "), 300)}` : "";
+      const latest = lastUser.length > 0 && lastUser !== firstUser ? `- Latest directive: ${clip(lastUser.replace(/\s+/g, " "), 300)}` : "";
+      sections.push(["\u{1F3AF} ACTIVE GOAL & CORE TRAJECTORY:", goal, latest].filter((line) => line.length > 0).join("\n"));
+    }
+    if (docFiles.size > 0) {
+      sections.push(["\u{1F4DA} DOCUMENTATION & SPECIFICATIONS INVENTORY:", ...[...docFiles].map((file) => `- ${file}`)].join("\n"));
+    }
+    if (lastAssistant.length > 0) {
+      const decision = clip(lastAssistant.split("\n").map((line) => line.trim()).filter((line) => line.length > 0)[0] ?? "", 300);
+      if (decision.length > 0) sections.push(["\u{1F3DB}\uFE0F ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:", `- ${decision}`].join("\n"));
+    }
+    if (lastError.length > 0) {
+      sections.push(["\u26A1 ACTIVE BLOCKERS & OPEN QUESTIONS:", `- Last tool error: ${lastError}`].join("\n"));
+    }
+    return sections.join("\n\n");
+  } catch (error) {
+    diag(`buildTemplateCheckpoint: fold failed (${String(error)})`);
+    return "";
+  }
+}
+var checkpointCursors = /* @__PURE__ */ new WeakMap();
+function latestCheckpoint(session) {
+  const known = checkpointCursors.get(session);
+  if (known !== void 0 && session.seq <= known.seq) return known.data;
+  let data = known?.data ?? null;
+  const from = known?.seq ?? 0;
+  try {
+    for (const event of session.snapshotEvents(SessionLogOffset(from))) {
+      if (event.type !== "state/checkpoint") continue;
+      const candidate = event.data;
+      if (typeof candidate?.text === "string" || typeof candidate?.telemetry === "string") {
+        data = {
+          version: typeof candidate.version === "number" ? candidate.version : 0,
+          basedOnSeq: typeof candidate.basedOnSeq === "number" ? candidate.basedOnSeq : 0,
+          basedOnStructuralCount: typeof candidate.basedOnStructuralCount === "number" ? candidate.basedOnStructuralCount : 0,
+          model: typeof candidate.model === "string" ? candidate.model : "unknown",
+          via: candidate.via === "llm" ? "llm" : "template",
+          text: typeof candidate.text === "string" ? candidate.text : "",
+          telemetry: typeof candidate.telemetry === "string" ? candidate.telemetry : "",
+          createdAt: typeof candidate.createdAt === "number" ? candidate.createdAt : 0
+        };
+      }
+    }
+  } catch (error) {
+    diag(`latestCheckpoint: read failed (${String(error)})`);
+  }
+  checkpointCursors.set(session, { seq: session.seq, data });
+  return data;
+}
+function appendCheckpoint(session, data) {
+  const append = session.append;
+  append.call(session, "state/checkpoint", data, { ignorable: true });
+}
+function latestCheckpointMessageSeq(session) {
+  const surface = new Set(session.surface.nodes);
+  if (surface.size === 0) return null;
+  let found = null;
+  try {
+    for (const event of session.snapshotEvents()) {
+      if (event.type !== "user/message") continue;
+      const source = event.data.source;
+      if (source?.kind !== "plugin" || source.plugin !== "enpoi-context-keeper") continue;
+      if (surface.has(event.seq)) found = event.seq;
+    }
+  } catch (error) {
+    diag(`latestCheckpointMessageSeq: read failed (${String(error)})`);
+  }
+  return found;
+}
+function commitCheckpointMessage(session, text) {
+  const append = session.append;
+  const message = createUserMessage({
+    content: [{ type: "text", text }],
+    source: { ...CHECKPOINT_SOURCE }
+  });
+  const previous = latestCheckpointMessageSeq(session);
+  if (previous !== null) {
+    try {
+      append.call(session, "user/message", message, {
+        surfaceOp: { op: "replace", startSeq: previous, endSeq: previous },
+        sourceEventSeqs: [previous]
+      });
+      return;
+    } catch (error) {
+      diag(`commitCheckpointMessage: replace of seq ${previous} failed, appending (${String(error)})`);
+    }
+  }
+  append.call(session, "user/message", message, { surfaceOp: "append" });
+}
+var CheckpointService = class {
+  constructor(ctx, config) {
+    this.ctx = ctx;
+    this.config = config;
+  }
+  cache = /* @__PURE__ */ new Map();
+  /**
+   * Ensure the session's state checkpoint is fresh.
+   *
+   * `force` (a segment cut) refreshes even inside the freshness window: the
+   * boundary busts the prompt cache anyway, and the keeper's brief is a
+   * point-in-time snapshot by contract. Never throws for provider failures —
+   * the deterministic template always yields a valid checkpoint.
+   * @param session - the session to checkpoint.
+   * @param opts - `force` for a segment-cut refresh.
+   * @returns whether the checkpoint is present and how it was produced.
+   */
+  async ensureCheckpoint(session, opts = {}) {
+    if (!keeperEnabled(this.ctx)) return { ok: false, text: null, reason: "keeper-disabled" };
+    const cfg = resolveKeeperParams(this.ctx, this.config);
+    const key = session.id;
+    const now = Date.now();
+    let entry = this.cache.get(key);
+    if (entry === void 0) {
+      const logged = latestCheckpoint(session);
+      if (logged !== null) {
+        entry = {
+          version: logged.version,
+          basedOnSeq: logged.basedOnSeq,
+          basedOnStructuralCount: logged.basedOnStructuralCount,
+          text: logged.text,
+          model: logged.model,
+          via: logged.via,
+          createdAt: logged.createdAt,
+          inFlight: null
+        };
+        this.cache.set(key, entry);
+      }
+    }
+    const structural = structuralTotal(session);
+    if (entry !== void 0 && opts.force !== true) {
+      const freshStructural = structural - entry.basedOnStructuralCount < (cfg.checkpointStaleEvents ?? 12);
+      const freshAge = now - entry.createdAt < (cfg.checkpointStaleHours ?? 24) * 36e5;
+      if (freshStructural && freshAge) {
+        return { ok: true, text: entry.text, model: entry.model, reason: "cache-hit" };
+      }
+    }
+    if (entry?.inFlight != null) {
+      try {
+        return await entry.inFlight;
+      } catch {
+        return { ok: false, text: null, reason: "refreshed" };
+      }
+    }
+    const snapshotSeq = session.seq;
+    const promise = this.refresh(session, snapshotSeq, cfg, structural);
+    this.cache.set(key, {
+      ...entry ?? {
+        version: 0,
+        basedOnSeq: 0,
+        basedOnStructuralCount: 0,
+        text: "",
+        model: "",
+        via: "template",
+        createdAt: 0
+      },
+      inFlight: promise
+    });
+    try {
+      return await promise;
+    } finally {
+      const current = this.cache.get(key);
+      if (current !== void 0 && current.inFlight === promise) this.cache.set(key, { ...current, inFlight: null });
+    }
+  }
+  /** One refresh: model chain, then the deterministic template fallback. */
+  async refresh(session, snapshotSeq, cfg, structural) {
+    let text = "";
+    let model = "template";
+    let via = "template";
+    const lease = new AbortController();
+    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
+    try {
+      const input = frameInput(session, cfg.maxInputEvents ?? 80);
+      if (input.length > 0) {
+        const route = resolveKeeperRoute(this.ctx, cfg);
+        diag(`ensureCheckpoint: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`);
+        const result = await summarize(this.ctx, cfg, session, input, lease.signal, route, PROSE_PROMPT, false);
+        const prose = cleanKeeperProse(result.text);
+        if (prose.length > 0) {
+          text = prose;
+          model = result.route;
+          via = "llm";
+        }
+      }
+    } catch (error) {
+      diag(`ensureCheckpoint: session=${session.id} \u2014 model path failed, using template (${String(error)})`);
+    } finally {
+      clearTimeout(leaseTimer);
+    }
+    if (via === "template") {
+      text = buildTemplateCheckpoint(session);
+      model = "template";
+    }
+    const current = this.cache.get(session.id);
+    const version = (latestCheckpoint(session)?.version ?? current?.version ?? 0) + 1;
+    const data = {
+      version,
+      basedOnSeq: snapshotSeq,
+      basedOnStructuralCount: structural,
+      model,
+      via,
+      text,
+      telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
+      createdAt: Date.now()
+    };
+    try {
+      appendCheckpoint(session, data);
+      commitCheckpointMessage(session, renderCheckpointBlock(data));
+    } catch (error) {
+      diag(`ensureCheckpoint: session=${session.id} \u2014 commit failed (${String(error)})`);
+      return { ok: false, text: null, reason: "refreshed" };
+    }
+    checkpointCursors.set(session, { seq: session.seq, data });
+    this.cache.set(session.id, {
+      version,
+      basedOnSeq: snapshotSeq,
+      basedOnStructuralCount: structural,
+      text,
+      model,
+      via,
+      createdAt: data.createdAt,
+      inFlight: current?.inFlight ?? null
+    });
+    diag(`ensureCheckpoint: session=${session.id} \u2014 appended state/checkpoint v${version} via ${via} (${text.length} chars)`);
+    return { ok: true, text, model, reason: "refreshed" };
+  }
+};
+function pressureAboveHalf(ctx, session) {
+  try {
+    const window = session.requestContext?.()?.contextWindow;
+    if (typeof window !== "number" || !Number.isFinite(window) || window <= 0) return true;
+    const meter = ctx.get("tokenMeter");
+    const used = meter?.measure?.(session)?.totalTokens;
+    if (typeof used !== "number" || !Number.isFinite(used)) return true;
+    return used >= window * 0.5;
+  } catch {
+    return true;
+  }
+}
+var CHECKPOINT_SERVICE_ANCHOR = Symbol.for("enpoi.context-keeper.checkpoint-service");
+var checkpointService = null;
+function getCheckpointService() {
+  const anchored = globalThis[CHECKPOINT_SERVICE_ANCHOR];
+  return anchored ?? checkpointService;
+}
+function createCheckpointService(ctx, config) {
+  return new CheckpointService(ctx, config);
+}
 function apply(ctx, config) {
   const ownedService = createBriefService(ctx, config);
   briefService = ownedService;
   globalThis[BRIEF_SERVICE_ANCHOR] = ownedService;
-  diag(`apply: mounted (demand-driven; prose on oracle/council use, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`);
+  const ownedCheckpoint = createCheckpointService(ctx, config);
+  checkpointService = ownedCheckpoint;
+  globalThis[CHECKPOINT_SERVICE_ANCHOR] = ownedCheckpoint;
+  diag(`apply: mounted (demand-driven; prose on oracle/council use, state checkpoint on segment cuts + staleness floor, surface replace in place, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`);
   const claimCounters = /* @__PURE__ */ new Map();
   const claimsRunning = /* @__PURE__ */ new Set();
   ctx.on("session/event", (session, event) => {
@@ -419,10 +745,18 @@ function apply(ctx, config) {
       const known = structuralCounters.get(session);
       if (known !== void 0) structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 });
     }
+    if (event.type === "state/checkpoint") {
+      checkpointCursors.set(session, { seq: event.seq + 1, data: event.data });
+    }
+    if ((event.type === "compaction/end" || event.type === "compaction/summary") && keeperEnabled(ctx)) {
+      void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
+      });
+    }
     if (event.type !== "turn/end") return;
     if (!keeperEnabled(ctx)) return;
     const reason = event.data.reason;
     if (reason.kind === "aborted") return;
+    maybeScheduleStaleCheckpoint(ctx, config, session, ownedCheckpoint);
     let counter = claimCounters.get(session.id);
     if (counter === void 0) {
       counter = { count: 0, timer: null };
@@ -453,7 +787,24 @@ function apply(ctx, config) {
     if (globalThis[BRIEF_SERVICE_ANCHOR] === ownedService) {
       delete globalThis[BRIEF_SERVICE_ANCHOR];
     }
+    if (checkpointService === ownedCheckpoint) checkpointService = null;
+    if (globalThis[CHECKPOINT_SERVICE_ANCHOR] === ownedCheckpoint) {
+      delete globalThis[CHECKPOINT_SERVICE_ANCHOR];
+    }
   });
+}
+function maybeScheduleStaleCheckpoint(ctx, config, session, service) {
+  try {
+    const cfg = resolveKeeperParams(ctx, config);
+    const last = latestCheckpoint(session);
+    const structural = structuralTotal(session);
+    const stale = last === null ? structural >= (cfg.checkpointStaleEvents ?? 12) : structural - last.basedOnStructuralCount >= (cfg.checkpointStaleEvents ?? 12) || Date.now() - last.createdAt >= (cfg.checkpointStaleHours ?? 24) * 36e5;
+    if (!stale) return;
+    if (!pressureAboveHalf(ctx, session)) return;
+    void service.ensureCheckpoint(session).catch(() => {
+    });
+  } catch {
+  }
 }
 async function runClaimsPass(ctx, config, session, running) {
   if (running.has(session.id)) return;
@@ -545,12 +896,10 @@ function frameInput(session, maxEvents) {
   let previousProse = "";
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.type === "brief/prose-updated") {
-      const data = e.data;
-      if (typeof data.text === "string" && data.text.length > 0) {
-        previousProse = data.text.slice(0, 4e3);
-        break;
-      }
+    const candidate = e.type === "state/checkpoint" || e.type === "brief/prose-updated" ? e.data.text : void 0;
+    if (typeof candidate === "string" && candidate.length > 0) {
+      previousProse = candidate.slice(0, 4e3);
+      break;
     }
   }
   const start = Math.max(0, events.length - maxEvents);
@@ -562,9 +911,9 @@ function frameInput(session, maxEvents) {
       const text = messageText(event.data.content);
       if (text.length > 0) lines.push(`USER: ${text.slice(0, 2500)}`);
     } else if (event.type === "assistant/message") {
-      const data = event.data;
-      if (typeof data.text === "string" && data.text.length > 0) {
-        lines.push(`ASSISTANT: ${data.text.slice(0, 2500)}`);
+      const text = assistantMessageText(event.data);
+      if (text.length > 0) {
+        lines.push(`ASSISTANT: ${text.slice(0, 2500)}`);
       }
     } else if (event.type === "tool/call") {
       const data = event.data;
@@ -600,6 +949,19 @@ ${Array.from(docFiles).map((f) => `\u2022 ${f}`).join("\n")}`);
 ${lines.join("\n")}`);
   }
   return sections.join("\n\n");
+}
+function assistantMessageText(data) {
+  if (!data || typeof data !== "object") return "";
+  const record = data;
+  if (typeof record.text === "string" && record.text.trim().length > 0) return record.text.trim();
+  if (!Array.isArray(record.message?.content)) return "";
+  const parts = [];
+  for (const block of record.message.content) {
+    if (block !== null && typeof block === "object" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.join("\n").trim();
 }
 function toolResultText(data) {
   if (!data || typeof data !== "object") return "";
@@ -758,14 +1120,23 @@ function finishError(finish) {
 }
 export {
   BriefService,
+  CHECKPOINT_SOURCE,
+  CheckpointService,
   Config,
   apply,
+  buildTemplateCheckpoint,
+  checkpointTelemetry,
   cleanKeeperProse,
   createBriefService,
+  createCheckpointService,
   getBriefService,
+  getCheckpointService,
   inject,
   keeperAttempts,
+  latestCheckpoint,
+  latestCheckpointMessageSeq,
   name,
+  renderCheckpointBlock,
   resolveKeeperParams,
   resolveKeeperRoute,
   splitClaims,

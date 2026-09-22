@@ -92,6 +92,10 @@ export interface Config {
   claimsBatchSize?: number
   /** …or T minutes, whichever first. */
   claimsBatchMinutes?: number
+  /** Staleness floor: structural events since the last state checkpoint. */
+  checkpointStaleEvents?: number
+  /** Staleness floor: hours since the last state checkpoint. */
+  checkpointStaleHours?: number
 }
 
 export const Config = Schema.object({
@@ -107,6 +111,8 @@ export const Config = Schema.object({
   negativeCacheMs: Schema.number().default(120_000),
   claimsBatchSize: Schema.number().default(8),
   claimsBatchMinutes: Schema.number().default(5),
+  checkpointStaleEvents: Schema.number().default(12),
+  checkpointStaleHours: Schema.number().default(24),
 })
 
 /** Secrets-exclusion instruction (doc 35 §1.1) — summarization never credentials. */
@@ -287,6 +293,8 @@ export function resolveKeeperParams(ctx: Context, config: Config): Config {
       negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 120_000, 5_000, 600_000),
       claimsBatchSize: clamp(p.claimsBatchSize, config.claimsBatchSize ?? 8, 1, 50),
       claimsBatchMinutes: clamp(p.claimsBatchMinutes, config.claimsBatchMinutes ?? 5, 1, 60),
+      checkpointStaleEvents: clamp(p.checkpointStaleEvents, config.checkpointStaleEvents ?? 12, 1, 500),
+      checkpointStaleHours: clamp(p.checkpointStaleHours, config.checkpointStaleHours ?? 24, 1, 168),
     }
   } catch {
     return config
@@ -589,11 +597,476 @@ export function createBriefService(ctx: Context, config: Config): BriefService {
   return new BriefService(ctx, config)
 }
 
+// ── State checkpoint (doc 67 §A): surface layer [4] ─────────────────────────
+//
+// The keeper's five-section brief is no longer only a demand-driven cache: it
+// is written as an append-only `state/checkpoint` event whose newest member is
+// injected into every assembly through the runtime-context seam (order 130,
+// after the frozen segments and before the whiteboard [5]/tail [6]). Refresh
+// triggers: (1) a segment cut (`compaction/end` | `compaction/summary`),
+// (2) the staleness floor (>= N structural events or >= T hours since the last
+// checkpoint, while token pressure is above half the window), (3) on demand
+// (`ensureCheckpoint`). The deterministic template always produces a valid
+// checkpoint, so a provider outage can never leave the layer empty.
+
+/** Source marker that identifies the keeper's own surface checkpoint messages. */
+export const CHECKPOINT_SOURCE = { kind: 'plugin', plugin: 'enpoi-context-keeper' } as const
+
+/**
+ * One state checkpoint as persisted on the `state/checkpoint` event (and as the
+ * text of the surface message that replaces the previous checkpoint node).
+ */
+export interface CheckpointData {
+  /** Monotonic checkpoint version (1 on the first refresh). */
+  version: number
+  /** Session seq the brief is based on (snapshot taken before the model call). */
+  basedOnSeq: number
+  /** Structural-event total when the refresh started. */
+  basedOnStructuralCount: number
+  /** Serving route (`provider/model`) or `template`. */
+  model: string
+  /** Whether the prose came from the model or the deterministic fold. */
+  via: 'llm' | 'template'
+  /** The five-section brief (may be empty for a session with nothing yet). */
+  text: string
+  /** Temporal grounding + refresh provenance line. */
+  telemetry: string
+  createdAt: number
+}
+
+/** Result of an ensureCheckpoint call. */
+export interface CheckpointResult {
+  ok: boolean
+  text: string | null
+  model?: string
+  reason: 'cache-hit' | 'refreshed' | 'keeper-disabled'
+}
+
+/**
+ * The telemetry line every checkpoint carries (doc 66 §3d): temporal grounding
+ * without token panic, plus the refresh provenance Watchtower renders.
+ * @param session - the session the checkpoint belongs to.
+ * @param meta - route, mechanism, and seq facts of this refresh.
+ * @returns the one-line telemetry.
+ */
+export function checkpointTelemetry(
+  session: Session,
+  meta: { seq: number; model: string; via: 'llm' | 'template' },
+): string {
+  const day = (value: number | undefined): string => {
+    if (value === undefined || !Number.isFinite(value)) return 'unknown'
+    try {
+      return new Date(value).toISOString().slice(0, 10)
+    } catch {
+      return 'unknown'
+    }
+  }
+  const parts: string[] = []
+  const startedAt = (session.header as { createdAt?: number } | undefined)?.createdAt
+  parts.push(`session started ${day(startedAt)}`)
+  try {
+    const events = session.snapshotEvents()
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!
+      if (event.type !== 'turn/start') continue
+      const turn = (event.data as { turn?: number }).turn
+      if (typeof turn === 'number' && Number.isFinite(turn)) parts.push(`turn ${turn}`)
+      break
+    }
+  } catch {
+    // temporal grounding degrades to the two dates
+  }
+  parts.push(`today ${day(Date.now())}`)
+  parts.push(`refreshed at seq ${meta.seq}`)
+  parts.push(`by ${meta.model}`)
+  parts.push(`via ${meta.via}`)
+  return parts.join(' · ')
+}
+
+/**
+ * Render one checkpoint into the exact injected block: header, the brief, and
+ * the telemetry line. The newest checkpoint always replaces the previous
+ * on the surface (the runtime-context projection owns that replacement).
+ * @param data - the persisted checkpoint.
+ * @returns the injected block.
+ */
+export function renderCheckpointBlock(data: CheckpointData): string {
+  const text = typeof data.text === 'string' ? data.text.trim() : ''
+  return ['### State checkpoint', text, data.telemetry].filter((line) => line.length > 0).join('\n\n')
+}
+
+/**
+ * Deterministic template checkpoint: the code-assembled fold used when the
+ * managed model chain is unavailable. Always returns a string; sections with
+ * no substantive content are omitted (zero-filler rule).
+ * @param session - the session to fold.
+ * @returns the five-section brief text (possibly empty for an empty session).
+ */
+export function buildTemplateCheckpoint(session: Session): string {
+  try {
+    const events = session.snapshotEvents()
+    let firstUser = ''
+    let lastUser = ''
+    let lastAssistant = ''
+    let lastError = ''
+    const docFiles = new Set<string>()
+
+    for (const event of events) {
+      if (event.type === 'user/message') {
+        const text = messageText((event.data as { content: unknown }).content).trim()
+        if (text.length > 0) {
+          if (firstUser.length === 0) firstUser = text
+          lastUser = text
+        }
+      } else if (event.type === 'assistant/message') {
+        const text = assistantMessageText(event.data)
+        if (text.length > 0) lastAssistant = text
+      } else if (event.type === 'tool/call') {
+        const args = (event.data as { arguments?: string }).arguments
+        if (typeof args === 'string') {
+          const matches = args.match(/["']([^"']*\.(?:md|json|yaml|yml))["']/g)
+          if (matches !== null) {
+            for (const match of matches) {
+              const clean = match.replace(/["']/g, '')
+              if (clean.length > 2 && docFiles.size < 8) docFiles.add(clean)
+            }
+          }
+        }
+      } else if (event.type === 'tool/result') {
+        const error = (event.data as { error?: { message?: string } }).error
+        if (typeof error?.message === 'string' && error.message.length > 0) lastError = error.message.slice(0, 300)
+      }
+    }
+
+    const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text)
+    const sections: string[] = []
+    if (firstUser.length > 0 || lastUser.length > 0) {
+      const goal = firstUser.length > 0 ? `- Objective: ${clip(firstUser.replace(/\s+/g, ' '), 300)}` : ''
+      const latest = lastUser.length > 0 && lastUser !== firstUser
+        ? `- Latest directive: ${clip(lastUser.replace(/\s+/g, ' '), 300)}`
+        : ''
+      sections.push(['🎯 ACTIVE GOAL & CORE TRAJECTORY:', goal, latest].filter((line) => line.length > 0).join('\n'))
+    }
+    if (docFiles.size > 0) {
+      sections.push(['📚 DOCUMENTATION & SPECIFICATIONS INVENTORY:', ...[...docFiles].map((file) => `- ${file}`)].join('\n'))
+    }
+    if (lastAssistant.length > 0) {
+      const decision = clip(lastAssistant.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)[0] ?? '', 300)
+      if (decision.length > 0) sections.push(['🏛️ ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:', `- ${decision}`].join('\n'))
+    }
+    if (lastError.length > 0) {
+      sections.push(['⚡ ACTIVE BLOCKERS & OPEN QUESTIONS:', `- Last tool error: ${lastError}`].join('\n'))
+    }
+    return sections.join('\n\n')
+  } catch (error) {
+    diag(`buildTemplateCheckpoint: fold failed (${String(error)})`)
+    return ''
+  }
+}
+
+/**
+ * Incremental newest-checkpoint reader per live Session (WeakMap, so a disposed
+ * session takes its cursor with it). Seeded with one read, then maintained from
+ * committed events, with a delta catch-up for a missed delivery — the
+ * runtime-context provider calls this on every assembly, so it must stay O(1).
+ */
+const checkpointCursors = new WeakMap<Session, { seq: number; data: CheckpointData | null }>()
+
+/**
+ * Read the newest `state/checkpoint` event from a session log.
+ * @param session - the session to read.
+ * @returns the newest checkpoint data, or null when the session has none.
+ */
+export function latestCheckpoint(session: Session): CheckpointData | null {
+  const known = checkpointCursors.get(session)
+  if (known !== undefined && session.seq <= known.seq) return known.data
+  let data = known?.data ?? null
+  const from = known?.seq ?? 0
+  try {
+    for (const event of session.snapshotEvents(SessionLogOffset(from))) {
+      if (event.type !== 'state/checkpoint') continue
+      const candidate = event.data as Partial<CheckpointData>
+      if (typeof candidate?.text === 'string' || typeof candidate?.telemetry === 'string') {
+        data = {
+          version: typeof candidate.version === 'number' ? candidate.version : 0,
+          basedOnSeq: typeof candidate.basedOnSeq === 'number' ? candidate.basedOnSeq : 0,
+          basedOnStructuralCount: typeof candidate.basedOnStructuralCount === 'number' ? candidate.basedOnStructuralCount : 0,
+          model: typeof candidate.model === 'string' ? candidate.model : 'unknown',
+          via: candidate.via === 'llm' ? 'llm' : 'template',
+          text: typeof candidate.text === 'string' ? candidate.text : '',
+          telemetry: typeof candidate.telemetry === 'string' ? candidate.telemetry : '',
+          createdAt: typeof candidate.createdAt === 'number' ? candidate.createdAt : 0,
+        }
+      }
+    }
+  } catch (error) {
+    diag(`latestCheckpoint: read failed (${String(error)})`)
+  }
+  checkpointCursors.set(session, { seq: session.seq, data })
+  return data
+}
+
+/** Append one checkpoint event (log-only, ignorable for older readers). */
+function appendCheckpoint(session: Session, data: CheckpointData): void {
+  const append = session.append as unknown as (type: string, payload: unknown, opts?: { ignorable?: true }) => unknown
+  append.call(session, 'state/checkpoint', data, { ignorable: true })
+}
+
+/**
+ * The seq of the live surface node holding this keeper's previous checkpoint
+ * message, or null when none survives. The log is the source of truth: a
+ * message that was shadowed by a later revert is not a valid replace target,
+ * so a resumed or reverted session appends a fresh node instead.
+ * @param session - the session to inspect.
+ * @returns the live checkpoint message seq, or null.
+ */
+export function latestCheckpointMessageSeq(session: Session): number | null {
+  const surface = new Set(session.surface.nodes)
+  if (surface.size === 0) return null
+  let found: number | null = null
+  try {
+    for (const event of session.snapshotEvents()) {
+      if (event.type !== 'user/message') continue
+      const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+      if (source?.kind !== 'plugin' || source.plugin !== 'enpoi-context-keeper') continue
+      if (surface.has(event.seq)) found = event.seq
+    }
+  } catch (error) {
+    diag(`latestCheckpointMessageSeq: read failed (${String(error)})`)
+  }
+  return found
+}
+
+/**
+ * Commit the checkpoint to the surface: one plugin-sourced user message whose
+ * `surfaceOp` replaces the previous checkpoint node in place (append-only log,
+ * never an in-place mutation). The replaced node leaves the priced surface, so
+ * exactly one state checkpoint is live regardless of refresh count.
+ * @param session - the session receiving the checkpoint message.
+ * @param text - the rendered checkpoint block.
+ */
+function commitCheckpointMessage(session: Session, text: string): void {
+  const append = session.append as unknown as (type: string, message: unknown, intent: unknown) => unknown
+  const message = createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { ...CHECKPOINT_SOURCE },
+  })
+  const previous = latestCheckpointMessageSeq(session)
+  if (previous !== null) {
+    try {
+      append.call(session, 'user/message', message, {
+        surfaceOp: { op: 'replace', startSeq: previous, endSeq: previous },
+        sourceEventSeqs: [previous],
+      })
+      return
+    } catch (error) {
+      // The node can be shadowed between the scan and the append (a revert
+      // commit). A checkpoint must never fail a turn: append a fresh node.
+      diag(`commitCheckpointMessage: replace of seq ${previous} failed, appending (${String(error)})`)
+    }
+  }
+  append.call(session, 'user/message', message, { surfaceOp: 'append' })
+}
+
+/** Per-session checkpoint cache entry (single-flight + freshness). */
+interface CheckpointEntry {
+  version: number
+  basedOnSeq: number
+  basedOnStructuralCount: number
+  text: string
+  model: string
+  via: 'llm' | 'template'
+  createdAt: number
+  inFlight: Promise<CheckpointResult> | null
+}
+
+/**
+ * The checkpoint writer. Owns the per-session freshness cache and the
+ * single-flight refresh; the session log is the durable source of truth, so a
+ * cold reopen rehydrates the cache from the newest event.
+ */
+export class CheckpointService {
+  private readonly cache = new Map<string, CheckpointEntry>()
+
+  constructor(
+    private readonly ctx: Context,
+    private readonly config: Config,
+  ) {}
+
+  /**
+   * Ensure the session's state checkpoint is fresh.
+   *
+   * `force` (a segment cut) refreshes even inside the freshness window: the
+   * boundary busts the prompt cache anyway, and the keeper's brief is a
+   * point-in-time snapshot by contract. Never throws for provider failures —
+   * the deterministic template always yields a valid checkpoint.
+   * @param session - the session to checkpoint.
+   * @param opts - `force` for a segment-cut refresh.
+   * @returns whether the checkpoint is present and how it was produced.
+   */
+  async ensureCheckpoint(session: Session, opts: { force?: boolean } = {}): Promise<CheckpointResult> {
+    if (!keeperEnabled(this.ctx)) return { ok: false, text: null, reason: 'keeper-disabled' }
+    const cfg = resolveKeeperParams(this.ctx, this.config)
+    const key = session.id
+    const now = Date.now()
+    let entry = this.cache.get(key)
+    if (entry === undefined) {
+      const logged = latestCheckpoint(session)
+      if (logged !== null) {
+        entry = {
+          version: logged.version,
+          basedOnSeq: logged.basedOnSeq,
+          basedOnStructuralCount: logged.basedOnStructuralCount,
+          text: logged.text,
+          model: logged.model,
+          via: logged.via,
+          createdAt: logged.createdAt,
+          inFlight: null,
+        }
+        this.cache.set(key, entry)
+      }
+    }
+    const structural = structuralTotal(session)
+    if (entry !== undefined && opts.force !== true) {
+      const freshStructural = structural - entry.basedOnStructuralCount < (cfg.checkpointStaleEvents ?? 12)
+      const freshAge = now - entry.createdAt < (cfg.checkpointStaleHours ?? 24) * 3_600_000
+      if (freshStructural && freshAge) {
+        return { ok: true, text: entry.text, model: entry.model, reason: 'cache-hit' }
+      }
+    }
+    if (entry?.inFlight != null) {
+      try {
+        return await entry.inFlight
+      } catch {
+        return { ok: false, text: null, reason: 'refreshed' }
+      }
+    }
+    const snapshotSeq = session.seq
+    const promise = this.refresh(session, snapshotSeq, cfg, structural)
+    this.cache.set(key, {
+      ...(entry ?? {
+        version: 0, basedOnSeq: 0, basedOnStructuralCount: 0, text: '', model: '', via: 'template', createdAt: 0,
+      }),
+      inFlight: promise,
+    })
+    try {
+      return await promise
+    } finally {
+      const current = this.cache.get(key)
+      if (current !== undefined && current.inFlight === promise) this.cache.set(key, { ...current, inFlight: null })
+    }
+  }
+
+  /** One refresh: model chain, then the deterministic template fallback. */
+  private async refresh(
+    session: Session,
+    snapshotSeq: number,
+    cfg: Config,
+    structural: number,
+  ): Promise<CheckpointResult> {
+    let text = ''
+    let model = 'template'
+    let via: 'llm' | 'template' = 'template'
+    const lease = new AbortController()
+    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
+    try {
+      const input = frameInput(session, cfg.maxInputEvents ?? 80)
+      if (input.length > 0) {
+        const route = resolveKeeperRoute(this.ctx, cfg)
+        diag(`ensureCheckpoint: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`)
+        const result = await summarize(this.ctx, cfg, session, input, lease.signal, route, PROSE_PROMPT, false)
+        const prose = cleanKeeperProse(result.text)
+        if (prose.length > 0) {
+          text = prose
+          model = result.route
+          via = 'llm'
+        }
+      }
+    } catch (error) {
+      diag(`ensureCheckpoint: session=${session.id} — model path failed, using template (${String(error)})`)
+    } finally {
+      clearTimeout(leaseTimer)
+    }
+    if (via === 'template') {
+      text = buildTemplateCheckpoint(session)
+      model = 'template'
+    }
+    const current = this.cache.get(session.id)
+    const version = (latestCheckpoint(session)?.version ?? current?.version ?? 0) + 1
+    const data: CheckpointData = {
+      version,
+      basedOnSeq: snapshotSeq,
+      basedOnStructuralCount: structural,
+      model,
+      via,
+      text,
+      telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
+      createdAt: Date.now(),
+    }
+    try {
+      appendCheckpoint(session, data)
+      commitCheckpointMessage(session, renderCheckpointBlock(data))
+    } catch (error) {
+      diag(`ensureCheckpoint: session=${session.id} — commit failed (${String(error)})`)
+      return { ok: false, text: null, reason: 'refreshed' }
+    }
+    checkpointCursors.set(session, { seq: session.seq, data })
+    this.cache.set(session.id, {
+      version,
+      basedOnSeq: snapshotSeq,
+      basedOnStructuralCount: structural,
+      text,
+      model,
+      via,
+      createdAt: data.createdAt,
+      inFlight: current?.inFlight ?? null,
+    })
+    diag(`ensureCheckpoint: session=${session.id} — appended state/checkpoint v${version} via ${via} (${text.length} chars)`)
+    return { ok: true, text, model, reason: 'refreshed' }
+  }
+}
+
+/**
+ * Whether token pressure is above half the context window. Unknown facts
+ * (no meter, no logged window) answer `true`: the staleness floor exists to
+ * keep the layer current, so uncertainty must not withhold it.
+ */
+function pressureAboveHalf(ctx: Context, session: Session): boolean {
+  try {
+    const window = (session as { requestContext?: () => { contextWindow?: number } | undefined }).requestContext?.()?.contextWindow
+    if (typeof window !== 'number' || !Number.isFinite(window) || window <= 0) return true
+    const meter = ctx.get('tokenMeter') as { measure?: (target: Session) => { totalTokens?: number } } | undefined
+    const used = meter?.measure?.(session)?.totalTokens
+    if (typeof used !== 'number' || !Number.isFinite(used)) return true
+    return used >= window * 0.5
+  } catch {
+    return true
+  }
+}
+
+/** Module-level singleton — set by apply(), read by on-demand consumers. */
+const CHECKPOINT_SERVICE_ANCHOR = Symbol.for('enpoi.context-keeper.checkpoint-service')
+let checkpointService: CheckpointService | null = null
+
+/** Get the mounted checkpoint service (null before apply or if the plugin is absent). */
+export function getCheckpointService(): CheckpointService | null {
+  const anchored = (globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR]
+  return (anchored as CheckpointService | undefined) ?? checkpointService
+}
+
+/** Create a standalone checkpoint service (tests / headless use). */
+export function createCheckpointService(ctx: Context, config: Config): CheckpointService {
+  return new CheckpointService(ctx, config)
+}
+
 export function apply(ctx: Context, config: Config): void {
   const ownedService = createBriefService(ctx, config)
   briefService = ownedService
   ;(globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR] = ownedService
-  diag(`apply: mounted (demand-driven; prose on oracle/council use, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`)
+  const ownedCheckpoint = createCheckpointService(ctx, config)
+  checkpointService = ownedCheckpoint
+  ;(globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR] = ownedCheckpoint
+  diag(`apply: mounted (demand-driven; prose on oracle/council use, state checkpoint on segment cuts + staleness floor, surface replace in place, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`)
 
   // ── Claims batched listener (P1, survives P3) ─────────────────────────────
   // A plain counter + timer — NO debounce, NO rerun latch, NO wedge machinery.
@@ -607,10 +1080,25 @@ export function apply(ctx: Context, config: Config): void {
       const known = structuralCounters.get(session)
       if (known !== undefined) structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 })
     }
+    // Checkpoints keep their own cursor so the assembly-time reader stays O(1).
+    if (event.type === 'state/checkpoint') {
+      checkpointCursors.set(session, { seq: event.seq + 1, data: event.data as CheckpointData })
+    }
+    // Trigger 1 — segment cut: the compaction engine commits a boundary
+    // (compaction/end | compaction/summary); refresh the state checkpoint now,
+    // because the boundary already busts the prompt cache.
+    if ((event.type === 'compaction/end' || event.type === 'compaction/summary') && keeperEnabled(ctx)) {
+      void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
+        // the ladder never blocks a turn; the next trigger retries
+      })
+    }
     if (event.type !== 'turn/end') return
     if (!keeperEnabled(ctx)) return // Capabilities toggle: keeper disabled
     const reason = (event.data as { reason: { kind: string } }).reason
     if (reason.kind === 'aborted') return // don't extract from interrupted turns
+    // Trigger 3 — staleness floor: >= N structural events or >= T hours since
+    // the last checkpoint, while token pressure is above half the window.
+    maybeScheduleStaleCheckpoint(ctx, config, session, ownedCheckpoint)
     let counter = claimCounters.get(session.id)
     if (counter === undefined) {
       counter = { count: 0, timer: null }
@@ -646,7 +1134,41 @@ export function apply(ctx: Context, config: Config): void {
     if ((globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR] === ownedService) {
       delete (globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR]
     }
+    if (checkpointService === ownedCheckpoint) checkpointService = null
+    if ((globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR] === ownedCheckpoint) {
+      delete (globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR]
+    }
   })
+}
+
+/**
+ * The staleness-floor trigger: refresh in the background (single-flight inside
+ * the service, so repeated turn/ends cannot stack passes) once the checkpoint
+ * is older than the configured structural/wall-clock floor and token pressure
+ * justifies it. Never throws into the event dispatch.
+ */
+function maybeScheduleStaleCheckpoint(
+  ctx: Context,
+  config: Config,
+  session: Session,
+  service: CheckpointService,
+): void {
+  try {
+    const cfg = resolveKeeperParams(ctx, config)
+    const last = latestCheckpoint(session)
+    const structural = structuralTotal(session)
+    const stale = last === null
+      ? structural >= (cfg.checkpointStaleEvents ?? 12)
+      : structural - last.basedOnStructuralCount >= (cfg.checkpointStaleEvents ?? 12)
+        || Date.now() - last.createdAt >= (cfg.checkpointStaleHours ?? 24) * 3_600_000
+    if (!stale) return
+    if (!pressureAboveHalf(ctx, session)) return
+    void service.ensureCheckpoint(session).catch(() => {
+      // non-blocking by contract; the next turn/end or segment cut retries
+    })
+  } catch {
+    // staleness is advisory — it must never affect the turn
+  }
 }
 
 /** One batched claims pass: single-flight, lease-bound, trust-split intake. */
@@ -777,16 +1299,17 @@ export function splitClaims(text: string): Array<{ fact: string; category: strin
 function frameInput(session: Session, maxEvents: number): string {
   const events = session.snapshotEvents()
 
-  // 1. Recover the most recent previous brief prose for rolling merge.
+  // 1. Recover the most recent previous brief prose for rolling merge: the
+  //    newest state checkpoint (the current truth) or a legacy prose update.
   let previousProse = ''
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]
-    if (e.type === 'brief/prose-updated') {
-      const data = e.data as { text?: string }
-      if (typeof data.text === 'string' && data.text.length > 0) {
-        previousProse = data.text.slice(0, 4000)
-        break
-      }
+    const candidate = e.type === 'state/checkpoint' || e.type === 'brief/prose-updated'
+      ? (e.data as { text?: string }).text
+      : undefined
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      previousProse = candidate.slice(0, 4000)
+      break
     }
   }
 
@@ -801,9 +1324,9 @@ function frameInput(session: Session, maxEvents: number): string {
       const text = messageText((event.data as { content: unknown }).content)
       if (text.length > 0) lines.push(`USER: ${text.slice(0, 2500)}`)
     } else if (event.type === 'assistant/message') {
-      const data = event.data as { text?: string }
-      if (typeof data.text === 'string' && data.text.length > 0) {
-        lines.push(`ASSISTANT: ${data.text.slice(0, 2500)}`)
+      const text = assistantMessageText(event.data)
+      if (text.length > 0) {
+        lines.push(`ASSISTANT: ${text.slice(0, 2500)}`)
       }
     } else if (event.type === 'tool/call') {
       const data = event.data as { name: string; arguments?: string }
@@ -841,6 +1364,25 @@ function frameInput(session: Session, maxEvents: number): string {
     sections.push(`--- RECENT SESSION EVENTS & TOOL RESULTS ---\n${lines.join('\n')}`)
   }
   return sections.join('\n\n')
+}
+
+/**
+ * Best-effort assistant text from an `assistant/message` payload: the current
+ * durable form carries `{ turn, step, message }`; a legacy/pre-fork fixture may
+ * carry `text` directly.
+ */
+function assistantMessageText(data: unknown): string {
+  if (!data || typeof data !== 'object') return ''
+  const record = data as { text?: unknown; message?: { content?: unknown[] } }
+  if (typeof record.text === 'string' && record.text.trim().length > 0) return record.text.trim()
+  if (!Array.isArray(record.message?.content)) return ''
+  const parts: string[] = []
+  for (const block of record.message.content) {
+    if (block !== null && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string') {
+      parts.push((block as { text: string }).text)
+    }
+  }
+  return parts.join('\n').trim()
 }
 
 /** Best-effort text extraction from a tool/result event data payload. */
