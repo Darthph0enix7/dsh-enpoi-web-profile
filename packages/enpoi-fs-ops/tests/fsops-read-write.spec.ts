@@ -190,6 +190,53 @@ describe('fs.write', () => {
     expect(await readFile(file, 'utf8')).toBe('v2')
   })
 
+  it('force:true skips a stale expectedSha and still backs up the replaced bytes', async () => {
+    const file = join(ws, 'edit.txt')
+    await writeFile(file, 'v1')
+    const read = await harness.call('fs.read', { cwd: ws, path: file })
+    await writeFile(file, 'v2')
+    const { status, body } = await harness.call('fs.write', {
+      cwd: ws,
+      path: file,
+      content: 'mine',
+      expectedSha: read.body.value.sha256,
+      force: true,
+    })
+    expect(status).toBe(200)
+    expect(await readFile(file, 'utf8')).toBe('mine')
+    expect(body.value.backup).toBe(backupPath(sha('v2')))
+    expect(await readFile(body.value.backup, 'utf8')).toBe('v2')
+  })
+
+  it('force:true recreates a vanished file with its stale expectedSha intact', async () => {
+    const file = join(ws, 'gone.txt')
+    const { status, body } = await harness.call('fs.write', {
+      cwd: ws,
+      path: file,
+      content: 'back',
+      expectedSha: sha('previous'),
+      force: true,
+    })
+    expect(status).toBe(200)
+    expect(await readFile(file, 'utf8')).toBe('back')
+    expect(body.value.backup).toBeNull()
+  })
+
+  it('create-only still refuses when force is set', async () => {
+    const file = join(ws, 'exists.txt')
+    await writeFile(file, 'keep')
+    const { status, body } = await harness.call('fs.write', {
+      cwd: ws,
+      path: file,
+      content: 'clobber',
+      expectedSha: null,
+      force: true,
+    })
+    expect(status).toBe(409)
+    expect(body.error.code).toBe('exists')
+    expect(await readFile(file, 'utf8')).toBe('keep')
+  })
+
   it('treats expectedSha:null as create-only (409 exists)', async () => {
     const file = join(ws, 'exists.txt')
     await writeFile(file, 'keep')

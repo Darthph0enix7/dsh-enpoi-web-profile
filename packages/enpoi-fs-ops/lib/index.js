@@ -323,6 +323,7 @@ function apply(ctx, _config) {
       }
       const expectedSha = typeof rawExpected === "string" ? rawExpected : null;
       const createOnly = rawExpected === null;
+      const force = record?.force === true;
       const root = resolve(cwd);
       const rel = relative(root, path);
       if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
@@ -350,11 +351,11 @@ function apply(ctx, _config) {
         if (createOnly) {
           throw new FsOpsError("exists", `"${path}" already exists`, 409);
         }
-        if (expectedSha !== null && sha256Of(existing) !== expectedSha) {
+        if (!force && expectedSha !== null && sha256Of(existing) !== expectedSha) {
           throw new FsOpsError("conflict", "file changed on disk since it was read", 409);
         }
         backup = await backupBytes(existing);
-      } else if (expectedSha !== null) {
+      } else if (expectedSha !== null && !force) {
         throw new FsOpsError("conflict", "file changed on disk since it was read", 409);
       }
       await writeFileAtomic(path, bytes, mode);

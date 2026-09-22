@@ -11,9 +11,10 @@
  * - fs.read    — text content + full-file sha256 + mtimeMs/size; refuses
  *                binary (NUL / invalid UTF-8), caps the returned content at
  *                4 MiB and flags `truncated` (never saveable, sha stays full)
- * - fs.write   — atomic optimistic save (expectedSha conflict / create-only),
- *                content-addressed pre-overwrite backup in
- *                ~/.dsh/file-history/editor/<sha256>, .dsh-tmp staging + fsync
+ * - fs.write   — atomic optimistic save (expectedSha conflict / explicit force
+ *                overwrite / create-only), content-addressed pre-overwrite
+ *                backup in ~/.dsh/file-history/editor/<sha256>, .dsh-tmp
+ *                staging + fsync
  *
  * Path safety mirrors dsh-better-sidebar's fs-tree: absolute paths only,
  * name validation (no '/', '..', empty), and the cwd root is never
@@ -433,6 +434,10 @@ export function apply(ctx: Context, _config: FsOpsConfig): void {
       const expectedSha = typeof rawExpected === 'string' ? rawExpected : null
       // `expectedSha: null` is an explicit create-only request; absent means force.
       const createOnly = rawExpected === null
+      // `force: true` is the conflict resolution's explicit Overwrite: the write
+      // skips the digest check, and the backup below (never skipped) preserves
+      // the on-disk version the overwrite replaces.
+      const force = record?.force === true
 
       // Containment: same rule as fs.delete — never the workspace root, never
       // anything outside it (`relative` resolves dot-segments for us).
@@ -466,12 +471,13 @@ export function apply(ctx: Context, _config: FsOpsConfig): void {
         if (createOnly) {
           throw new FsOpsError('exists', `"${path}" already exists`, 409)
         }
-        if (expectedSha !== null && sha256Of(existing) !== expectedSha) {
+        if (!force && expectedSha !== null && sha256Of(existing) !== expectedSha) {
           throw new FsOpsError('conflict', 'file changed on disk since it was read', 409)
         }
-        // Zero data loss: every overwrite/truncate keeps the old bytes.
+        // Zero data loss: every overwrite/truncate keeps the old bytes — the
+        // forced Overwrite included, so the replaced version stays recoverable.
         backup = await backupBytes(existing)
-      } else if (expectedSha !== null) {
+      } else if (expectedSha !== null && !force) {
         // The read source vanished — never silently recreate under an expectedSha.
         throw new FsOpsError('conflict', 'file changed on disk since it was read', 409)
       }
