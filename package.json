@@ -5,28 +5,33 @@
     "@linxin666/dsh-client-ui-skin-center": "^0.3.21",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "dsh-context": "0.54.4",
+    "dsh-context-lens": "0.3.1",
     "dsh-enpoi-agent-switch": "workspace:*",
     "dsh-enpoi-capabilities": "workspace:*",
     "dsh-enpoi-cascade": "workspace:*",
     "dsh-enpoi-context-keeper": "workspace:*",
     "dsh-enpoi-contracts": "workspace:*",
     "dsh-enpoi-council": "workspace:*",
+    "dsh-enpoi-diagnostics": "workspace:*",
     "dsh-enpoi-file-revert": "workspace:*",
     "dsh-enpoi-fs-ops": "workspace:*",
     "dsh-enpoi-git": "workspace:*",
     "dsh-enpoi-living-brief": "workspace:*",
     "dsh-enpoi-memory": "workspace:*",
     "dsh-enpoi-model-chains": "workspace:*",
-        "dsh-enpoi-role-registry": "workspace:*",
     "dsh-enpoi-oracle": "workspace:*",
     "dsh-enpoi-provider-sync": "workspace:*",
+    "dsh-enpoi-role-registry": "workspace:*",
     "dsh-enpoi-runtime-probe": "workspace:*",
-    "dsh-enpoi-ui-state": "workspace:*"
+    "dsh-enpoi-ui-state": "workspace:*",
+    "dsh-enpoi-whiteboard": "workspace:*",
+    "dsh-fast": "0.2.14"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
-    "vitest": "^4.1.8",
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "vitest": "^4.1.8"
   },
   "dsh": {
     "profile": {
@@ -34,6 +39,7 @@
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app",
         "@linxin666/dsh-client-ui-skin-center",
+        "dsh-enpoi-diagnostics",
         "dsh-enpoi-provider-sync",
         "dsh-enpoi-living-brief",
         "dsh-enpoi-context-keeper",
@@ -48,7 +54,11 @@
         "dsh-enpoi-ui-state",
         "dsh-enpoi-agent-switch",
         "dsh-enpoi-model-chains",
-        "dsh-enpoi-role-registry"
+        "dsh-enpoi-role-registry",
+        "dsh-enpoi-whiteboard",
+        "dsh-fast",
+        "dsh-context-lens",
+        "dsh-context"
       ]
     }
   },

@@ -148,3 +148,12 @@ a {
 :root {
   --dsw-specific-sidebar-nav-item-active-accent: #7FE3EC;
 }
+
+/* enpoi: mobile fullscreen surfaces need an opaque ground. The glass token
+   --dsw-alias-bg-base is translucent by design, so a pushed file/tree panel on
+   a phone let the chat text bleed through (mobile-1-08/09). Near-opaque ground
+   per the phone blur policy — real blur stays reserved for small overlays. */
+:root { --dsh-mobile-surface-bg: #121927; }
+[data-mobile-frame] [data-sidebar-right-panel='fullscreen'] {
+  background-color: var(--dsh-mobile-surface-bg);
+}
