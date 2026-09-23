@@ -46,6 +46,10 @@
   --dsw-static-green-100: #eef7d8;
   --dsw-static-green-400: #d6ee9a;
   --dsw-static-green-500: #CBE77D;
+  /* Green ground used behind white glyphs (plugin-visible surfaces such as
+     dsh-context-lens status marks); mid-jade so both the white glyph on top
+     and the same token used as label text on dark glass stay legible. */
+  --dsw-static-green-700: #2F9E63;
   --dsw-static-green-900: #5a6f2e;
   --dsw-static-neutral-00: #071321;
   --dsw-static-neutral-1000: #F8F3F5;
@@ -101,6 +105,7 @@
   --dsw-alias-bg-module-platform: var(--dsw-glass-normal);
   --dsw-alias-bg-multi-select: rgba(24, 31, 46, 0.46);
   --dsw-alias-bg-overlay: rgba(20, 26, 42, 0.9);
+  --dsw-alias-bg-raised: rgba(24, 31, 46, 0.82);
   --dsw-alias-bg-skeleton: rgba(255, 255, 255, 0.06);
   --dsw-alias-border-inverted2: rgba(255, 255, 255, 0.6);
   --dsw-alias-border-inverted: rgba(255, 255, 255, 0.4);
@@ -132,6 +137,7 @@
   --dsw-alias-interactive-bg-hover-accent: rgba(103, 220, 231, 0.1);
   --dsw-alias-interactive-bg-hover-danger: rgba(241, 113, 127, 0.12);
   --dsw-alias-interactive-bg-hover-solid: #1f3a56;
+  --dsw-alias-interactive-bg-hover-success: rgba(47, 158, 99, 0.16);
   --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.07);
   --dsw-alias-label-caption: #8997A7;
   --dsw-alias-label-dimmed: #52709a;
@@ -208,6 +214,10 @@
   --aion-overlay-shadow: 0 12px 32px rgba(0, 7, 18, 0.4);
 
   /* ── Shared finish tokens ────────────────────────────────────────────────── */
+  /* Plugins reference a mono stack under this name (the theme's own stack
+     token is --ds-font-family-code); with it unset their var() fallback sheds
+     the CJK-safe tail. */
+  --dsw-font-family-mono: var(--ds-font-family-code, monospace);
   --dsw-mask-blur: blur(30px) saturate(140%);
   --dsw-shadow-lv1: 0 2px 8px rgba(0, 7, 18, 0.18);
   --dsw-shadow-lv2: 0 4px 14px rgba(0, 7, 18, 0.22);

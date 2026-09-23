@@ -61,13 +61,40 @@ a:visited {
 
 /* The chat header's sub-agent hover list: portalled to body as a bare
    role="tree" (outside the role set above), so it stayed blur-less and the
-   chat text under it read through. Same glass, token-driven strength. */
+   chat text under it read through. Same glass, token-driven strength. The
+   menu token resolves to the float tier (68% alpha), so give the list the
+   overlay ground the other glass floats carry. */
 body > [role="tree"] {
+  background-color: var(--dsw-alias-bg-overlay);
   backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
     inset 0 0 0 1px rgba(255, 255, 255, 0.04),
     0 10px 30px rgba(0, 7, 18, 0.25);
+}
+
+/* dsh-context's Context Insights overlay card. It carries no role, so the
+   dialog glass above never matches it, and its own
+   `background: var(--dsw-alias-bg-layer-1)` resolves to the skin's
+   translucent layer tier with no blur — the transcript read straight through.
+   Same glass as the dialog set. */
+.lc-ov-card.lc-ov-card {
+  background-color: var(--dsw-alias-bg-overlay);
+  backdrop-filter: blur(30px) saturate(145%);
+}
+
+/* dsh-context's ContextIcon hard-codes six fills as presentation attributes
+   on its paths, so the emblem stayed multi-coloured in every host (chat
+   footer entry, right rail, pane title, menu). Presentation attributes lose
+   to any CSS rule, so repaint them with the inherited color and the icon
+   follows whatever label tone its host already sets. */
+path[fill="#4A5699"],
+path[fill="#C45FA0"],
+path[fill="#6277BA"],
+path[fill="#E5594F"],
+path[fill="#F0D043"],
+path[fill="#F39A2B"] {
+  fill: currentColor;
 }
 
 /* Upstream Plugins page (add / activate / remove): the panel scrolls straight
