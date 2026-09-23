@@ -408,6 +408,66 @@ export interface BriefResult {
   reason: 'cache-hit' | 'distilled' | 'failed' | 'negative-cached'
 }
 
+/**
+ * Default per-session entry cap for the keeper's caches. Disposal
+ * (`session/disposed`) is the primary eviction path; the cap is the
+ * belt-and-braces bound so a missed lifecycle edge can never grow a cache
+ * without limit.
+ */
+export const KEEPER_CACHE_CAP = 128
+
+/**
+ * Per-session LRU map: reads refresh recency and writes evict the oldest entry
+ * once the cap is exceeded (O(1) per operation). Evicting is always
+ * behavior-neutral — every cache here is a projection of the session log, so a
+ * miss is merely recomputed.
+ */
+export class BoundedSessionCache<V> extends Map<string, V> {
+  readonly cap: number
+
+  /**
+   * @param cap - maximum live entries (LRU).
+   * @param onEvict - optional cleanup for a value the LRU evicts (e.g. a
+   *   pending timer). Never called by explicit `delete`/`clear` — callers that
+   *   drop an entry deliberately own its teardown.
+   */
+  constructor(
+    cap: number = KEEPER_CACHE_CAP,
+    private readonly onEvict?: (key: string, value: V) => void,
+  ) {
+    super()
+    this.cap = Number.isFinite(cap) ? Math.max(1, Math.floor(cap)) : KEEPER_CACHE_CAP
+  }
+
+  get(key: string): V | undefined {
+    const value = super.get(key)
+    if (value !== undefined) {
+      // Re-insert at the newest position — an O(1) recency refresh.
+      super.delete(key)
+      super.set(key, value)
+    }
+    return value
+  }
+
+  set(key: string, value: V): this {
+    super.delete(key)
+    super.set(key, value)
+    if (super.size > this.cap) {
+      const oldest = super.keys().next().value
+      if (oldest !== undefined) {
+        const evicted = super.get(oldest) as V
+        super.delete(oldest)
+        try {
+          this.onEvict?.(oldest, evicted)
+        } catch {
+          // an eviction hook must never break the write path
+        }
+      }
+    }
+    return this
+  }
+}
+
 /** Per-session brief cache entry. */
 interface BriefCacheEntry {
   basedOnSeq: number
@@ -446,12 +506,26 @@ function emptyEntry(): BriefCacheEntry {
  * separately, so a Cordis service registry cannot be shared reliably.
  */
 export class BriefService {
-  private readonly cache = new Map<string, BriefCacheEntry>()
+  private readonly cache = new BoundedSessionCache<BriefCacheEntry>()
 
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
   ) {}
+
+  /** Live cache entries (diagnostics/tests; the map is LRU-bounded). */
+  get cacheSize(): number {
+    return this.cache.size
+  }
+
+  /**
+   * Drop the session's cached brief — the `session/disposed` eviction path.
+   * A later call recomputes from the log, so eviction is behavior-neutral.
+   * @param sessionId - the disposed session's id.
+   */
+  forget(sessionId: string): void {
+    this.cache.delete(sessionId)
+  }
 
   /**
    * Materialize (or reuse) the session's prose brief.
@@ -932,12 +1006,27 @@ interface CheckpointEntry {
  * cold reopen rehydrates the cache from the newest event.
  */
 export class CheckpointService {
-  private readonly cache = new Map<string, CheckpointEntry>()
+  private readonly cache = new BoundedSessionCache<CheckpointEntry>()
 
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
   ) {}
+
+  /** Live cache entries (diagnostics/tests; the map is LRU-bounded). */
+  get cacheSize(): number {
+    return this.cache.size
+  }
+
+  /**
+   * Drop the session's cached checkpoint — the `session/disposed` eviction
+   * path. The log is the durable source of truth, so a later call rehydrates
+   * from the newest `state/checkpoint` (behavior-neutral).
+   * @param sessionId - the disposed session's id.
+   */
+  forget(sessionId: string): void {
+    this.cache.delete(sessionId)
+  }
 
   /**
    * Ensure the session's state checkpoint is fresh.
@@ -1105,6 +1194,25 @@ export function createCheckpointService(ctx: Context, config: Config): Checkpoin
   return new CheckpointService(ctx, config)
 }
 
+/**
+ * Read-only size view of the per-session bookkeeping owned by the most recent
+ * apply() mount. Exists for diagnostics/tests — the runtime eviction path is
+ * the `session/disposed` listener registered inside apply().
+ */
+export interface KeeperBookkeeping {
+  claimCounters(): number
+  prefetchTimers(): number
+  prefetchRunning(): number
+  claimsRunning(): number
+}
+
+let bookkeeping: KeeperBookkeeping | null = null
+
+/** Bookkeeping sizes of the most recent apply() mount (null before one). */
+export function getKeeperBookkeeping(): KeeperBookkeeping | null {
+  return bookkeeping
+}
+
 export function apply(ctx: Context, config: Config): void {
   const ownedService = createBriefService(ctx, config)
   briefService = ownedService
@@ -1151,8 +1259,46 @@ export function apply(ctx: Context, config: Config): void {
 
   // ── Claims batched listener (P1, survives P3) ─────────────────────────────
   // A plain counter + timer — NO debounce, NO rerun latch, NO wedge machinery.
-  const claimCounters = new Map<string, { count: number; timer: NodeJS.Timeout | null }>()
+  // LRU-bounded like the service caches; an evicted counter cancels its timer.
+  const claimCounters = new BoundedSessionCache<{ count: number; timer: NodeJS.Timeout | null }>(
+    KEEPER_CACHE_CAP,
+    (_id, counter) => {
+      if (counter.timer !== null) clearTimeout(counter.timer)
+    },
+  )
   const claimsRunning = new Set<string>()
+
+  // Diagnostics/tests: read-only size view of the apply-local maps.
+  const ownedBookkeeping: KeeperBookkeeping = {
+    claimCounters: () => claimCounters.size,
+    prefetchTimers: () => prefetchTimers.size,
+    prefetchRunning: () => prefetchRunning.size,
+    claimsRunning: () => claimsRunning.size,
+  }
+  bookkeeping = ownedBookkeeping
+
+  // ── Session disposal: canonical per-session eviction ─────────────────────
+  // `session/disposed` is the harness's paired teardown edge (emitted when a
+  // session leaves the store, including the permanent-delete RPC path). Drop
+  // every per-session cache here so a long-lived keeper never retains one
+  // entry per session ever seen. O(1), log-free; a later call simply
+  // recomputes (behavior-neutral for any live session).
+  ctx.on('session/disposed', (session: Session) => {
+    ownedService.forget(session.id)
+    ownedCheckpoint.forget(session.id)
+    const counter = claimCounters.get(session.id)
+    if (counter !== undefined) {
+      if (counter.timer !== null) clearTimeout(counter.timer)
+      claimCounters.delete(session.id)
+    }
+    const prefetchTimer = prefetchTimers.get(session.id)
+    if (prefetchTimer !== undefined) {
+      clearTimeout(prefetchTimer)
+      prefetchTimers.delete(session.id)
+    }
+    prefetchRunning.delete(session.id)
+    claimsRunning.delete(session.id)
+  })
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     // Structural events age the brief; keep the total incrementally (a session
@@ -1228,6 +1374,7 @@ export function apply(ctx: Context, config: Config): void {
     if ((globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR] === ownedCheckpoint) {
       delete (globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR]
     }
+    if (bookkeeping === ownedBookkeeping) bookkeeping = null
   })
 }
 

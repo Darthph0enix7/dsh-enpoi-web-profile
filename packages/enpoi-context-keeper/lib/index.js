@@ -273,6 +273,45 @@ function keeperAttempts(route) {
     }
   ];
 }
+var KEEPER_CACHE_CAP = 128;
+var BoundedSessionCache = class extends Map {
+  /**
+   * @param cap - maximum live entries (LRU).
+   * @param onEvict - optional cleanup for a value the LRU evicts (e.g. a
+   *   pending timer). Never called by explicit `delete`/`clear` — callers that
+   *   drop an entry deliberately own its teardown.
+   */
+  constructor(cap = KEEPER_CACHE_CAP, onEvict) {
+    super();
+    this.onEvict = onEvict;
+    this.cap = Number.isFinite(cap) ? Math.max(1, Math.floor(cap)) : KEEPER_CACHE_CAP;
+  }
+  cap;
+  get(key) {
+    const value = super.get(key);
+    if (value !== void 0) {
+      super.delete(key);
+      super.set(key, value);
+    }
+    return value;
+  }
+  set(key, value) {
+    super.delete(key);
+    super.set(key, value);
+    if (super.size > this.cap) {
+      const oldest = super.keys().next().value;
+      if (oldest !== void 0) {
+        const evicted = super.get(oldest);
+        super.delete(oldest);
+        try {
+          this.onEvict?.(oldest, evicted);
+        } catch {
+        }
+      }
+    }
+    return this;
+  }
+};
 function emptyEntry() {
   return {
     basedOnSeq: 0,
@@ -291,7 +330,19 @@ var BriefService = class {
     this.ctx = ctx;
     this.config = config;
   }
-  cache = /* @__PURE__ */ new Map();
+  cache = new BoundedSessionCache();
+  /** Live cache entries (diagnostics/tests; the map is LRU-bounded). */
+  get cacheSize() {
+    return this.cache.size;
+  }
+  /**
+   * Drop the session's cached brief — the `session/disposed` eviction path.
+   * A later call recomputes from the log, so eviction is behavior-neutral.
+   * @param sessionId - the disposed session's id.
+   */
+  forget(sessionId) {
+    this.cache.delete(sessionId);
+  }
   /**
    * Materialize (or reuse) the session's prose brief.
    *
@@ -602,7 +653,20 @@ var CheckpointService = class {
     this.ctx = ctx;
     this.config = config;
   }
-  cache = /* @__PURE__ */ new Map();
+  cache = new BoundedSessionCache();
+  /** Live cache entries (diagnostics/tests; the map is LRU-bounded). */
+  get cacheSize() {
+    return this.cache.size;
+  }
+  /**
+   * Drop the session's cached checkpoint — the `session/disposed` eviction
+   * path. The log is the durable source of truth, so a later call rehydrates
+   * from the newest `state/checkpoint` (behavior-neutral).
+   * @param sessionId - the disposed session's id.
+   */
+  forget(sessionId) {
+    this.cache.delete(sessionId);
+  }
   /**
    * Ensure the session's state checkpoint is fresh.
    *
@@ -756,6 +820,10 @@ function getCheckpointService() {
 function createCheckpointService(ctx, config) {
   return new CheckpointService(ctx, config);
 }
+var bookkeeping = null;
+function getKeeperBookkeeping() {
+  return bookkeeping;
+}
 function apply(ctx, config) {
   const ownedService = createBriefService(ctx, config);
   briefService = ownedService;
@@ -790,8 +858,36 @@ function apply(ctx, config) {
     } catch {
     }
   };
-  const claimCounters = /* @__PURE__ */ new Map();
+  const claimCounters = new BoundedSessionCache(
+    KEEPER_CACHE_CAP,
+    (_id, counter) => {
+      if (counter.timer !== null) clearTimeout(counter.timer);
+    }
+  );
   const claimsRunning = /* @__PURE__ */ new Set();
+  const ownedBookkeeping = {
+    claimCounters: () => claimCounters.size,
+    prefetchTimers: () => prefetchTimers.size,
+    prefetchRunning: () => prefetchRunning.size,
+    claimsRunning: () => claimsRunning.size
+  };
+  bookkeeping = ownedBookkeeping;
+  ctx.on("session/disposed", (session) => {
+    ownedService.forget(session.id);
+    ownedCheckpoint.forget(session.id);
+    const counter = claimCounters.get(session.id);
+    if (counter !== void 0) {
+      if (counter.timer !== null) clearTimeout(counter.timer);
+      claimCounters.delete(session.id);
+    }
+    const prefetchTimer = prefetchTimers.get(session.id);
+    if (prefetchTimer !== void 0) {
+      clearTimeout(prefetchTimer);
+      prefetchTimers.delete(session.id);
+    }
+    prefetchRunning.delete(session.id);
+    claimsRunning.delete(session.id);
+  });
   ctx.on("session/event", (session, event) => {
     if (STRUCTURAL_TYPES.has(event.type)) {
       const known = structuralCounters.get(session);
@@ -849,6 +945,7 @@ function apply(ctx, config) {
     if (globalThis[CHECKPOINT_SERVICE_ANCHOR] === ownedCheckpoint) {
       delete globalThis[CHECKPOINT_SERVICE_ANCHOR];
     }
+    if (bookkeeping === ownedBookkeeping) bookkeeping = null;
   });
 }
 function maybeScheduleStaleCheckpoint(ctx, config, session, service) {
@@ -1226,10 +1323,12 @@ function finishError(finish) {
   }
 }
 export {
+  BoundedSessionCache,
   BriefService,
   CHECKPOINT_SOURCE,
   CheckpointService,
   Config,
+  KEEPER_CACHE_CAP,
   PREFETCH_DEBOUNCE_MS,
   apply,
   buildTemplateCheckpoint,
@@ -1239,6 +1338,7 @@ export {
   createCheckpointService,
   getBriefService,
   getCheckpointService,
+  getKeeperBookkeeping,
   inject,
   keeperAttempts,
   keeperProseRejection,
