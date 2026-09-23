@@ -70,6 +70,10 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   edit: 'allow', write: 'allow',
   bash: 'ask',
   str_replace_editor: 'ask',
+  // Delivery only declares deliverables; no filesystem or network effect. An
+  // unattended run must not park on the unknown-tools ask for it. Availability
+  // (per-role tools.available / restrict) still gates which agents hold it.
+  present: 'allow',
 }
 
 export const SHIPPED_BASH_PATTERNS: BashPattern[] = [

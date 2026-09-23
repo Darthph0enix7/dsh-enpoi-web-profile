@@ -232,4 +232,28 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'git status', config: EMPTY }).kind).toBe('allow')
     expect(resolvePolicy({ toolName: 'bash', command: 'shutdown now', config: EMPTY }).kind).toBe('ask')
   })
+
+  it('present is allowed by the shipped row for any role that carries it, even unattended', () => {
+    // Delivery-only tool: no ask means the unattended pre-execute hook returns
+    // next() instead of parking on the absent client.
+    expect(SHIPPED_TOOL_DEFAULTS.present).toBe('allow')
+    for (const agent of ['orchestrator', 'fixer']) {
+      const decision = resolvePolicy({
+        toolName: 'present',
+        agent,
+        config: { defaults: { unknownTools: 'ask' } },
+      })
+      expect(decision).toEqual({ kind: 'allow', source: 'matrix:global' })
+    }
+    // The row resolves for an agent id the policy table does not name, too.
+    expect(resolvePolicy({
+      toolName: 'present',
+      config: { defaults: { unknownTools: 'ask' } },
+    })).toEqual({ kind: 'allow', source: 'matrix:global' })
+    // The explicit row is the only change: unknownTools still asks, and an
+    // operator row still outranks the shipped default.
+    expect(resolvePolicy({ toolName: 'brand_new_tool', config: { defaults: { unknownTools: 'ask' } } }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'present', config: { tools: { present: 'ask' } } }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'present', agent: 'fixer', config: { agents: { fixer: { tools: { present: 'deny' } } } } }).kind).toBe('deny')
+  })
 })
