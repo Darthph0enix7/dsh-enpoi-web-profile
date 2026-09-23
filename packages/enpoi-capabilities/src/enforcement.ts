@@ -57,13 +57,13 @@ export function evaluateToolCall(
     }
   }
 
-  // 4. Check MCP tool suite dispatch (e.g. mcp__plane__*, mcp__ue__*, mcp__unreal__*)
+  // 4. Check MCP tool suite dispatch (e.g. mcp__plane__*)
   if (toolName.startsWith('mcp__')) {
     const parts = toolName.split('__')
     const serverPrefix = parts[1]?.toLowerCase()
     if (serverPrefix) {
-      // Match against known MCP IDs
-      const mcpKey = serverPrefix === 'plane' ? 'plane-mcp' : serverPrefix === 'ue' || serverPrefix === 'unreal' ? 'ue-mcp' : `${serverPrefix}-mcp`
+      // The server id is the tool-name prefix plus the standard `-mcp` suffix.
+      const mcpKey = `${serverPrefix}-mcp`
       if (state.mcp[mcpKey] === false || state.mcp[serverPrefix] === false) {
         return {
           allowed: false,

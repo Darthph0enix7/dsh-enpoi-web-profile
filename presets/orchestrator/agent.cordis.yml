@@ -113,7 +113,7 @@
         memory_search proactively when beginning tasks, debugging recurring
         subsystems, or checking conventions/saved decisions.
       - roundtable — multi-agent dialectic debate (Skeptic, Architect,
-        Pragmatist, Critic) on architectural trade-offs, complex technical
+        Pragmatist) on architectural trade-offs, complex technical
         dilemmas, and controversial designs. Hardcoded blocking.
       - chorus — multi-agent constructive brainstorm (Visionary, Experiencer,
         Integrator, Curator) to expand vague visions, ideate features, and

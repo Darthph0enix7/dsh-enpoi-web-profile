@@ -64,7 +64,15 @@ export const OrchestrationSettingsSchema = Schema.object({
   // unknown-key survival.
   chains: Schema.dict(Schema.any()).default({}),
   parameters: Schema.any(),
-  uiPreferences: Schema.any(),
+  // UI preferences (favorites, hidden models, model assignments, …) shared by
+  // every client through `settings/document-updated`. `hiddenSurfaces` is
+  // declared here so the namespace contract admits the duplicate-surface
+  // preference — rail page kinds and conversation view ids the client must not
+  // render (`{ sidebarRight: string[], views: string[] }`) — rather than
+  // relying on unknown-key survival; sibling keys stay opaque.
+  uiPreferences: Schema.object({
+    hiddenSurfaces: Schema.any(),
+  }),
   permissions: Schema.any(),
   // Pinned whiteboard (doc 66 §3c / doc 67 §B): orchestrator-authored
   // core-context board, owned by enpoi-whiteboard and rendered into every

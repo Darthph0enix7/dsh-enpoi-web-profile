@@ -46,9 +46,10 @@ export interface CapabilityDescriptor {
 }
 
 export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
-  // MCP Servers (Default OFF per user directive)
+  // MCP Servers (Default OFF per user directive). Plane is the only shipped
+  // MCP descriptor; the rest of the catalog is settings-owned and must not be
+  // mirrored here as phantom rows.
   { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
-  { id: 'ue-mcp', name: 'Unreal Engine MCP', kind: 'mcp', category: 'mcp', description: 'Unreal Engine editor automation and actor controls', defaultEnabled: false },
 
   // Skills (Default ON)
   { id: 'project-management', name: 'Project Management', kind: 'skill', category: 'skills', description: 'Plane documentation and progress journaling', defaultEnabled: true },

@@ -12,9 +12,10 @@ var PROTECTED_CAPABILITIES = /* @__PURE__ */ new Set([
   "grep"
 ]);
 var KNOWN_CAPABILITIES = [
-  // MCP Servers (Default OFF per user directive)
+  // MCP Servers (Default OFF per user directive). Plane is the only shipped
+  // MCP descriptor; the rest of the catalog is settings-owned and must not be
+  // mirrored here as phantom rows.
   { id: "plane-mcp", name: "Plane MCP", kind: "mcp", category: "mcp", description: "Project management and backlog tooling", defaultEnabled: false },
-  { id: "ue-mcp", name: "Unreal Engine MCP", kind: "mcp", category: "mcp", description: "Unreal Engine editor automation and actor controls", defaultEnabled: false },
   // Skills (Default ON)
   { id: "project-management", name: "Project Management", kind: "skill", category: "skills", description: "Plane documentation and progress journaling", defaultEnabled: true },
   { id: "ue-mcp", name: "UE5 Automation Skill", kind: "skill", category: "skills", description: "Unreal Engine 5 MCP workflows", defaultEnabled: true },
@@ -139,7 +140,7 @@ function evaluateToolCall(toolName, args, state) {
     const parts = toolName.split("__");
     const serverPrefix = parts[1]?.toLowerCase();
     if (serverPrefix) {
-      const mcpKey = serverPrefix === "plane" ? "plane-mcp" : serverPrefix === "ue" || serverPrefix === "unreal" ? "ue-mcp" : `${serverPrefix}-mcp`;
+      const mcpKey = `${serverPrefix}-mcp`;
       if (state.mcp[mcpKey] === false || state.mcp[serverPrefix] === false) {
         return {
           allowed: false,
@@ -471,7 +472,15 @@ var OrchestrationSettingsSchema = Schema.object({
   // unknown-key survival.
   chains: Schema.dict(Schema.any()).default({}),
   parameters: Schema.any(),
-  uiPreferences: Schema.any(),
+  // UI preferences (favorites, hidden models, model assignments, …) shared by
+  // every client through `settings/document-updated`. `hiddenSurfaces` is
+  // declared here so the namespace contract admits the duplicate-surface
+  // preference — rail page kinds and conversation view ids the client must not
+  // render (`{ sidebarRight: string[], views: string[] }`) — rather than
+  // relying on unknown-key survival; sibling keys stay opaque.
+  uiPreferences: Schema.object({
+    hiddenSurfaces: Schema.any()
+  }),
   permissions: Schema.any(),
   // Pinned whiteboard (doc 66 §3c / doc 67 §B): orchestrator-authored
   // core-context board, owned by enpoi-whiteboard and rendered into every

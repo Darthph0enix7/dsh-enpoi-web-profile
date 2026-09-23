@@ -12,7 +12,9 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
 
     // MCP servers must be default OFF per user directive
     expect(state.mcp['plane-mcp']).toBe(false)
-    expect(state.mcp['ue-mcp']).toBe(false)
+    // Settings-owned servers are not hardcoded descriptors: they merge in from
+    // global defaults, not from this catalog.
+    expect(state.mcp['custom-mcp']).toBeUndefined()
 
     // Skills must be default ON
     expect(state.skills['project-management']).toBe(true)
@@ -91,7 +93,7 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
 
   it('Invariant B1: denies disabled MCP tool suites via mcp__ prefix matching', () => {
     const state = initialCapabilitiesState({
-      mcp: { 'plane-mcp': false, 'ue-mcp': true },
+      mcp: { 'plane-mcp': false, 'custom-mcp': true },
     })
 
     const planeDecision = evaluateToolCall('mcp__plane__list_projects', {}, state)
@@ -99,8 +101,12 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
     expect(planeDecision.syntheticResult).toContain('[CAPABILITY_DISABLED]')
     expect(planeDecision.syntheticResult).toContain("MCP Tool suite 'plane-mcp'")
 
-    const ueDecision = evaluateToolCall('mcp__ue__execute_script', {}, state)
-    expect(ueDecision.allowed).toBe(true)
+    const customDecision = evaluateToolCall('mcp__custom__do_thing', {}, state)
+    expect(customDecision.allowed).toBe(true)
+
+    // The server id is derived from the tool-name prefix for any server.
+    const off = initialCapabilitiesState({ mcp: { 'other-mcp': false } })
+    expect(evaluateToolCall('mcp__other__do_thing', {}, off).allowed).toBe(false)
   })
 
   it('strips disabled skills from catalog text and entries, and drops no-op updates', async () => {
