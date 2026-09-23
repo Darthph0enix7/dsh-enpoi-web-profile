@@ -18,6 +18,13 @@
  *   in-flight pass only when its window is still fresh.
  * - Failures are negative-cached for `negativeCacheMs` (default 120s) so a
  *   provider outage cannot fire repeated fallback chains.
+ * - A `turn/end` that leaves the projection structurally stale schedules one
+ *   debounced BACKGROUND prefetch (single-flight, same floors), so the next
+ *   consumer (oracle/council wait <= 4s) hits the cache instead of paying for
+ *   the distillation. The on-demand path stays the fallback.
+ * - Raw tool-call/function-call echoes, JSON tool envelopes, and mostly-markup
+ *   payloads are rejected as prose (they fail the attempt, so the model chain
+ *   advances; rejected text is never published).
  *
  * Memory claims (CBDC Stream B) are DECOUPLED from prose: a batched listener
  * runs one extraction pass per `claimsBatchSize` (default 8) non-aborted
@@ -521,6 +528,32 @@ export class BriefService {
     }
   }
 
+  /**
+   * Whether a background prefetch is warranted right now. Consumers wait only
+   * 4 s for prose (oracle/council), while a live distillation can take ~7 s —
+   * so after a turn/end that leaves the projection structurally stale the
+   * keeper warms the cache itself instead of making the next consumer miss.
+   *
+   * Honours the same floors as `ensureFreshBrief`: the anti-thrash floor
+   * (minRefreshMs), the failure negative cache, and single-flight. Pure read —
+   * never triggers work by itself.
+   * @param session - the session whose projection may be stale.
+   * @returns whether the caller should schedule a prefetch.
+   */
+  prefetchDue(session: Session): boolean {
+    if (!keeperEnabled(this.ctx)) return false
+    const cfg = resolveKeeperParams(this.ctx, this.config)
+    const now = Date.now()
+    const entry = this.cache.get(session.id)
+    if (entry !== undefined) {
+      if (entry.negativeUntil > now) return false // failure negative cache
+      if (entry.inFlight !== null) return false // a pass is already running
+      if (entry.prose.length > 0 && now - entry.updatedAt < (cfg.minRefreshMs ?? 60_000)) return false // anti-thrash floor
+    }
+    const distance = structuralTotal(session) - (entry?.basedOnStructuralCount ?? 0)
+    return distance > (cfg.structuralDistanceK ?? 24)
+  }
+
   /** One distillation pass: lease-bound LLM call, then append + cache. */
   private async distill(session: Session, signal: AbortSignal | undefined, snapshotSeq: number, cfg: Config): Promise<BriefResult> {
     const lease = new AbortController()
@@ -586,6 +619,13 @@ export class BriefService {
 const BRIEF_SERVICE_ANCHOR = Symbol.for('enpoi.context-keeper.brief-service')
 let briefService: BriefService | null = null
 
+/**
+ * Background-prefetch debounce: a burst of turn/ends coalesces into one
+ * prefetch; a pending run is never reset (it always fires, and the service's
+ * single-flight/staleness checks make it a no-op when one already landed).
+ */
+export const PREFETCH_DEBOUNCE_MS = 2_000
+
 /** Get the mounted brief service (null before apply or if the plugin is absent). */
 export function getBriefService(): BriefService | null {
   const anchored = (globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR]
@@ -599,15 +639,20 @@ export function createBriefService(ctx: Context, config: Config): BriefService {
 
 // ── State checkpoint (doc 67 §A): surface layer [4] ─────────────────────────
 //
-// The keeper's five-section brief is no longer only a demand-driven cache: it
-// is written as an append-only `state/checkpoint` event whose newest member is
-// injected into every assembly through the runtime-context seam (order 130,
-// after the frozen segments and before the whiteboard [5]/tail [6]). Refresh
+// The keeper's five-section brief is written as an append-only
+// `state/checkpoint` event whose newest member is INTENDED to be injected into
+// every assembly through the runtime-context seam (order 130, after the frozen
+// segments and before the whiteboard [5]/tail [6]). It has no reader yet —
+// nothing consumes `state/checkpoint` today; the Watchtower "State" card is
+// still pending in another lane, so the event is currently log-only. Refresh
 // triggers: (1) a segment cut (`compaction/end` | `compaction/summary`),
 // (2) the staleness floor (>= N structural events or >= T hours since the last
-// checkpoint, while token pressure is above half the window), (3) on demand
-// (`ensureCheckpoint`). The deterministic template always produces a valid
-// checkpoint, so a provider outage can never leave the layer empty.
+// checkpoint, whichever first — the floor fires on its own; token pressure is
+// an extra trigger only), (3) on demand (`ensureCheckpoint`). The deterministic
+// template always produces a valid checkpoint, so a provider outage can never
+// leave the layer empty. There is no token budget on this layer; the 1 500
+// token rendered budget (doc 67 §B) belongs to the whiteboard, not the
+// checkpoint.
 
 /** Source marker that identifies the keeper's own surface checkpoint messages. */
 export const CHECKPOINT_SOURCE = { kind: 'plugin', plugin: 'enpoi-context-keeper' } as const
@@ -644,7 +689,8 @@ export interface CheckpointResult {
 
 /**
  * The telemetry line every checkpoint carries (doc 66 §3d): temporal grounding
- * without token panic, plus the refresh provenance Watchtower renders.
+ * without token panic, plus the refresh provenance (planned for the Watchtower
+ * state card — no reader consumes it today).
  * @param session - the session the checkpoint belongs to.
  * @param meta - route, mechanism, and seq facts of this refresh.
  * @returns the one-line telemetry.
@@ -1068,6 +1114,41 @@ export function apply(ctx: Context, config: Config): void {
   ;(globalThis as unknown as Record<symbol, unknown>)[CHECKPOINT_SERVICE_ANCHOR] = ownedCheckpoint
   diag(`apply: mounted (demand-driven; prose on oracle/council use, state checkpoint on segment cuts + staleness floor, surface replace in place, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`)
 
+  // ── Background brief prefetch (fix 2) ─────────────────────────────────────
+  // A turn/end that leaves the projection structurally stale schedules one
+  // debounced background distillation. Consumers still call ensureFreshBrief()
+  // on demand (the fallback path); when they do it after a prefetch landed, they
+  // hit the cache and need no LLM call. Failures stay negative-cached and the
+  // prefetch never publishes rejected prose (cleanKeeperProse returns '').
+  const prefetchTimers = new Map<string, NodeJS.Timeout>()
+  const prefetchRunning = new Set<string>()
+  const runPrefetch = (session: Session): void => {
+    if (prefetchRunning.has(session.id)) return // single-flight
+    prefetchRunning.add(session.id)
+    void ownedService.ensureFreshBrief(session).then((result) => {
+      diag(`prefetch: session=${session.id} — landed (${result.reason}, ${result.prose?.length ?? 0} chars, model ${result.model ?? 'n/a'})`)
+    }).catch((error) => {
+      diag(`prefetch: session=${session.id} — failed (${String(error)})`)
+    }).finally(() => {
+      prefetchRunning.delete(session.id)
+    })
+  }
+  const schedulePrefetch = (session: Session): void => {
+    try {
+      if (!ownedService.prefetchDue(session)) return
+      if (prefetchTimers.has(session.id)) return // debounced run already pending
+      const timer = setTimeout(() => {
+        prefetchTimers.delete(session.id)
+        runPrefetch(session)
+      }, PREFETCH_DEBOUNCE_MS)
+      // Background nicety — never hold the process open for it.
+      ;(timer as { unref?: () => void }).unref?.()
+      prefetchTimers.set(session.id, timer)
+    } catch {
+      // prefetch is advisory — it must never affect the turn
+    }
+  }
+
   // ── Claims batched listener (P1, survives P3) ─────────────────────────────
   // A plain counter + timer — NO debounce, NO rerun latch, NO wedge machinery.
   const claimCounters = new Map<string, { count: number; timer: NodeJS.Timeout | null }>()
@@ -1075,10 +1156,14 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     // Structural events age the brief; keep the total incrementally (a session
-    // still unseeded is counted from its log on first use).
+    // still unseeded is counted from its log on first use). A malformed event
+    // (no numeric seq) leaves the counter untouched — the next structuralTotal
+    // delta catch-up reads it from the log instead.
     if (STRUCTURAL_TYPES.has(event.type)) {
       const known = structuralCounters.get(session)
-      if (known !== undefined) structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 })
+      if (known !== undefined && Number.isFinite(event.seq)) {
+        structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 })
+      }
     }
     // Checkpoints keep their own cursor so the assembly-time reader stays O(1).
     if (event.type === 'state/checkpoint') {
@@ -1097,8 +1182,10 @@ export function apply(ctx: Context, config: Config): void {
     const reason = (event.data as { reason: { kind: string } }).reason
     if (reason.kind === 'aborted') return // don't extract from interrupted turns
     // Trigger 3 — staleness floor: >= N structural events or >= T hours since
-    // the last checkpoint, while token pressure is above half the window.
+    // the last checkpoint (fires on the floor alone — doc 67 amendment).
     maybeScheduleStaleCheckpoint(ctx, config, session, ownedCheckpoint)
+    // Warm the prose cache for the next consumer (oracle/council wait only 4 s).
+    schedulePrefetch(session)
     let counter = claimCounters.get(session.id)
     if (counter === undefined) {
       counter = { count: 0, timer: null }
@@ -1128,6 +1215,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     claimCounters.clear()
     claimsRunning.clear()
+    for (const timer of prefetchTimers.values()) clearTimeout(timer)
+    prefetchTimers.clear()
+    prefetchRunning.clear()
     // Oracle Q4 nit: only null the singleton if WE own it — a second mounted
     // instance (tests + runtime) must not kill the first's service.
     if (briefService === ownedService) briefService = null
@@ -1143,9 +1233,16 @@ export function apply(ctx: Context, config: Config): void {
 
 /**
  * The staleness-floor trigger: refresh in the background (single-flight inside
- * the service, so repeated turn/ends cannot stack passes) once the checkpoint
- * is older than the configured structural/wall-clock floor and token pressure
- * justifies it. Never throws into the event dispatch.
+ * the service, so repeated turn/ends cannot stack passes).
+ *
+ * Doc-67 amendment (fix 3): the structural floor fires ON ITS OWN —
+ * >= N structural events or >= T hours since the last checkpoint, whichever
+ * first. Token pressure is no longer a gate (live windows are 1 048 576 tokens,
+ * so a half-window reading was unreachable and checkpoints never fired); it
+ * stays an extra trigger only, and it can never bypass the service's
+ * anti-thrash window (or create a first checkpoint before the structural
+ * floor). At most one checkpoint per firing: `ensureCheckpoint` appends one
+ * `state/checkpoint` event and replaces the previous surface node in place.
  */
 function maybeScheduleStaleCheckpoint(
   ctx: Context,
@@ -1157,12 +1254,15 @@ function maybeScheduleStaleCheckpoint(
     const cfg = resolveKeeperParams(ctx, config)
     const last = latestCheckpoint(session)
     const structural = structuralTotal(session)
-    const stale = last === null
+    const floorMet = last === null
       ? structural >= (cfg.checkpointStaleEvents ?? 12)
       : structural - last.basedOnStructuralCount >= (cfg.checkpointStaleEvents ?? 12)
         || Date.now() - last.createdAt >= (cfg.checkpointStaleHours ?? 24) * 3_600_000
-    if (!stale) return
-    if (!pressureAboveHalf(ctx, session)) return
+    if (!floorMet) {
+      // Extra trigger only: pressure can request a refresh but never before a
+      // first checkpoint exists, and the service's freshness window still wins.
+      if (last === null || !pressureAboveHalf(ctx, session)) return
+    }
     void service.ensureCheckpoint(session).catch(() => {
       // non-blocking by contract; the next turn/end or segment cut retries
     })
@@ -1229,13 +1329,84 @@ async function runClaimsPass(
   }
 }
 
+/** Case-insensitive markers of a raw tool-call / function-call echo. */
+const PROSE_REJECT_MARKERS = ['<dots_function_call', '<function_call', 'tool_call', '<tool_use'] as const
+
+/** Whether a parsed JSON value (to a bounded depth) looks like a tool-call envelope. */
+function isToolEnvelopeValue(value: unknown, depth = 0): boolean {
+  if (depth > 4 || value === null || typeof value !== 'object') return false
+  if (Array.isArray(value)) return value.some(item => isToolEnvelopeValue(item, depth + 1))
+  const record = value as Record<string, unknown>
+  // The canonical envelope: {"name": ..., "arguments": ...}
+  if (typeof record.name === 'string' && (typeof record.arguments === 'string' || (record.arguments !== null && typeof record.arguments === 'object'))) {
+    return true
+  }
+  if (Array.isArray(record.tool_calls) && record.tool_calls.length > 0) return true
+  for (const key of ['function_call', 'tool_call', 'tool_use', 'toolUse']) {
+    if (record[key] !== null && typeof record[key] === 'object') return true
+  }
+  return false
+}
+
+/** Whether the whole output is a bare JSON tool envelope (never keeper prose). */
+function isToolJsonEnvelope(text: string): boolean {
+  if (!text.startsWith('{') && !text.startsWith('[')) return false
+  try {
+    return isToolEnvelopeValue(JSON.parse(text))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether the output is mostly markup with no brief section header — a raw
+ * XML/HTML payload echo rather than a five-section brief.
+ */
+function isMostlyMarkup(text: string): boolean {
+  // A real brief always carries at least one section header.
+  if (/[🎯📚🏛️🚫⚡]/.test(text)) return false
+  const tags = text.match(/<[^>]{0,300}>/g)
+  if (tags === null || tags.length < 3) return false
+  const tagChars = tags.reduce((sum, tag) => sum + tag.length, 0)
+  const total = text.replace(/\s+/g, '').length
+  return total > 0 && tagChars / total >= 0.4
+}
+
+/**
+ * Reject raw tool-call / function-call echoes, JSON tool envelopes, and
+ * mostly-markup payloads before they can ever become a brief.
+ *
+ * Live defect (2026-09-19, freellmapi/auto): the model echoed the framed input
+ * back as `<dots_function_call>` XML, the stream looked clean (finish `stop`),
+ * and `cleanKeeperProse` published the echo as prose. A rejection here is
+ * treated as a failed attempt by the caller, so the model-chain fallback runs
+ * and the rejected text is never appended or checkpointed.
+ * @param text - raw model output.
+ * @returns the rejection reason, or null when the text may be treated as prose.
+ */
+export function keeperProseRejection(text: string): string | null {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return 'empty output'
+  // A bare JSON document is never a brief; check the tool envelope first so a
+  // `tool_calls` key reports the precise reason rather than the generic marker.
+  if (isToolJsonEnvelope(trimmed)) return 'JSON tool-call envelope'
+  const lower = trimmed.toLowerCase()
+  for (const marker of PROSE_REJECT_MARKERS) {
+    if (lower.includes(marker)) return `tool-call/function-call echo (${marker})`
+  }
+  if (isMostlyMarkup(trimmed)) return 'output is mostly markup'
+  return null
+}
+
 /**
  * Sanitize keeper prose by stripping sections that contain ONLY negative filler / boilerplate.
  * (e.g. "No documentation...", "No alternative approaches were debated...", "No blockers remain...").
- * Keeps the brief clean, meaningful, and token-efficient.
+ * Keeps the brief clean, meaningful, and token-efficient. Rejected outputs
+ * (tool-call echoes / envelopes / markup blobs) clean to '' — never published.
  */
 export function cleanKeeperProse(text: string): string {
   if (!text || text.trim().length === 0) return ''
+  if (keeperProseRejection(text) !== null) return ''
   const sectionChunks = text.split(/(?=^[🎯📚🏛️🚫⚡]\s*)/m)
   const cleaned: string[] = []
 
@@ -1446,6 +1617,17 @@ function validateKeeperOutput(text: string, finishKind?: string, expectClaims = 
   const trimmed = text.trim()
   if (trimmed.length === 0) {
     return { valid: false, reason: 'Empty output received from model' }
+  }
+
+  // 1b. Prose passes never accept tool-call echoes / envelopes / markup blobs.
+  // Rejecting here (inside executeRoute) throws, so the model chain advances to
+  // the next link; the rejected text is never published (fix: live defect
+  // 2026-09-19, a freellmapi `<dots_function_call>` echo was accepted as prose).
+  if (!expectClaims) {
+    const rejection = keeperProseRejection(trimmed)
+    if (rejection !== null) {
+      return { valid: false, reason: `Rejected keeper prose: ${rejection}` }
+    }
   }
 
   // 2. Case-insensitive CLAIMS structure verification (claims passes only)

@@ -22,7 +22,9 @@ function makeSession(events: Array<{ type: string; seq: number; data: unknown }>
     header: { createdAt: Date.UTC(2026, 8, 20) },
     get seq() { return nextSeq },
     events: log,
-    snapshotEvents: (from = 0, to = log.length) => log.slice(from, to),
+    // Honour branded SessionLogOffset reads like the real Session (the
+    // structural counter reads only the appended tail).
+    snapshotEvents: (from: unknown = 0, to?: number) => log.slice(Number(from) || 0, to ?? log.length),
     requestContext: () => undefined,
     surface: { nodes: [] as number[] },
     append: vi.fn((...args: unknown[]) => {
@@ -32,6 +34,18 @@ function makeSession(events: Array<{ type: string; seq: number; data: unknown }>
       return { type, seq: nextSeq - 1, data }
     }),
   }
+}
+
+/**
+ * Stub a meter + 1M-token window so token pressure reads BELOW half: the new
+ * floor must fire without it (live windows are 1 048 576 tokens, so the old
+ * pressure gate was unreachable).
+ */
+function stubLowPressure(ctx: Record<string, unknown>, session: ReturnType<typeof makeSession> | Record<string, unknown>) {
+  const baseGet = (ctx as { get: (ns: string) => unknown }).get
+  ;(ctx as { get: (ns: string) => unknown }).get = (ns: string) =>
+    ns === 'tokenMeter' ? { measure: () => ({ totalTokens: 1 }) } : baseGet(ns)
+  ;(session as { requestContext?: () => unknown }).requestContext = () => ({ contextWindow: 1_048_576 })
 }
 
 /** The `state/checkpoint` appends recorded by the mock session. */
@@ -279,9 +293,105 @@ describe('enpoi-context-keeper triggers (apply listener)', () => {
     // 14 structural events — past the default floor of 12.
     const session = sessionWithTurns(7)
 
-    handler(session, { type: 'turn/end', data: { reason: { kind: 'stop' }, turn: 7 } })
+    handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 7 } })
     await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
     expect(checkpointCalls(session)[0]![1].via).toBe('llm')
+  })
+
+  it('fires at the structural floor WITHOUT token pressure (doc 67 amendment)', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(7) // 14 structural events >= 12
+    stubLowPressure(ctx, session) // pressure reads far below half the 1M window
+
+    handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 7 } })
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
+    expect(checkpointCalls(session)[0]![1].via).toBe('llm')
+  })
+
+  it('fires on the 24 h floor without pressure, below the structural floor, and bumps the version', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(1) // 2 structural events — far below 12
+    stubLowPressure(ctx, session)
+
+    const service = createCheckpointService(ctx as never, baseConfig)
+    await service.ensureCheckpoint(session as never)
+    expect(checkpointCalls(session)).toHaveLength(1)
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 25 * 3_600_000)
+    try {
+      handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 1 } })
+      await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(2))
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(checkpointCalls(session).map((call) => call[1].version)).toEqual([1, 2])
+  })
+
+  it('stays silent below the floor under low pressure (pressure cannot create a first checkpoint)', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(5) // 10 structural events < 12
+    stubLowPressure(ctx, session)
+
+    handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 5 } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(checkpointCalls(session)).toHaveLength(0)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('keeps the anti-thrash floor for a fresh checkpoint even with pressure above half', async () => {
+    const { ctx, handlers } = makeCtx() // no meter/window stub → pressure reads true
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(7)
+    handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 7 } })
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
+
+    // No new structural events: the pressure extra trigger cannot bypass the
+    // freshness window — at most one checkpoint per firing.
+    handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 8 } })
+    handler(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 9 } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(checkpointCalls(session)).toHaveLength(1)
+  })
+
+  it('writes a real state/checkpoint through the floor trigger with a stub meter (live-ish proof)', async () => {
+    const { Session } = await import('@deepseek-ai/dsh-session')
+    const { createUserMessage } = await import('@deepseek-ai/dsh-llm')
+    const session = Session.create('heart-floor-proof' as never)
+    for (let i = 0; i < 6; i++) {
+      session.append('turn/start', { turn: i + 1 })
+      session.append(
+        'user/message',
+        createUserMessage({ content: [{ type: 'text', text: `query ${i}` }], source: { kind: 'user' } }),
+        { surfaceOp: 'append' },
+      )
+      session.append('turn/end', { turn: i + 1, reason: { kind: 'stop' } })
+    }
+    const { ctx, handlers } = makeCtx()
+    stubLowPressure(ctx as never, session as never)
+    applyKeeper(ctx as never, baseConfig)
+    handlers.get('session/event')!(session, { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: 7 } })
+
+    await vi.waitFor(() => {
+      expect(session.snapshotEvents().filter((event) => event.type === 'state/checkpoint')).toHaveLength(1)
+    })
+    const checkpoint = session.snapshotEvents().find((event) => event.type === 'state/checkpoint')!
+    const data = checkpoint.data as CheckpointData
+    expect(data.via).toBe('llm')
+    expect(data.basedOnStructuralCount).toBe(12)
+    expect(renderCheckpointBlock(data)).toContain('### State checkpoint')
+    // The checkpoint surface message is live on the real surface.
+    const live = session.surface.nodes.filter((seq) => {
+      const event = session.eventAt(seq) as { data?: { source?: { plugin?: string } } } | undefined
+      return event?.data?.source?.plugin === 'enpoi-context-keeper'
+    })
+    expect(live).toHaveLength(1)
   })
 })
 

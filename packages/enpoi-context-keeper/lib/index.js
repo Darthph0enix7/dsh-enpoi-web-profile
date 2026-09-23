@@ -348,6 +348,31 @@ var BriefService = class {
       }
     }
   }
+  /**
+   * Whether a background prefetch is warranted right now. Consumers wait only
+   * 4 s for prose (oracle/council), while a live distillation can take ~7 s —
+   * so after a turn/end that leaves the projection structurally stale the
+   * keeper warms the cache itself instead of making the next consumer miss.
+   *
+   * Honours the same floors as `ensureFreshBrief`: the anti-thrash floor
+   * (minRefreshMs), the failure negative cache, and single-flight. Pure read —
+   * never triggers work by itself.
+   * @param session - the session whose projection may be stale.
+   * @returns whether the caller should schedule a prefetch.
+   */
+  prefetchDue(session) {
+    if (!keeperEnabled(this.ctx)) return false;
+    const cfg = resolveKeeperParams(this.ctx, this.config);
+    const now = Date.now();
+    const entry = this.cache.get(session.id);
+    if (entry !== void 0) {
+      if (entry.negativeUntil > now) return false;
+      if (entry.inFlight !== null) return false;
+      if (entry.prose.length > 0 && now - entry.updatedAt < (cfg.minRefreshMs ?? 6e4)) return false;
+    }
+    const distance = structuralTotal(session) - (entry?.basedOnStructuralCount ?? 0);
+    return distance > (cfg.structuralDistanceK ?? 24);
+  }
   /** One distillation pass: lease-bound LLM call, then append + cache. */
   async distill(session, signal, snapshotSeq, cfg) {
     const lease = new AbortController();
@@ -404,6 +429,7 @@ var BriefService = class {
 };
 var BRIEF_SERVICE_ANCHOR = Symbol.for("enpoi.context-keeper.brief-service");
 var briefService = null;
+var PREFETCH_DEBOUNCE_MS = 2e3;
 function getBriefService() {
   const anchored = globalThis[BRIEF_SERVICE_ANCHOR];
   return anchored ?? briefService;
@@ -738,12 +764,40 @@ function apply(ctx, config) {
   checkpointService = ownedCheckpoint;
   globalThis[CHECKPOINT_SERVICE_ANCHOR] = ownedCheckpoint;
   diag(`apply: mounted (demand-driven; prose on oracle/council use, state checkpoint on segment cuts + staleness floor, surface replace in place, claims batched ${config.claimsBatchSize ?? 8}/${config.claimsBatchMinutes ?? 5}min)`);
+  const prefetchTimers = /* @__PURE__ */ new Map();
+  const prefetchRunning = /* @__PURE__ */ new Set();
+  const runPrefetch = (session) => {
+    if (prefetchRunning.has(session.id)) return;
+    prefetchRunning.add(session.id);
+    void ownedService.ensureFreshBrief(session).then((result) => {
+      diag(`prefetch: session=${session.id} \u2014 landed (${result.reason}, ${result.prose?.length ?? 0} chars, model ${result.model ?? "n/a"})`);
+    }).catch((error) => {
+      diag(`prefetch: session=${session.id} \u2014 failed (${String(error)})`);
+    }).finally(() => {
+      prefetchRunning.delete(session.id);
+    });
+  };
+  const schedulePrefetch = (session) => {
+    try {
+      if (!ownedService.prefetchDue(session)) return;
+      if (prefetchTimers.has(session.id)) return;
+      const timer = setTimeout(() => {
+        prefetchTimers.delete(session.id);
+        runPrefetch(session);
+      }, PREFETCH_DEBOUNCE_MS);
+      timer.unref?.();
+      prefetchTimers.set(session.id, timer);
+    } catch {
+    }
+  };
   const claimCounters = /* @__PURE__ */ new Map();
   const claimsRunning = /* @__PURE__ */ new Set();
   ctx.on("session/event", (session, event) => {
     if (STRUCTURAL_TYPES.has(event.type)) {
       const known = structuralCounters.get(session);
-      if (known !== void 0) structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 });
+      if (known !== void 0 && Number.isFinite(event.seq)) {
+        structuralCounters.set(session, { seq: event.seq + 1, total: known.total + 1 });
+      }
     }
     if (event.type === "state/checkpoint") {
       checkpointCursors.set(session, { seq: event.seq + 1, data: event.data });
@@ -757,6 +811,7 @@ function apply(ctx, config) {
     const reason = event.data.reason;
     if (reason.kind === "aborted") return;
     maybeScheduleStaleCheckpoint(ctx, config, session, ownedCheckpoint);
+    schedulePrefetch(session);
     let counter = claimCounters.get(session.id);
     if (counter === void 0) {
       counter = { count: 0, timer: null };
@@ -783,6 +838,9 @@ function apply(ctx, config) {
     }
     claimCounters.clear();
     claimsRunning.clear();
+    for (const timer of prefetchTimers.values()) clearTimeout(timer);
+    prefetchTimers.clear();
+    prefetchRunning.clear();
     if (briefService === ownedService) briefService = null;
     if (globalThis[BRIEF_SERVICE_ANCHOR] === ownedService) {
       delete globalThis[BRIEF_SERVICE_ANCHOR];
@@ -798,9 +856,10 @@ function maybeScheduleStaleCheckpoint(ctx, config, session, service) {
     const cfg = resolveKeeperParams(ctx, config);
     const last = latestCheckpoint(session);
     const structural = structuralTotal(session);
-    const stale = last === null ? structural >= (cfg.checkpointStaleEvents ?? 12) : structural - last.basedOnStructuralCount >= (cfg.checkpointStaleEvents ?? 12) || Date.now() - last.createdAt >= (cfg.checkpointStaleHours ?? 24) * 36e5;
-    if (!stale) return;
-    if (!pressureAboveHalf(ctx, session)) return;
+    const floorMet = last === null ? structural >= (cfg.checkpointStaleEvents ?? 12) : structural - last.basedOnStructuralCount >= (cfg.checkpointStaleEvents ?? 12) || Date.now() - last.createdAt >= (cfg.checkpointStaleHours ?? 24) * 36e5;
+    if (!floorMet) {
+      if (last === null || !pressureAboveHalf(ctx, session)) return;
+    }
     void service.ensureCheckpoint(session).catch(() => {
     });
   } catch {
@@ -852,8 +911,50 @@ async function runClaimsPass(ctx, config, session, running) {
     running.delete(session.id);
   }
 }
+var PROSE_REJECT_MARKERS = ["<dots_function_call", "<function_call", "tool_call", "<tool_use"];
+function isToolEnvelopeValue(value, depth = 0) {
+  if (depth > 4 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => isToolEnvelopeValue(item, depth + 1));
+  const record = value;
+  if (typeof record.name === "string" && (typeof record.arguments === "string" || record.arguments !== null && typeof record.arguments === "object")) {
+    return true;
+  }
+  if (Array.isArray(record.tool_calls) && record.tool_calls.length > 0) return true;
+  for (const key of ["function_call", "tool_call", "tool_use", "toolUse"]) {
+    if (record[key] !== null && typeof record[key] === "object") return true;
+  }
+  return false;
+}
+function isToolJsonEnvelope(text) {
+  if (!text.startsWith("{") && !text.startsWith("[")) return false;
+  try {
+    return isToolEnvelopeValue(JSON.parse(text));
+  } catch {
+    return false;
+  }
+}
+function isMostlyMarkup(text) {
+  if (/[🎯📚🏛️🚫⚡]/.test(text)) return false;
+  const tags = text.match(/<[^>]{0,300}>/g);
+  if (tags === null || tags.length < 3) return false;
+  const tagChars = tags.reduce((sum, tag) => sum + tag.length, 0);
+  const total = text.replace(/\s+/g, "").length;
+  return total > 0 && tagChars / total >= 0.4;
+}
+function keeperProseRejection(text) {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return "empty output";
+  if (isToolJsonEnvelope(trimmed)) return "JSON tool-call envelope";
+  const lower = trimmed.toLowerCase();
+  for (const marker of PROSE_REJECT_MARKERS) {
+    if (lower.includes(marker)) return `tool-call/function-call echo (${marker})`;
+  }
+  if (isMostlyMarkup(trimmed)) return "output is mostly markup";
+  return null;
+}
 function cleanKeeperProse(text) {
   if (!text || text.trim().length === 0) return "";
+  if (keeperProseRejection(text) !== null) return "";
   const sectionChunks = text.split(/(?=^[🎯📚🏛️🚫⚡]\s*)/m);
   const cleaned = [];
   for (const chunk of sectionChunks) {
@@ -1007,6 +1108,12 @@ function validateKeeperOutput(text, finishKind, expectClaims = false) {
   if (trimmed.length === 0) {
     return { valid: false, reason: "Empty output received from model" };
   }
+  if (!expectClaims) {
+    const rejection = keeperProseRejection(trimmed);
+    if (rejection !== null) {
+      return { valid: false, reason: `Rejected keeper prose: ${rejection}` };
+    }
+  }
   if (expectClaims) {
     const claimsMatch = trimmed.match(/CLAIMS:\s*([\s\S]*)$/i);
     if (claimsMatch) {
@@ -1123,6 +1230,7 @@ export {
   CHECKPOINT_SOURCE,
   CheckpointService,
   Config,
+  PREFETCH_DEBOUNCE_MS,
   apply,
   buildTemplateCheckpoint,
   checkpointTelemetry,
@@ -1133,6 +1241,7 @@ export {
   getCheckpointService,
   inject,
   keeperAttempts,
+  keeperProseRejection,
   latestCheckpoint,
   latestCheckpointMessageSeq,
   name,

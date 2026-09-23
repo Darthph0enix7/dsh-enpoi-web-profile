@@ -117,11 +117,18 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
       }
 
       case 'tool/result': {
-        const data = event.data as { callId: string; error?: { name: string; code: string } }
+        const data = event.data as {
+          callId?: string
+          message?: { source?: { callId?: string } }
+          error?: { name: string; code: string }
+        }
         if (data.error === undefined) {
           return { ...state, lastEventSeq: event.seq, structuralCount: state.structuralCount + 1 }
         }
-        const tool = state.toolNames[data.callId]
+        // A result carries its call id on the message source, not on the event
+        // data; the old read made every blocker's `tool` undefined.
+        const callId = data.callId ?? data.message?.source?.callId
+        const tool = callId === undefined ? undefined : state.toolNames[callId]
         const blocker: Blocker = {
           id: `b-${event.seq}`,
           text: `${data.error.name}: ${data.error.code}`,

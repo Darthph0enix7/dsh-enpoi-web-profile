@@ -81,7 +81,8 @@ function fold(ctx, state, event) {
         if (data.error === void 0) {
           return { ...state, lastEventSeq: event.seq, structuralCount: state.structuralCount + 1 };
         }
-        const tool = state.toolNames[data.callId];
+        const callId = data.callId ?? data.message?.source?.callId;
+        const tool = callId === void 0 ? void 0 : state.toolNames[callId];
         const blocker = {
           id: `b-${event.seq}`,
           text: `${data.error.name}: ${data.error.code}`,

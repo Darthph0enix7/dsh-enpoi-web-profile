@@ -91,18 +91,43 @@ describe('livingBrief fold — filesTouched', () => {
 })
 
 describe('livingBrief fold — blockers', () => {
-  it('tool/result with error → blocker with tool name', () => {
+  it('tool/result with error → blocker with tool name (message source carries the call id)', () => {
     let s = fold(ctx, init(), ev({
       type: 'tool/call',
       data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' },
     }))
     s = fold(ctx, s, ev({
       type: 'tool/result',
-      data: { turn: 1, step: 1, callId: 'c1', message: {}, error: { name: 'EACCES', code: 'EACCES' } },
+      data: {
+        turn: 1, step: 1,
+        message: { source: { kind: 'tool', callId: 'c1' }, role: 'tool', content: [] },
+        error: { name: 'EACCES', code: 'EACCES' },
+      },
     }))
     expect(s.blockers).toHaveLength(1)
     expect(s.blockers[0].tool).toBe('bash')
     expect(s.blockers[0].text).toContain('EACCES')
+  })
+
+  it('tool/result with a flat call id still attributes the tool', () => {
+    let s = fold(ctx, init(), ev({
+      type: 'tool/call',
+      data: { turn: 1, step: 1, callId: 'c9', name: 'glob', arguments: '{}' },
+    }))
+    s = fold(ctx, s, ev({
+      type: 'tool/result',
+      data: { turn: 1, step: 1, callId: 'c9', message: {}, error: { name: 'SearchError', code: 'SEARCH_FAILED' } },
+    }))
+    expect(s.blockers[0].tool).toBe('glob')
+  })
+
+  it('tool/result whose call id matches no recorded call → blocker without a tool', () => {
+    const s = fold(ctx, init(), ev({
+      type: 'tool/result',
+      data: { turn: 1, step: 1, message: { source: { callId: 'missing' } }, error: { name: 'X', code: 'Y' } },
+    }))
+    expect(s.blockers).toHaveLength(1)
+    expect(s.blockers[0].tool).toBeUndefined()
   })
 
   it('tool/result without error → no blocker', () => {
