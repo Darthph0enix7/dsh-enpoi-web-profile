@@ -23,9 +23,11 @@ import { initialCapabilitiesState } from './state'
 import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
 import {
-  resolvePolicy, grantProposalFor, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS,
-  type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
+  resolvePolicy, grantProposalFor, standingGrantRecord, agentRoleOf, mcpServerNameOf, mcpPolicyRemovalOps,
+  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS,
+  type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
+import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -81,6 +83,41 @@ export const OrchestrationSettingsSchema = Schema.object({
   whiteboard: Schema.any(),
 })
 
+/**
+ * Revision-fenced removal of every policy row belonging to servers that left
+ * the catalog: the `mcp__<server>__*` wildcard, exact `mcp__<server>__<tool>`
+ * rows, and the same keys under every agent override. The permission config is
+ * re-read on each attempt so a concurrent write is included, not clobbered.
+ * The removal path itself ({@link removeMcpServerFenced}) unsets catalog entry
+ * and rows in one write; this is the backstop for catalog shrinks that arrived
+ * through another writer.
+ * @param settings - settings service (no-op when unavailable).
+ * @param servers - mounted server names that are no longer in the catalog.
+ * @param readConfig - fresh permission-config reader.
+ * @returns the number of rule rows unset.
+ */
+export async function pruneRemovedMcpPolicyRows(
+  settings: McpCatalogSettings | undefined,
+  servers: readonly string[],
+  readConfig: () => PermissionPolicyConfig | undefined,
+): Promise<number> {
+  if (!canFenceMcpWrites(settings) || servers.length === 0) return 0
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const ops: SettingsPathOp[] = servers.flatMap(server => mcpPolicyRemovalOps(server, readConfig()))
+    if (ops.length === 0) return 0
+    const revision = settings.describe?.().find((entry: { ns: string; revision?: number }) => entry.ns === ORCH_NS)?.revision
+    try {
+      await settings.mutate(ORCH_NS, ops, revision)
+      return ops.length
+    } catch (error) {
+      const conflict = error as { code?: string }
+      if ((conflict?.code === 'SETTINGS_CONFLICT' || conflict?.code === 'settings/conflict') && attempt < 2) continue
+      throw error
+    }
+  }
+  return 0
+}
+
 export function apply(ctx: Context): void {
   // 0. Namespace ownership: without a registering owner,
   //    `settings.get('enpoi-orchestration')` returns undefined and every
@@ -104,9 +141,22 @@ export function apply(ctx: Context): void {
     }
   }
 
+  // 0b. Permissions matrix source: `enpoiCapabilities.mcpTools` projects the
+  //     LIVE tool registry (`ctx.tools.schemas()`) so the Permissions page
+  //     lists the real `mcp__<server>__<tool>` rows with their policy chips,
+  //     and follows mounting/unmounting dynamically. Imported lazily so the
+  //     @Remote decorator stays out of the unit-test import graph.
+  void import('./rpc.ts').then((remote) => {
+    try {
+      remote.mountCapabilitiesRemote(ctx)
+    } catch (error) {
+      process.stderr.write(`[enpoi-capabilities] capabilities remote mount failed: ${String(error)}\n`)
+    }
+  }).catch(() => {})
+
   // 1. Invariant B1: Monotonic pre-dispatch tool execution guard
   const disposeGuard = ctx.tools.guard((exec) => {
-    const decision = evaluateToolCall(exec.name, exec.arguments as Record<string, unknown> | undefined, initialCapabilitiesState(getGlobalDefaults()))
+    const decision = evaluateToolCall(exec.name, exec.arguments as Record<string, unknown> | undefined, initialCapabilitiesState(getGlobalDefaults()), readMcpCatalogDefs())
     if (!decision.allowed) {
       return decision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.`
     }
@@ -382,6 +432,53 @@ export function apply(ctx: Context): void {
     }
   }
 
+  /**
+   * The live MCP catalog (`enpoi-orchestration.mcpServers`) as id → descriptor.
+   * `undefined` = settings unreadable; `{}` = no catalog entries. The
+   * capability-disabled check maps a tool-name server segment back to its
+   * catalog id — the key `capabilities.mcp[...]` is written under.
+   */
+  function readMcpCatalogDefs(): Record<string, { serverName?: string }> | undefined {
+    try {
+      const settings = ctx.get('settings') as { get?: (ns: unknown) => { mcpServers?: Record<string, { serverName?: string }> } } | undefined
+      const value = settings?.get?.(ORCH_NS)
+      if (value === undefined) return undefined
+      const catalog = value.mcpServers
+      // A namespace without a readable catalog (mid-reload / unregistered) is
+      // NOT an empty catalog: treating it as one would prune every live row.
+      if (catalog === undefined || catalog === null || typeof catalog !== 'object' || Array.isArray(catalog)) return undefined
+      return catalog
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Mounted MCP server names of the live catalog (`serverName ?? id minus
+   * '-mcp'` — the naming the MCP mount and the client's permission grouping
+   * both use). `undefined` = settings unreadable; `[]` = no catalog entries.
+   */
+  function readMcpServerNames(): string[] | undefined {
+    const catalog = readMcpCatalogDefs()
+    return catalog === undefined ? undefined : Object.entries(catalog).map(([id, def]) => mcpServerNameOf(id, def))
+  }
+
+  /** The session's current agent preset, through the projection registry. */
+  function currentPresetOf(session: unknown): string | undefined {
+    try {
+      const projections = ctx.get('sessionProjections') as { stateOf?: (session: unknown, key: string) => unknown } | undefined
+      const value = projections?.stateOf?.(session, 'agentPreset')
+      return typeof value === 'string' && value !== '' ? value : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The asking agent's role id for one live exec (session header/projection). */
+  function askingAgentOf(exec: { agent?: AgentLike }): string | undefined {
+    return agentRoleOf(exec.agent, currentPresetOf)
+  }
+
   function readSandboxMode(agent: { session?: { id?: string } } | undefined): string | undefined {
     try {
       const session = agent?.session
@@ -397,18 +494,12 @@ export function apply(ctx: Context): void {
     }
   }
 
-  function agentNameOf(exec: { agent?: { preset?: string; agentPreset?: string; label?: string; name?: string } }): string | undefined {
-    const a = exec.agent
-    if (a === undefined) return undefined
-    return a.agentPreset ?? a.preset ?? a.name ?? a.label
-  }
-
-  const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: { session?: unknown } }, next: () => Promise<{ kind: string; reason?: string }>) => {
+  const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: AgentLike }, next: () => Promise<{ kind: string; reason?: string }>) => {
     // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
     // before guardReason, so a disabled tool with an ask policy would otherwise
     // prompt and then deny after the user clicks allow.
     const state = initialCapabilitiesState(getGlobalDefaults())
-    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state)
+    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs())
     if (!capabilityDecision.allowed) {
       return { kind: 'deny', reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` }
     }
@@ -417,15 +508,16 @@ export function apply(ctx: Context): void {
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
-      agent: agentNameOf(exec),
+      agent: askingAgentOf(exec),
       config,
       sandboxMode: readSandboxMode(exec.agent as { session?: unknown } | undefined),
+      mcpServerNames: readMcpServerNames() ?? [],
     })
     if (decision.kind === 'allow') return await next()
     if (decision.kind === 'deny') return { kind: 'deny', reason: decision.reason }
     // ask: stash the grant proposal for the host-side allow-always writer.
     if (typeof exec.callId === 'string' && pendingGrants.size < 128) {
-      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : undefined, agentNameOf(exec)))
+      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : undefined, askingAgentOf(exec)))
     }
     return { kind: 'ask', reason: decision.reason }
   }) as (...args: unknown[]) => unknown)
@@ -436,7 +528,7 @@ export function apply(ctx: Context): void {
   // grant into settings under the file lock — no client-side read-modify-write.
   async function persistGrant(proposal: GrantProposal): Promise<void> {
     const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-    const grant: StandingGrant = { id, tool: proposal.tool, ...(proposal.pattern !== undefined ? { pattern: proposal.pattern } : {}), ...(proposal.agent !== undefined ? { agent: proposal.agent } : {}), createdAt: new Date().toISOString() }
+    const grant: StandingGrant = standingGrantRecord(id, proposal, new Date().toISOString())
     const settings = ctx.get('settings') as {
       describe?: () => Array<{ ns: string; revision?: number }>
       mutate?: (ns: string, ops: Array<{ op: string; path: string[]; value?: unknown }>, expectedRevision?: number) => Promise<unknown>
@@ -450,7 +542,7 @@ export function apply(ctx: Context): void {
     // conflict (another writer won the race); the operator's grant is never
     // silently dropped and never clobbers a concurrent grant.
     for (let attempt = 0; attempt < 3; attempt++) {
-      const revision = settings.describe?.().find(entry => entry.ns === ORCH_NS)?.revision
+      const revision = settings.describe?.().find((entry: { ns: string; revision?: number }) => entry.ns === ORCH_NS)?.revision
       const existing = readPermissionConfig().grants ?? {}
       const next = { ...existing, [id]: grant }
       try {
@@ -465,6 +557,34 @@ export function apply(ctx: Context): void {
       }
     }
   }
+
+  // A server that leaves the catalog (or is renamed) would otherwise leave
+  // its policy rows behind forever — inert but accumulating. Observe catalog
+  // shrink and unset every row of a server that is gone, under the same
+  // revision fence as the grant writer. The baseline is seeded at boot; a
+  // server already absent then is not treated as a removal (its rows may be
+  // operator-prepared rules).
+  let lastMcpServerNames = readMcpServerNames()
+  const disposeMcpPolicyCleanup = ctx.on('settings/updated', ((ns: unknown) => {
+    if (String(ns) !== ORCH_NS) return
+    const names = readMcpServerNames()
+    if (names === undefined) return
+    const previous = lastMcpServerNames
+    lastMcpServerNames = names
+    if (previous === undefined) return
+    const current = new Set(names)
+    const removed = [...new Set(previous.filter(name => !current.has(name)))]
+    if (removed.length === 0) return
+    const settings = ctx.get('settings') as McpCatalogSettings | undefined
+    void pruneRemovedMcpPolicyRows(settings, removed, readPermissionConfig)
+      .then((count) => {
+        if (count > 0) process.stderr.write(`[enpoi-capabilities] removed MCP policy rows: ${count} row(s) for ${removed.join(', ')}\n`)
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`[enpoi-capabilities] removed MCP policy cleanup failed: ${String(error)}\n`)
+      })
+  }) as (...args: unknown[]) => unknown)
+  ctx.effect(() => disposeMcpPolicyCleanup, 'enpoi-capabilities: removed-MCP policy cleanup')
 
   const disposeGrantWatch = ctx.on('session/event', ((session: { id?: string; eventAt?: (seq: number) => { type: string; data?: Record<string, unknown>; seq?: number } | undefined; seq?: number }, event: { type: string; seq?: number; data?: Record<string, unknown> }) => {
     if (event?.type !== 'approval/decided') return undefined

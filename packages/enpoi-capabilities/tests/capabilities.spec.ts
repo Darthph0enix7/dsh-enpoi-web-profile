@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   initialCapabilitiesState,
   evaluateToolCall,
+  pruneRemovedMcpPolicyRows,
   PROTECTED_CAPABILITIES,
   type CapabilitiesState,
 } from '../src/index'
@@ -109,6 +110,41 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
     expect(evaluateToolCall('mcp__other__do_thing', {}, off).allowed).toBe(false)
   })
 
+  it('resolves the mcp toggle through the catalog: `__` id, custom serverName, normal id, unknown server', () => {
+    const catalog = {
+      'plane-mcp': {},
+      'a__b-mcp': {},
+      'acme-mcp': { serverName: 'bar' },
+    }
+
+    // Normal id: mounted name is the id minus the standard `-mcp` suffix.
+    const plane = initialCapabilitiesState({ mcp: { 'plane-mcp': false } })
+    const planeDecision = evaluateToolCall('mcp__plane__list_projects', {}, plane, catalog)
+    expect(planeDecision.allowed).toBe(false)
+    expect(planeDecision.syntheticResult).toContain("'plane-mcp'")
+
+    // An id containing `__` resolves whole: `mcp__a__b__tool` is server `a__b`.
+    const deep = initialCapabilitiesState({ mcp: { 'a__b-mcp': false } })
+    const deepDecision = evaluateToolCall('mcp__a__b__do_thing', {}, deep, catalog)
+    expect(deepDecision.allowed).toBe(false)
+    expect(deepDecision.syntheticResult).toContain("'a__b-mcp'")
+    // The old split-based key must not veto the suite in either direction.
+    expect(evaluateToolCall('mcp__a__b__do_thing', {}, initialCapabilitiesState({ mcp: { 'a-mcp': false, 'a__b-mcp': true } }), catalog).allowed).toBe(true)
+
+    // A custom serverName maps back to its catalog id.
+    const acme = initialCapabilitiesState({ mcp: { 'acme-mcp': false } })
+    const acmeDecision = evaluateToolCall('mcp__bar__do_thing', {}, acme, catalog)
+    expect(acmeDecision.allowed).toBe(false)
+    expect(acmeDecision.syntheticResult).toContain("'acme-mcp'")
+
+    // An unknown server keeps the legacy `__`-split / `-mcp` fallback.
+    const ghost = initialCapabilitiesState({ mcp: { 'ghost-mcp': false } })
+    const ghostDecision = evaluateToolCall('mcp__ghost__do_thing', {}, ghost, catalog)
+    expect(ghostDecision.allowed).toBe(false)
+    expect(ghostDecision.syntheticResult).toContain("'ghost-mcp'")
+    expect(evaluateToolCall('mcp__ghost__do_thing', {}, initialCapabilitiesState({ mcp: { 'ghost-mcp': true } }), catalog).allowed).toBe(true)
+  })
+
   it('strips disabled skills from catalog text and entries, and drops no-op updates', async () => {
     const { filterSkillCatalogMessages } = await import('../src/catalog.ts')
     const published = new Map<string, string>()
@@ -145,6 +181,58 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
       content: [{ type: 'text', text: '- `test-alpha`: new' }],
     }], disabled, published, 's1')
     expect(third.messages).toHaveLength(1)
+  })
+
+  it('removing an MCP server unsets every policy row it owned (revision-fenced)', async () => {
+    // Catalog + policy rows state: the server was added, rules were written,
+    // then the catalog entry was removed — the rows must not survive it.
+    const tree: {
+      mcpServers: Record<string, { serverName?: string }>
+      permissions: {
+        tools: Record<string, 'allow' | 'ask' | 'deny'>
+        agents: Record<string, { tools: Record<string, 'allow' | 'ask' | 'deny'> }>
+      }
+    } = {
+      mcpServers: {},
+      permissions: {
+        tools: {
+          'mcp__plane__*': 'ask',
+          'mcp__plane__create_page': 'ask',
+          'mcp__plane2__*': 'allow',
+          bash: 'ask',
+        },
+        agents: {
+          orchestrator: { tools: { 'mcp__plane__*': 'allow', 'mcp__ghost__*': 'ask' } },
+          fixer: { tools: { 'mcp__plane__create_page': 'deny' } },
+        },
+      },
+    }
+    let revision = 7
+    let conflicts = 0
+    const settings = {
+      describe: () => [{ ns: 'enpoi-orchestration', revision }],
+      mutate: async (_ns: string, ops: Array<{ op: string; path: string[] }>, expected?: number) => {
+        if (expected !== revision) {
+          conflicts += 1
+          throw Object.assign(new Error('stale revision'), { code: 'SETTINGS_CONFLICT' })
+        }
+        for (const op of ops) {
+          let node = tree as unknown as Record<string, unknown>
+          for (const key of op.path.slice(0, -1)) node = node[key] as Record<string, unknown>
+          delete node[op.path[op.path.length - 1] as string]
+        }
+        revision += 1
+      },
+    }
+    const count = await pruneRemovedMcpPolicyRows(settings, ['plane'], () => tree.permissions)
+    expect(conflicts).toBe(0)
+    expect(count).toBe(4) // global wildcard + global exact + 1 agent wildcard + 1 agent exact
+    expect(tree.permissions.tools).toEqual({ 'mcp__plane2__*': 'allow', bash: 'ask' })
+    expect(tree.permissions.agents.orchestrator.tools).toEqual({ 'mcp__ghost__*': 'ask' })
+    expect(tree.permissions.agents.fixer.tools).toEqual({})
+    // Idempotent: nothing left for the server means no further write.
+    expect(await pruneRemovedMcpPolicyRows(settings, ['plane'], () => tree.permissions)).toBe(0)
+    expect(revision).toBe(8)
   })
 
   it('Invariant I15: protected infrastructure capabilities can never be disabled', () => {

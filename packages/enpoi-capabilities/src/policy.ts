@@ -26,8 +26,18 @@ export interface StandingGrant {
   tool: string
   /** Undefined = tool-level grant (applies to every command of the tool). */
   pattern?: string
-  /** Undefined = global (all agents). */
+  /**
+   * The agent the grant is scoped to — or, when {@link global} is true, the
+   * agent that ASKED for it (audit only, never a scope).
+   */
   agent?: string
+  /**
+   * Host-written grants are global by design: the approval card's
+   * "Always allow" covers all agents. `agent` stays on the record for
+   * auditability and future per-agent scoping, but a global grant never
+   * narrows resolution.
+   */
+  global?: boolean
   createdAt?: string
 }
 
@@ -169,8 +179,39 @@ function policyToDecision(policy: PermissionPolicy, subject: string, source: str
   return { kind: 'allow', source }
 }
 
+/**
+ * The mounted server name of one catalog entry: the name the mcp-client
+ * registers tools under and the client's permission grouping keys rows by
+ * (`serverName ?? id minus the standard -mcp suffix`).
+ */
+export function mcpServerNameOf(id: string, def?: { serverName?: string } | undefined): string {
+  return typeof def?.serverName === 'string' && def.serverName !== '' ? def.serverName : id.replace(/-mcp$/, '')
+}
+
+/**
+ * The server segment of one MCP public tool name (`mcp__<server>__<tool>`).
+ * A known catalog server whose mounted name prefixes the tool name wins,
+ * longest first — a server id may itself contain `__`, so `mcp__a__b__tool`
+ * belongs to `a__b`, not `a`. The `__` split is only the fallback for a
+ * server that left the catalog, exactly like the client's row grouping.
+ */
+export function mcpServerSegment(toolName: string, knownServers?: readonly string[]): string | undefined {
+  if (toolName.startsWith('mcp__') && knownServers !== undefined) {
+    const known = knownServers
+      .filter(server => server !== '' && toolName.startsWith(`mcp__${server}__`))
+      .sort((left, right) => right.length - left.length)[0]
+    if (known !== undefined) return known
+  }
+  const parts = toolName.split('__')
+  return parts.length >= 3 ? parts[1] : undefined
+}
+
 /** MCP wildcard ladder: exact → server (`mcp__server__*`) → family (`mcp__*`) → `*`. */
-export function mcpLadder(toolName: string, table: Record<string, PermissionPolicy> | undefined): PolicyDecision | null {
+export function mcpLadder(
+  toolName: string,
+  table: Record<string, PermissionPolicy> | undefined,
+  knownServers?: readonly string[],
+): PolicyDecision | null {
   if (table === undefined) return null
   const check = (key: string): PolicyDecision | null => {
     const policy = table[key]
@@ -181,10 +222,10 @@ export function mcpLadder(toolName: string, table: Record<string, PermissionPoli
   }
   const exact = check(toolName)
   if (exact !== null) return exact
-  const parts = toolName.split('__')   // mcp__<server>__<tool>
-  if (parts.length >= 3) {
-    const server = check(`mcp__${parts[1]}__*`)
-    if (server !== null) return server
+  const server = mcpServerSegment(toolName, knownServers)
+  if (server !== undefined) {
+    const hit = check(`mcp__${server}__*`)
+    if (hit !== null) return hit
   }
   if (toolName.startsWith('mcp__')) {
     const family = check('mcp__*')
@@ -193,7 +234,12 @@ export function mcpLadder(toolName: string, table: Record<string, PermissionPoli
   return null
 }
 
-/** Grants matching this ask's granularity: a pattern-level grant never bleeds into a tool-level ask and vice versa. */
+/**
+ * Grants matching this ask's granularity: a pattern-level grant never bleeds
+ * into a tool-level ask and vice versa. A recorded `agent` scopes the grant
+ * unless the grant is marked `global` (host-written "Always allow" grants
+ * record the asking agent for audit but cover all agents).
+ */
 export function grantsShortCircuit(
   toolName: string,
   agent: string | undefined,
@@ -209,7 +255,7 @@ export function grantsShortCircuit(
     } else {
       if (grant.pattern !== undefined) continue
     }
-    if (grant.agent !== undefined && grant.agent !== agent) continue
+    if (grant.global !== true && grant.agent !== undefined && grant.agent !== agent) continue
     return true
   }
   return false
@@ -280,6 +326,84 @@ export interface PolicyResolutionInput {
   config: PermissionPolicyConfig
   /** Effective sandbox mode; 'read-only' vetoes mutations. */
   sandboxMode?: string
+  /** Mounted MCP server names (catalog `serverName ?? id - '-mcp'`) for the wildcard ladder. */
+  mcpServerNames?: readonly string[]
+}
+
+/**
+ * Every policy row belonging to one MCP server: the server wildcard
+ * (`mcp__<server>__*`), any exact `mcp__<server>__<tool>` row, at the global
+ * tier and under every agent override. `mcp__<server2>__*` never matches for
+ * a different server because the `__` separator is part of the prefix.
+ */
+export function mcpPolicyRemovalOps(
+  server: string,
+  config: PermissionPolicyConfig | undefined,
+): Array<{ op: 'unset'; path: string[] }> {
+  const prefix = `mcp__${server}__`
+  const ops: Array<{ op: 'unset'; path: string[] }> = []
+  for (const key of Object.keys(config?.tools ?? {})) {
+    if (key.startsWith(prefix)) ops.push({ op: 'unset', path: ['permissions', 'tools', key] })
+  }
+  for (const [agent, agentCfg] of Object.entries(config?.agents ?? {})) {
+    for (const key of Object.keys(agentCfg?.tools ?? {})) {
+      if (key.startsWith(prefix)) ops.push({ op: 'unset', path: ['permissions', 'agents', agent, 'tools', key] })
+    }
+  }
+  return ops
+}
+
+/** The live agent slice `exec.agent` exposes to a policy listener. */
+export interface AgentLike {
+  agentPreset?: string
+  preset?: string
+  name?: string
+  label?: string
+  session?: {
+    header?: { agentPreset?: string; meta?: { agentPreset?: string } }
+    ownEvents?: () => readonly { type?: string; data?: { agentPreset?: unknown } }[]
+  }
+}
+
+/**
+ * The asking agent's role id for a live exec. Precedence: fields the runtime
+ * exposes on the agent itself, the session's current-preset projection
+ * (`agent-preset/selected` fold, via the injected reader), the session header
+ * (creation-time preset — what a child role carries), then the latest logged
+ * selection. Returns undefined when the agent is genuinely unidentified.
+ */
+export function agentRoleOf(
+  agent: AgentLike | undefined,
+  readCurrentPreset?: (session: unknown) => string | undefined,
+): string | undefined {
+  if (agent === undefined) return undefined
+  for (const candidate of [agent.agentPreset, agent.preset, agent.name, agent.label]) {
+    if (typeof candidate === 'string' && candidate !== '') return candidate
+  }
+  const session = agent.session
+  if (session !== undefined && readCurrentPreset !== undefined) {
+    try {
+      const current = readCurrentPreset(session)
+      if (typeof current === 'string' && current !== '') return current
+    } catch {
+      // Fall through to the durable header.
+    }
+  }
+  const header = session?.header
+  const created = typeof header?.agentPreset === 'string' && header.agentPreset !== ''
+    ? header.agentPreset
+    : header?.meta?.agentPreset
+  if (typeof created === 'string' && created !== '') return created
+  try {
+    const events = session?.ownEvents?.() ?? []
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const value = events[i]?.data?.agentPreset
+      if (events[i]?.type === 'agent-preset/selected' && typeof value === 'string' && value !== '') return value
+    }
+  } catch {
+    // An unreadable log has no evidence.
+  }
+  return undefined
 }
 
 /**
@@ -392,7 +516,7 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
   }
   // MCP wildcard ladder at the global tier.
   if (isMcpToolName(toolName)) {
-    const ladder = mcpLadder(toolName, input.config.tools)
+    const ladder = mcpLadder(toolName, input.config.tools, input.mcpServerNames)
     if (ladder !== null) return ladder
   }
   const fallback: PermissionPolicy = input.config.defaults?.unknownTools ?? 'ask'
@@ -415,6 +539,7 @@ export function isMcpToolName(toolName: string): boolean {
 export interface GrantProposal {
   tool: string
   pattern?: string
+  /** The requesting agent (recorded on the grant; does not scope it). */
   agent?: string
 }
 
@@ -424,4 +549,20 @@ export function grantProposalFor(decision: PolicyDecision & { kind: 'ask' }, too
     return { tool: toolName, pattern: decision.pattern, agent }
   }
   return { tool: toolName, agent }
+}
+
+/**
+ * The grant record one host-side "allow always" writes: global (applies to
+ * every agent, matching the approval card), with the requesting agent kept on
+ * the record for auditability and future per-agent scoping.
+ */
+export function standingGrantRecord(id: string, proposal: GrantProposal, createdAt: string): StandingGrant {
+  return {
+    id,
+    tool: proposal.tool,
+    ...(proposal.pattern !== undefined ? { pattern: proposal.pattern } : {}),
+    ...(proposal.agent !== undefined ? { agent: proposal.agent } : {}),
+    global: true,
+    createdAt,
+  }
 }

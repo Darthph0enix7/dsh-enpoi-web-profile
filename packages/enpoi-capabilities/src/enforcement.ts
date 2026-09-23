@@ -7,20 +7,43 @@
 
 import type { CapabilitiesState } from './types'
 import { PROTECTED_CAPABILITIES } from './types'
+import { mcpServerNameOf, mcpServerSegment } from './policy'
 
 export interface PreDispatchDecision {
   allowed: boolean
   syntheticResult?: string
 }
 
+/** The live MCP catalog subset the toggle lookup needs (catalog id → descriptor). */
+export type McpCatalogDefs = Record<string, { serverName?: string } | undefined>
+
+/** Mounted server names of a catalog (`serverName ?? id minus '-mcp'`). */
+function mountedServerNames(catalog: McpCatalogDefs | undefined): string[] {
+  return Object.entries(catalog ?? {}).map(([id, def]) => mcpServerNameOf(id, def))
+}
+
+/** The catalog id whose mounted name is `segment` (undefined for an unknown server). */
+function catalogIdOf(segment: string, catalog: McpCatalogDefs | undefined): string | undefined {
+  for (const [id, def] of Object.entries(catalog ?? {})) {
+    if (mcpServerNameOf(id, def) === segment) return id
+  }
+  return undefined
+}
+
 /**
  * Evaluates whether a tool call is permitted by the active capability state.
  * Enforces denial at the execution boundary (Invariant B1).
+ * @param toolName - public tool name (native or `mcp__<server>__<tool>`).
+ * @param args - call arguments (subagent_type / skill name dispatches).
+ * @param state - resolved capability state.
+ * @param mcpCatalog - live `mcpServers` catalog; resolves a tool-name server
+ *   segment back to the catalog id `capabilities.mcp[...]` is keyed by.
  */
 export function evaluateToolCall(
   toolName: string,
   args: Record<string, unknown> | undefined,
   state: CapabilitiesState,
+  mcpCatalog?: McpCatalogDefs,
 ): PreDispatchDecision {
   // Invariant I15: Protected infrastructure always allowed
   if (PROTECTED_CAPABILITIES.has(toolName)) {
@@ -57,17 +80,24 @@ export function evaluateToolCall(
     }
   }
 
-  // 4. Check MCP tool suite dispatch (e.g. mcp__plane__*)
+  // 4. Check MCP tool suite dispatch (e.g. mcp__plane__*). The server segment
+  // mirrors the policy ladder: a known catalog server whose mounted name
+  // prefixes the tool name wins (longest first, so an id containing `__`
+  // resolves whole), then the mounted name maps back to its catalog id — the
+  // key `capabilities.mcp[...]` is written under. An unknown server keeps the
+  // historical `__`-split / `-mcp` fallback.
   if (toolName.startsWith('mcp__')) {
-    const parts = toolName.split('__')
-    const serverPrefix = parts[1]?.toLowerCase()
-    if (serverPrefix) {
-      // The server id is the tool-name prefix plus the standard `-mcp` suffix.
-      const mcpKey = `${serverPrefix}-mcp`
-      if (state.mcp[mcpKey] === false || state.mcp[serverPrefix] === false) {
+    const segment = mcpServerSegment(toolName, mountedServerNames(mcpCatalog))
+    if (segment !== undefined) {
+      const catalogId = catalogIdOf(segment, mcpCatalog)
+      const toggleKeys = [...new Set(
+        [catalogId, `${segment}-mcp`, segment].filter((key): key is string => key !== undefined && key !== ''),
+      )]
+      if (toggleKeys.some(key => state.mcp[key] === false)) {
+        const suite = catalogId ?? `${segment}-mcp`
         return {
           allowed: false,
-          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${mcpKey}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`,
+          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`,
         }
       }
     }

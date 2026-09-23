@@ -60,6 +60,7 @@ function effectiveRoleRows(settings) {
     ...role.group !== void 0 ? { group: role.group } : {},
     seat: role.seat,
     builtin: role.builtin,
+    spawnable: role.spawnable,
     ...role.available !== void 0 ? { available: role.available } : {}
   })).sort((left, right) => left.id.localeCompare(right.id));
   return { roles };

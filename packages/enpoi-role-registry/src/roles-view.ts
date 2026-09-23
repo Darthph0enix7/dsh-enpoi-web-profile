@@ -14,6 +14,8 @@ export interface EffectiveRoleRow {
   group?: string
   seat: boolean
   builtin: boolean
+  /** Whether the generic delegation tool may spawn this role (false = tool-only). */
+  spawnable: boolean
   available?: readonly string[]
 }
 
@@ -37,6 +39,7 @@ export function effectiveRoleRows(settings: OrchestrationSettingsHandle | undefi
       ...(role.group !== undefined ? { group: role.group } : {}),
       seat: role.seat,
       builtin: role.builtin,
+      spawnable: role.spawnable,
       ...(role.available !== undefined ? { available: role.available } : {}),
     }))
     .sort((left, right) => left.id.localeCompare(right.id))

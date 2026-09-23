@@ -253,6 +253,12 @@ interface McpSettingsOp {
 /** How many times a fenced catalog write re-reads and retries on conflict. */
 const MAX_MCP_WRITE_RETRIES = 3
 
+/** Settings conflict codes the retry loop accepts (service enum + legacy slash spelling). */
+const SETTINGS_CONFLICT_CODES = new Set(['SETTINGS_CONFLICT', 'settings/conflict'])
+
+/** Atomic-route availability: undefined = not probed yet, false = host without it. */
+let atomicRemoveRoute: boolean | undefined
+
 /** Whether a string is an http(s) URL the mount machinery can dial. */
 function isHttpUrl(value: string): boolean {
   try {
@@ -281,7 +287,8 @@ async function postMcpMutation(ops: McpSettingsOp[], expectedRevision: number | 
     if (!res.ok) return { ok: false, conflict: false }
     const json = await res.json() as { result?: { ok?: boolean; error?: { code?: string } } }
     if (json?.result?.ok === true) return { ok: true, conflict: false }
-    return { ok: false, conflict: json?.result?.error?.code === 'settings/conflict' }
+    const code = json?.result?.error?.code
+    return { ok: false, conflict: code !== undefined && SETTINGS_CONFLICT_CODES.has(code) }
   } catch {
     // Transport failure: not a revision conflict, so the caller stops retrying.
     return { ok: false, conflict: false }
@@ -348,10 +355,55 @@ export async function addMcpServer(input: McpServerInput): Promise<McpWriteResul
 }
 
 /**
- * Remove one MCP server from the catalog (`unset` of its
- * `enpoi-orchestration.mcpServers.<id>` key), fenced by the namespace revision
- * read from describe with the same conflict retry as {@link addMcpServer}.
- * The row disappears optimistically and returns when the write does not persist.
+ * Call the host's atomic `enpoiCapabilities.removeMcpServer(id)` route: one
+ * revision-fenced write that also prunes the policy rows the removed server
+ * owned. A 404 means the running host has no such Remote namespace; the route
+ * is remembered as absent and `undefined` lets the caller fall back to the
+ * catalog-only path. A JSON failure from an existing route is reported as-is.
+ * @param id - catalog key to remove.
+ * @returns the route's verdict, or undefined when the route is absent.
+ */
+async function removeMcpServerAtomic(id: string): Promise<McpWriteResult | undefined> {
+  if (atomicRemoveRoute === false) return undefined
+  try {
+    const res = await fetch('/api/enpoiCapabilities.removeMcpServer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'enpoiCapabilities.removeMcpServer',
+        rpcId: `mcp-atomic-remove-${Date.now()}`,
+        payload: { args: { id } },
+      }),
+    })
+    if (res.status === 404) {
+      atomicRemoveRoute = false
+      return undefined
+    }
+    if (!res.ok) return { ok: false, reason: `gateway responded ${res.status}` }
+    const json = await res.json() as { result?: { ok?: boolean; value?: { removed?: boolean; rows?: number }; error?: { message?: unknown } } }
+    const result = json?.result
+    if (result?.ok !== true) {
+      const message = result?.error?.message
+      return { ok: false, reason: typeof message === 'string' && message !== '' ? message : 'atomic remove was rejected' }
+    }
+    atomicRemoveRoute = true
+    // `removed: false` means the entry was already gone (concurrent removal) or
+    // the host had no writable settings service; the 15s heartbeat re-describes
+    // the catalog and restores the row if it still exists.
+    return { ok: true }
+  } catch (error: unknown) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Remove one MCP server. Delegates to the atomic host route when the running
+ * host exposes it (that write also prunes the server's policy rows), falling
+ * back to the catalog-only `unset` of
+ * `enpoi-orchestration.mcpServers.<id>` fenced by the namespace revision with
+ * the same conflict retry. The row disappears optimistically and returns when
+ * the write does not persist.
  * @param id - catalog key to remove.
  * @returns whether the removal persisted, or the reason it did not.
  */
@@ -362,6 +414,19 @@ export async function removeMcpServer(id: string): Promise<McpWriteResult> {
   delete next[id]
   globalMcpServers = next
   notify()
+  const atomic = await removeMcpServerAtomic(id)
+  if (atomic !== undefined) {
+    if (!atomic.ok) {
+      globalMcpServers = previous
+      notify()
+    }
+    return atomic
+  }
+  return await removeMcpServerLegacy(id, previous)
+}
+
+/** Catalog-only removal (hosts without the atomic route), revision-fenced + retried. */
+async function removeMcpServerLegacy(id: string, previous: Record<string, McpServerEntry>): Promise<McpWriteResult> {
   for (let attempt = 0; attempt <= MAX_MCP_WRITE_RETRIES; attempt++) {
     const view = await describeOrchestrationSidebar()
     if (view === undefined) {

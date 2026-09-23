@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   resolvePolicy, splitCompoundCommand, stripEnvPrefixes, matchBashPattern,
-  mcpLadder, SHIPPED_TOOL_DEFAULTS, type PermissionPolicyConfig,
+  mcpLadder, mcpServerNameOf, agentRoleOf, grantProposalFor, standingGrantRecord,
+  SHIPPED_TOOL_DEFAULTS, type PermissionPolicyConfig,
 } from '../src/policy'
 
 const EMPTY: PermissionPolicyConfig = {}
@@ -93,6 +94,20 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'rm x', config: cfg2 }).kind).toBe('ask')
   })
 
+  it('an allowed-always tool grant absorbs the unknown-tool ask (the whiteboard flow)', () => {
+    // Live flow (session 297eded4): whiteboard_read asked from `defaults`,
+    // the host wrote the standing grant on `allowed-always`, and the next
+    // call in the same session resolved allow — no second approval/asked.
+    const ask = resolvePolicy({ toolName: 'whiteboard_read', agent: 'orchestrator', config: { defaults: { unknownTools: 'ask' } } })
+    expect(ask.kind).toBe('ask')
+    const granted = resolvePolicy({
+      toolName: 'whiteboard_read',
+      agent: 'orchestrator',
+      config: { defaults: { unknownTools: 'ask' }, grants: { g: { id: 'g', tool: 'whiteboard_read' } } },
+    })
+    expect(granted).toMatchObject({ kind: 'allow', source: 'grant:tool' })
+  })
+
   it('agent-scoped grants only apply to that agent', () => {
     const cfg: PermissionPolicyConfig = {
       tools: { bash: 'ask' },
@@ -153,6 +168,53 @@ describe('resolution order (Oracle-amended)', () => {
     const cfg2: PermissionPolicyConfig = { tools: { 'mcp__plane__create_page': 'allow', 'mcp__*': 'deny' } }
     expect(resolvePolicy({ toolName: 'mcp__plane__create_page', config: cfg2 }).kind).toBe('allow')
     expect(resolvePolicy({ toolName: 'mcp__ue__do_thing', config: cfg2 }).kind).toBe('deny')
+  })
+
+  it('mcp wildcards resolve the server by the longest known catalog name (a__b ids)', () => {
+    const cfg: PermissionPolicyConfig = { tools: { 'mcp__a__*': 'ask', 'mcp__a__b__*': 'deny' } }
+    // No catalog: the legacy `__` split keys `mcp__a__*`.
+    expect(mcpLadder('mcp__a__b__do_thing', cfg.tools)).toMatchObject({ kind: 'ask', source: 'matrix:mcp__a__*' })
+    // Catalog knows both `a` and `a__b`: the longest prefix wins.
+    expect(mcpLadder('mcp__a__b__do_thing', cfg.tools, ['a', 'a__b'])).toMatchObject({ kind: 'deny', source: 'matrix:mcp__a__b__*' })
+    // A tool whose own name contains `__` still resolves its server.
+    const cfg2: PermissionPolicyConfig = { tools: { 'mcp__a__b__*': 'deny' } }
+    expect(mcpLadder('mcp__a__b__create__page', cfg2.tools, ['a', 'a__b'])).toMatchObject({ kind: 'deny', source: 'matrix:mcp__a__b__*' })
+  })
+
+  it('mcp wildcards: normal catalog id, unknown server fallback, tool-name __', () => {
+    const cfg: PermissionPolicyConfig = { tools: { 'mcp__plane__*': 'ask' } }
+    expect(mcpLadder('mcp__plane__create_page', cfg.tools, ['plane'])).toMatchObject({ kind: 'ask', source: 'matrix:mcp__plane__*' })
+    expect(resolvePolicy({ toolName: 'mcp__plane__create_page', config: cfg, mcpServerNames: ['plane'] }).kind).toBe('ask')
+    // Unknown server (left the catalog): the `__` split still applies.
+    const cfg2: PermissionPolicyConfig = { tools: { 'mcp__ghost__*': 'deny' } }
+    expect(mcpLadder('mcp__ghost__tool', cfg2.tools, ['plane'])).toMatchObject({ kind: 'deny', source: 'matrix:mcp__ghost__*' })
+    // Server name derivation mirrors the mount and the client grouping.
+    expect(mcpServerNameOf('plane-mcp', { serverName: 'plane' })).toBe('plane')
+    expect(mcpServerNameOf('a__b', {})).toBe('a__b')
+    expect(mcpServerNameOf('other-mcp', undefined)).toBe('other')
+  })
+
+  it('a child-role ask resolves the role id and the grant record keeps it without scoping', () => {
+    expect(agentRoleOf(undefined)).toBeUndefined()
+    expect(agentRoleOf({ session: { header: {} } })).toBeUndefined()
+    expect(agentRoleOf({ session: { header: { agentPreset: 'fixer' } } })).toBe('fixer')
+    expect(agentRoleOf({ session: { header: { meta: { agentPreset: 'oracle' } } } })).toBe('oracle')
+    // Projection reader (current preset) outranks the creation-time header.
+    expect(agentRoleOf({ session: { header: { agentPreset: 'fixer' } } }, () => 'designer')).toBe('designer')
+    // Last resort: a logged selection when neither header nor projection exist.
+    expect(agentRoleOf({ session: { ownEvents: () => [{ type: 'agent-preset/selected', data: { agentPreset: 'fixer' } }] } })).toBe('fixer')
+
+    const agent = agentRoleOf({ session: { header: { agentPreset: 'fixer' } } })
+    const proposal = grantProposalFor({ kind: 'ask', reason: 'x', source: 'defaults', grantTier: 'tool' }, 'whiteboard_write', undefined, agent)
+    expect(proposal).toEqual({ tool: 'whiteboard_write', agent: 'fixer' })
+    const record = standingGrantRecord('g-new', proposal, '2026-09-23T00:00:00.000Z')
+    expect(record).toMatchObject({ tool: 'whiteboard_write', agent: 'fixer', global: true })
+    // The recorded agent is audit-only: a different agent is still absorbed.
+    const globalCfg = { defaults: { unknownTools: 'ask' as const }, grants: { 'g-new': record } }
+    expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: globalCfg }).kind).toBe('allow')
+    // An agent-scoped grant (no `global`) still scopes, exactly as before.
+    const scopedCfg = { defaults: { unknownTools: 'ask' as const }, grants: { g2: { id: 'g2', tool: 'whiteboard_write', agent: 'fixer' } } }
+    expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: scopedCfg }).kind).toBe('ask')
   })
 
   it('unconfigured tools default to ask; unpatterned bash runs free (catch-all)', () => {

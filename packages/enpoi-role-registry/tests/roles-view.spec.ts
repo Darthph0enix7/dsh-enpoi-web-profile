@@ -20,7 +20,12 @@ describe('enpoiRoles effectiveRoleRows', () => {
     expect(fixer?.builtin).toBe(true)
     expect(fixer?.seat).toBe(true)
     expect(fixer?.persona).toContain('Fixer')
-    expect(roles.map(role => role.id)).toContain('oracle')
+    expect(fixer?.spawnable).toBe(true)
+    const oracle = roles.find(role => role.id === 'oracle')
+    expect(oracle).toBeDefined()
+    // The shipped Oracle is tool-only: listed for its seat, never delegated.
+    expect(oracle?.spawnable).toBe(false)
+    expect(oracle?.seat).toBe(true)
   })
 
   it('overlays settings persona/label and adds a user-defined role', () => {

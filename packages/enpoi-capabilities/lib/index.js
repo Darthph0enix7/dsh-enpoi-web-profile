@@ -1,3 +1,507 @@
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
+var __export = (target, all) => {
+  for (var name2 in all)
+    __defProp(target, name2, { get: all[name2], enumerable: true });
+};
+var __decoratorStart = (base) => [, , , __create(base?.[__knownSymbol("metadata")] ?? null)];
+var __decoratorStrings = ["class", "method", "getter", "setter", "accessor", "field", "value", "get", "set"];
+var __expectFn = (fn) => fn !== void 0 && typeof fn !== "function" ? __typeError("Function expected") : fn;
+var __decoratorContext = (kind, name2, done, metadata, fns) => ({ kind: __decoratorStrings[kind], name: name2, metadata, addInitializer: (fn) => done._ ? __typeError("Already initialized") : fns.push(__expectFn(fn || null)) });
+var __decoratorMetadata = (array, target) => __defNormalProp(target, __knownSymbol("metadata"), array[3]);
+var __runInitializers = (array, flags, self, value) => {
+  for (var i = 0, fns = array[flags >> 1], n = fns && fns.length; i < n; i++) flags & 1 ? fns[i].call(self) : value = fns[i].call(self, value);
+  return value;
+};
+var __decorateElement = (array, flags, name2, decorators, target, extra) => {
+  var fn, it, done, ctx, access, k = flags & 7, s = !!(flags & 8), p = !!(flags & 16);
+  var j = k > 3 ? array.length + 1 : k ? s ? 1 : 2 : 0, key = __decoratorStrings[k + 5];
+  var initializers = k > 3 && (array[j - 1] = []), extraInitializers = array[j] || (array[j] = []);
+  var desc = k && (!p && !s && (target = target.prototype), k < 5 && (k > 3 || !p) && __getOwnPropDesc(k < 4 ? target : { get [name2]() {
+    return __privateGet(this, extra);
+  }, set [name2](x) {
+    return __privateSet(this, extra, x);
+  } }, name2));
+  k ? p && k < 4 && __name(extra, (k > 2 ? "set " : k > 1 ? "get " : "") + name2) : __name(target, name2);
+  for (var i = decorators.length - 1; i >= 0; i--) {
+    ctx = __decoratorContext(k, name2, done = {}, array[3], extraInitializers);
+    if (k) {
+      ctx.static = s, ctx.private = p, access = ctx.access = { has: p ? (x) => __privateIn(target, x) : (x) => name2 in x };
+      if (k ^ 3) access.get = p ? (x) => (k ^ 1 ? __privateGet : __privateMethod)(x, target, k ^ 4 ? extra : desc.get) : (x) => x[name2];
+      if (k > 2) access.set = p ? (x, y) => __privateSet(x, target, y, k ^ 4 ? extra : desc.set) : (x, y) => x[name2] = y;
+    }
+    it = (0, decorators[i])(k ? k < 4 ? p ? extra : desc[key] : k > 4 ? void 0 : { get: desc.get, set: desc.set } : target, ctx), done._ = 1;
+    if (k ^ 4 || it === void 0) __expectFn(it) && (k > 4 ? initializers.unshift(it) : k ? p ? extra = it : desc[key] = it : target = it);
+    else if (typeof it !== "object" || it === null) __typeError("Object expected");
+    else __expectFn(fn = it.get) && (desc.get = fn), __expectFn(fn = it.set) && (desc.set = fn), __expectFn(fn = it.init) && initializers.unshift(fn);
+  }
+  return k || __decoratorMetadata(array, target), desc && __defProp(target, name2, desc), p ? k ^ 4 ? extra : desc : target;
+};
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the "in" operator on this value') : member.has(obj);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
+
+// src/policy.ts
+function splitCompoundCommand(command) {
+  const parts = [];
+  let current = "";
+  let quote = null;
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "\n") {
+      parts.push(current);
+      current = "";
+      i += 1;
+      continue;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === "&&" || two === "||") {
+      parts.push(current);
+      current = "";
+      i += 2;
+      continue;
+    }
+    if (ch === ";" || ch === "|") {
+      parts.push(current);
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+function stripEnvPrefixes(subCommand) {
+  const tokens = subCommand.trim().split(/\s+/);
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? "")) i += 1;
+  return i > 0 ? tokens.slice(i).join(" ") : subCommand.trim();
+}
+function matchBashPattern(pattern, subCommand) {
+  const p = pattern.trim();
+  if (p === "*") return true;
+  const tokens = subCommand.split(/\s+/);
+  const argv0 = tokens[0] ?? "";
+  if (!p.includes(" ") && !p.includes("*")) return argv0 === p;
+  if (p.endsWith("*") && !p.slice(0, -1).includes(" ")) {
+    return argv0 === p.slice(0, -1);
+  }
+  const rx = new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, (ch) => ch === "*" ? "[\\s\\S]*" : `\\${ch}`)}$`);
+  return rx.test(subCommand);
+}
+function mcpServerNameOf(id, def) {
+  return typeof def?.serverName === "string" && def.serverName !== "" ? def.serverName : id.replace(/-mcp$/, "");
+}
+function mcpServerSegment(toolName, knownServers) {
+  if (toolName.startsWith("mcp__") && knownServers !== void 0) {
+    const known = knownServers.filter((server) => server !== "" && toolName.startsWith(`mcp__${server}__`)).sort((left, right) => right.length - left.length)[0];
+    if (known !== void 0) return known;
+  }
+  const parts = toolName.split("__");
+  return parts.length >= 3 ? parts[1] : void 0;
+}
+function mcpLadder(toolName, table, knownServers) {
+  if (table === void 0) return null;
+  const check = (key) => {
+    const policy = table[key];
+    if (policy === void 0) return null;
+    return policy === "deny" ? { kind: "deny", reason: `operator policy denies ${toolName}`, source: `matrix:${key}` } : { kind: "ask", reason: `operator policy asks for ${key}`, source: `matrix:${key}`, grantTier: "tool" };
+  };
+  const exact = check(toolName);
+  if (exact !== null) return exact;
+  const server = mcpServerSegment(toolName, knownServers);
+  if (server !== void 0) {
+    const hit = check(`mcp__${server}__*`);
+    if (hit !== null) return hit;
+  }
+  if (toolName.startsWith("mcp__")) {
+    const family = check("mcp__*");
+    if (family !== null) return family;
+  }
+  return null;
+}
+function grantsShortCircuit(toolName, agent, grants, tier, pattern) {
+  if (grants === void 0) return false;
+  for (const grant of Object.values(grants)) {
+    if (grant.tool !== toolName) continue;
+    if (tier === "pattern") {
+      if (grant.pattern !== pattern) continue;
+    } else {
+      if (grant.pattern !== void 0) continue;
+    }
+    if (grant.global !== true && grant.agent !== void 0 && grant.agent !== agent) continue;
+    return true;
+  }
+  return false;
+}
+function decideSubCommand(sub, config, agent) {
+  const agentCfg = agent !== void 0 ? config.agents?.[agent] : void 0;
+  const agentPatterns = agentCfg?.bashPatterns;
+  if (agentPatterns !== void 0) {
+    for (const { pattern, policy } of agentPatterns) {
+      if (!matchBashPattern(pattern, sub)) continue;
+      if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `agent pattern:${pattern}` };
+      if (policy === "ask") return { kind: "ask", reason: `bash rule "${pattern}" requires approval`, source: `agent pattern:${pattern}`, grantTier: "pattern", pattern };
+      return { kind: "allow", source: `agent pattern:${pattern}` };
+    }
+  }
+  const agentTool = agentCfg?.tools?.bash;
+  if (agentTool !== void 0) {
+    if (agentTool === "deny") return { kind: "deny", reason: `agent policy denies bash`, source: `agent:${agent}` };
+    if (agentTool === "ask") return { kind: "ask", reason: `agent policy asks for bash`, source: `agent:${agent}`, grantTier: "tool" };
+    return { kind: "allow", source: `agent:${agent}` };
+  }
+  const globalPatterns = [...config.bashPatterns ?? [], ...SHIPPED_BASH_PATTERNS];
+  for (const { pattern, policy } of globalPatterns) {
+    if (!matchBashPattern(pattern, sub)) continue;
+    if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` };
+    if (policy === "ask") return { kind: "ask", reason: `bash rule "${pattern}" requires approval`, source: `pattern:${pattern}`, grantTier: "pattern", pattern };
+    return { kind: "allow", source: `pattern:${pattern}` };
+  }
+  const globalTool = config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
+  if (globalTool === "deny") return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
+  if (globalTool === "ask") return { kind: "ask", reason: "operator policy asks for bash", source: "matrix:global", grantTier: "tool" };
+  return { kind: "allow", source: "matrix:global" };
+}
+function mcpPolicyRemovalOps(server, config) {
+  const prefix = `mcp__${server}__`;
+  const ops = [];
+  for (const key of Object.keys(config?.tools ?? {})) {
+    if (key.startsWith(prefix)) ops.push({ op: "unset", path: ["permissions", "tools", key] });
+  }
+  for (const [agent, agentCfg] of Object.entries(config?.agents ?? {})) {
+    for (const key of Object.keys(agentCfg?.tools ?? {})) {
+      if (key.startsWith(prefix)) ops.push({ op: "unset", path: ["permissions", "agents", agent, "tools", key] });
+    }
+  }
+  return ops;
+}
+function agentRoleOf(agent, readCurrentPreset) {
+  if (agent === void 0) return void 0;
+  for (const candidate of [agent.agentPreset, agent.preset, agent.name, agent.label]) {
+    if (typeof candidate === "string" && candidate !== "") return candidate;
+  }
+  const session = agent.session;
+  if (session !== void 0 && readCurrentPreset !== void 0) {
+    try {
+      const current = readCurrentPreset(session);
+      if (typeof current === "string" && current !== "") return current;
+    } catch {
+    }
+  }
+  const header = session?.header;
+  const created = typeof header?.agentPreset === "string" && header.agentPreset !== "" ? header.agentPreset : header?.meta?.agentPreset;
+  if (typeof created === "string" && created !== "") return created;
+  try {
+    const events = session?.ownEvents?.() ?? [];
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const value = events[i]?.data?.agentPreset;
+      if (events[i]?.type === "agent-preset/selected" && typeof value === "string" && value !== "") return value;
+    }
+  } catch {
+  }
+  return void 0;
+}
+function resolvePolicy(input) {
+  const { toolName, command, sandboxMode } = input;
+  const agent = input.agent ?? "(unknown)";
+  if (sandboxMode === "read-only" && MUTATION_TOOLS.has(toolName)) {
+    return { kind: "deny", reason: `read-only session: ${toolName} mutations are blocked`, source: "session:read-only" };
+  }
+  if (toolName === "bash") {
+    if (command === void 0 || command.trim().length === 0) {
+      return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
+    }
+    const subs = splitCompoundCommand(command);
+    if (subs.length === 0) return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
+    let sawAsk = null;
+    let firstAllow = null;
+    for (const raw of subs) {
+      const sub = stripEnvPrefixes(raw);
+      const subDecision = decideSubCommand(sub, input.config, agent);
+      if (subDecision.kind === "deny") {
+        const suffix = subs.length > 1 ? " (part of compound command)" : "";
+        return { kind: "deny", reason: `${subDecision.reason}${suffix}`, source: subDecision.source };
+      }
+      if (subDecision.kind === "ask" && sawAsk === null) sawAsk = subDecision;
+      if (subDecision.kind === "allow" && firstAllow === null) firstAllow = subDecision;
+    }
+    if (sawAsk !== null) {
+      const who = input.agent;
+      if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0 && grantsShortCircuit(toolName, who, input.config.grants, "pattern", sawAsk.pattern)) {
+        return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
+      }
+      if (sawAsk.grantTier === "tool" && grantsShortCircuit(toolName, who, input.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
+      }
+      return sawAsk;
+    }
+    const opaque = subs.map(stripEnvPrefixes).find((sub) => {
+      const argv0 = sub.split(/\s+/)[0] ?? "";
+      if (OPAQUE_EXECUTORS.has(argv0)) return true;
+      return INLINE_INTERPRETERS.test(argv0) && /(?:^|\s)(?:-c|-e|--eval)\b/.test(sub);
+    });
+    if (opaque !== void 0) {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
+        return { kind: "allow", source: "grant:command" };
+      }
+      return {
+        kind: "ask",
+        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code \u2014 approve explicitly`,
+        source: "scan:opaque-executor",
+        grantTier: "pattern",
+        pattern: command
+      };
+    }
+    if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
+        return { kind: "allow", source: "grant:command" };
+      }
+      return {
+        kind: "ask",
+        reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly",
+        source: "scan:hidden-danger",
+        grantTier: "pattern",
+        pattern: command
+      };
+    }
+    return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
+  }
+  const agentCfg = input.agent !== void 0 ? input.config.agents?.[input.agent] : void 0;
+  const agentPolicy = agentCfg?.tools?.[toolName];
+  if (agentPolicy !== void 0) {
+    if (agentPolicy === "deny") return { kind: "deny", reason: `agent policy denies ${toolName}`, source: `agent:${agent}` };
+    if (agentPolicy === "ask") {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
+      }
+      return { kind: "ask", reason: `agent policy asks for ${toolName}`, source: `agent:${agent}`, grantTier: "tool" };
+    }
+    return { kind: "allow", source: `agent:${agent}` };
+  }
+  const globalPolicy = input.config.tools?.[toolName] ?? SHIPPED_TOOL_DEFAULTS[toolName];
+  if (globalPolicy !== void 0) {
+    if (globalPolicy === "deny") return { kind: "deny", reason: `operator policy denies ${toolName}`, source: "matrix:global" };
+    if (globalPolicy === "ask") {
+      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
+      }
+      return { kind: "ask", reason: `operator policy asks for ${toolName}`, source: "matrix:global", grantTier: "tool" };
+    }
+    return { kind: "allow", source: "matrix:global" };
+  }
+  if (isMcpToolName(toolName)) {
+    const ladder = mcpLadder(toolName, input.config.tools, input.mcpServerNames);
+    if (ladder !== null) return ladder;
+  }
+  const fallback = input.config.defaults?.unknownTools ?? "ask";
+  if (fallback === "deny") return { kind: "deny", reason: `unconfigured tool ${toolName} denied by default`, source: "defaults" };
+  if (fallback === "ask") {
+    if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
+      return { kind: "allow", source: "grant:tool" };
+    }
+    return { kind: "ask", reason: `unconfigured tool ${toolName} requires approval (default)`, source: "defaults", grantTier: "tool" };
+  }
+  return { kind: "allow", source: "defaults" };
+}
+function isMcpToolName(toolName) {
+  return toolName.startsWith("mcp__");
+}
+function grantProposalFor(decision, toolName, command, agent) {
+  if (decision.grantTier === "pattern" && decision.pattern !== void 0) {
+    return { tool: toolName, pattern: decision.pattern, agent };
+  }
+  return { tool: toolName, agent };
+}
+function standingGrantRecord(id, proposal, createdAt) {
+  return {
+    id,
+    tool: proposal.tool,
+    ...proposal.pattern !== void 0 ? { pattern: proposal.pattern } : {},
+    ...proposal.agent !== void 0 ? { agent: proposal.agent } : {},
+    global: true,
+    createdAt
+  };
+}
+var MUTATION_TOOLS, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERBS, OPAQUE_EXECUTORS, INLINE_INTERPRETERS;
+var init_policy = __esm({
+  "src/policy.ts"() {
+    "use strict";
+    MUTATION_TOOLS = /* @__PURE__ */ new Set(["bash", "edit", "write", "str_replace_editor"]);
+    SHIPPED_TOOL_DEFAULTS = {
+      read: "allow",
+      glob: "allow",
+      grep: "allow",
+      read_image: "allow",
+      web_search: "allow",
+      web_fetch: "allow",
+      todo_write: "allow",
+      todo_read: "allow",
+      memory_search: "allow",
+      memory_save: "allow",
+      memory_rescind: "allow",
+      memory_confirm: "allow",
+      oracle_review: "allow",
+      request_evidence: "allow",
+      roundtable: "allow",
+      chorus: "allow",
+      subagent: "allow",
+      task: "allow",
+      job_output: "allow",
+      job_list: "allow",
+      job_kill: "ask",
+      skill: "allow",
+      ask_user_question: "allow",
+      edit: "allow",
+      write: "allow",
+      bash: "ask",
+      str_replace_editor: "ask"
+    };
+    SHIPPED_BASH_PATTERNS = [
+      { pattern: "git *", policy: "allow" },
+      { pattern: "rm", policy: "ask" },
+      { pattern: "rm *", policy: "ask" },
+      { pattern: "rmdir", policy: "ask" },
+      { pattern: "rmdir *", policy: "ask" },
+      { pattern: "unlink", policy: "ask" },
+      { pattern: "unlink *", policy: "ask" },
+      { pattern: "dd*", policy: "ask" },
+      { pattern: "mkfs*", policy: "ask" },
+      { pattern: "fdisk", policy: "ask" },
+      { pattern: "fdisk *", policy: "ask" },
+      { pattern: "shutdown", policy: "ask" },
+      { pattern: "reboot", policy: "ask" },
+      { pattern: "poweroff", policy: "ask" },
+      { pattern: "halt", policy: "ask" },
+      { pattern: "chmod -R *", policy: "ask" },
+      { pattern: "chown -R *", policy: "ask" },
+      // The OpenCode catch-all: every command not explicitly listed runs free.
+      // Only the dangerous list above asks.
+      { pattern: "*", policy: "allow" }
+    ];
+    HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</;
+    DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/;
+    OPAQUE_EXECUTORS = /* @__PURE__ */ new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "source", "."]);
+    INLINE_INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/;
+  }
+});
+
+// src/mcp-tools.ts
+function isConflict(error) {
+  const code = error?.code;
+  return code === "SETTINGS_CONFLICT" || code === "settings/conflict";
+}
+function canFenceMcpWrites(settings) {
+  return settings?.mutate !== void 0;
+}
+function mcpToolNames(names) {
+  return names.filter((name2) => typeof name2 === "string" && name2.startsWith(MCP_TOOL_PREFIX)).sort((left, right) => left.localeCompare(right));
+}
+async function removeMcpServerFenced(settings, id, ns = ORCHESTRATION_NS) {
+  if (!canFenceMcpWrites(settings)) return { removed: false, rows: 0 };
+  for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
+    const value = settings.get?.(ns);
+    const def = (value?.mcpServers ?? {})[id];
+    if (def === void 0) return { removed: false, rows: 0 };
+    const server = mcpServerNameOf(id, def);
+    const ops = [
+      { op: "unset", path: ["mcpServers", id] },
+      ...mcpPolicyRemovalOps(server, value?.permissions)
+    ];
+    const revision = settings.describe?.().find((entry) => entry.ns === ns)?.revision;
+    try {
+      await settings.mutate(ns, ops, revision);
+      return { removed: true, rows: ops.length - 1 };
+    } catch (error) {
+      if (isConflict(error) && attempt < MAX_WRITE_ATTEMPTS - 1) continue;
+      throw error;
+    }
+  }
+  return { removed: false, rows: 0 };
+}
+var MCP_TOOL_PREFIX, ORCHESTRATION_NS, MAX_WRITE_ATTEMPTS;
+var init_mcp_tools = __esm({
+  "src/mcp-tools.ts"() {
+    "use strict";
+    init_policy();
+    MCP_TOOL_PREFIX = "mcp__";
+    ORCHESTRATION_NS = "enpoi-orchestration";
+    MAX_WRITE_ATTEMPTS = 3;
+  }
+});
+
+// src/rpc.ts
+var rpc_exports = {};
+__export(rpc_exports, {
+  EnpoiCapabilitiesService: () => EnpoiCapabilitiesService,
+  mountCapabilitiesRemote: () => mountCapabilitiesRemote
+});
+import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+function mountCapabilitiesRemote(ctx) {
+  ctx.plugin(EnpoiCapabilitiesService);
+}
+var _removeMcpServer_dec, _mcpTools_dec, _a, _init, EnpoiCapabilitiesService;
+var init_rpc = __esm({
+  "src/rpc.ts"() {
+    "use strict";
+    init_mcp_tools();
+    EnpoiCapabilitiesService = class extends (_a = TypertRemoteService, _mcpTools_dec = [Remote], _removeMcpServer_dec = [Remote], _a) {
+      /**
+       * @param ctx - owning Host Context (the Typert binding is installed by the base).
+       */
+      constructor(ctx) {
+        super(ctx, "enpoiCapabilities");
+        __runInitializers(_init, 5, this);
+      }
+      async mcpTools() {
+        try {
+          const tools = this.ctx.get("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          return { tools: mcpToolNames(schemas.map((schema) => schema.name)) };
+        } catch {
+          return { tools: [] };
+        }
+      }
+      async removeMcpServer(id) {
+        const settings = this.ctx.get("settings");
+        return await removeMcpServerFenced(settings, id);
+      }
+    };
+    _init = __decoratorStart(_a);
+    __decorateElement(_init, 1, "mcpTools", _mcpTools_dec, EnpoiCapabilitiesService);
+    __decorateElement(_init, 1, "removeMcpServer", _removeMcpServer_dec, EnpoiCapabilitiesService);
+    __decoratorMetadata(_init, EnpoiCapabilitiesService);
+  }
+});
+
 // src/index.ts
 import Schema from "schemastery";
 
@@ -108,7 +612,17 @@ function filterSkillCatalogMessages(messages, disabledSkillIds, published, sessi
 }
 
 // src/enforcement.ts
-function evaluateToolCall(toolName, args, state) {
+init_policy();
+function mountedServerNames(catalog) {
+  return Object.entries(catalog ?? {}).map(([id, def]) => mcpServerNameOf(id, def));
+}
+function catalogIdOf(segment, catalog) {
+  for (const [id, def] of Object.entries(catalog ?? {})) {
+    if (mcpServerNameOf(id, def) === segment) return id;
+  }
+  return void 0;
+}
+function evaluateToolCall(toolName, args, state, mcpCatalog) {
   if (PROTECTED_CAPABILITIES.has(toolName)) {
     return { allowed: true };
   }
@@ -137,14 +651,17 @@ function evaluateToolCall(toolName, args, state) {
     }
   }
   if (toolName.startsWith("mcp__")) {
-    const parts = toolName.split("__");
-    const serverPrefix = parts[1]?.toLowerCase();
-    if (serverPrefix) {
-      const mcpKey = `${serverPrefix}-mcp`;
-      if (state.mcp[mcpKey] === false || state.mcp[serverPrefix] === false) {
+    const segment = mcpServerSegment(toolName, mountedServerNames(mcpCatalog));
+    if (segment !== void 0) {
+      const catalogId = catalogIdOf(segment, mcpCatalog);
+      const toggleKeys = [...new Set(
+        [catalogId, `${segment}-mcp`, segment].filter((key) => key !== void 0 && key !== "")
+      )];
+      if (toggleKeys.some((key) => state.mcp[key] === false)) {
+        const suite = catalogId ?? `${segment}-mcp`;
         return {
           allowed: false,
-          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${mcpKey}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`
+          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`
         };
       }
     }
@@ -152,301 +669,9 @@ function evaluateToolCall(toolName, args, state) {
   return { allowed: true };
 }
 
-// src/policy.ts
-var MUTATION_TOOLS = /* @__PURE__ */ new Set(["bash", "edit", "write", "str_replace_editor"]);
-var SHIPPED_TOOL_DEFAULTS = {
-  read: "allow",
-  glob: "allow",
-  grep: "allow",
-  read_image: "allow",
-  web_search: "allow",
-  web_fetch: "allow",
-  todo_write: "allow",
-  todo_read: "allow",
-  memory_search: "allow",
-  memory_save: "allow",
-  memory_rescind: "allow",
-  memory_confirm: "allow",
-  oracle_review: "allow",
-  request_evidence: "allow",
-  roundtable: "allow",
-  chorus: "allow",
-  subagent: "allow",
-  task: "allow",
-  job_output: "allow",
-  job_list: "allow",
-  job_kill: "ask",
-  skill: "allow",
-  ask_user_question: "allow",
-  edit: "allow",
-  write: "allow",
-  bash: "ask",
-  str_replace_editor: "ask"
-};
-var SHIPPED_BASH_PATTERNS = [
-  { pattern: "git *", policy: "allow" },
-  { pattern: "rm", policy: "ask" },
-  { pattern: "rm *", policy: "ask" },
-  { pattern: "rmdir", policy: "ask" },
-  { pattern: "rmdir *", policy: "ask" },
-  { pattern: "unlink", policy: "ask" },
-  { pattern: "unlink *", policy: "ask" },
-  { pattern: "dd*", policy: "ask" },
-  { pattern: "mkfs*", policy: "ask" },
-  { pattern: "fdisk", policy: "ask" },
-  { pattern: "fdisk *", policy: "ask" },
-  { pattern: "shutdown", policy: "ask" },
-  { pattern: "reboot", policy: "ask" },
-  { pattern: "poweroff", policy: "ask" },
-  { pattern: "halt", policy: "ask" },
-  { pattern: "chmod -R *", policy: "ask" },
-  { pattern: "chown -R *", policy: "ask" },
-  // The OpenCode catch-all: every command not explicitly listed runs free.
-  // Only the dangerous list above asks.
-  { pattern: "*", policy: "allow" }
-];
-function splitCompoundCommand(command) {
-  const parts = [];
-  let current = "";
-  let quote = null;
-  let i = 0;
-  while (i < command.length) {
-    const ch = command[i];
-    if (quote !== null) {
-      if (ch === quote) quote = null;
-      current += ch;
-      i += 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      i += 1;
-      continue;
-    }
-    if (ch === "\n") {
-      parts.push(current);
-      current = "";
-      i += 1;
-      continue;
-    }
-    const two = command.slice(i, i + 2);
-    if (two === "&&" || two === "||") {
-      parts.push(current);
-      current = "";
-      i += 2;
-      continue;
-    }
-    if (ch === ";" || ch === "|") {
-      parts.push(current);
-      current = "";
-      i += 1;
-      continue;
-    }
-    current += ch;
-    i += 1;
-  }
-  parts.push(current);
-  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
-}
-function stripEnvPrefixes(subCommand) {
-  const tokens = subCommand.trim().split(/\s+/);
-  let i = 0;
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? "")) i += 1;
-  return i > 0 ? tokens.slice(i).join(" ") : subCommand.trim();
-}
-function matchBashPattern(pattern, subCommand) {
-  const p = pattern.trim();
-  if (p === "*") return true;
-  const tokens = subCommand.split(/\s+/);
-  const argv0 = tokens[0] ?? "";
-  if (!p.includes(" ") && !p.includes("*")) return argv0 === p;
-  if (p.endsWith("*") && !p.slice(0, -1).includes(" ")) {
-    return argv0 === p.slice(0, -1);
-  }
-  const rx = new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, (ch) => ch === "*" ? "[\\s\\S]*" : `\\${ch}`)}$`);
-  return rx.test(subCommand);
-}
-function mcpLadder(toolName, table) {
-  if (table === void 0) return null;
-  const check = (key) => {
-    const policy = table[key];
-    if (policy === void 0) return null;
-    return policy === "deny" ? { kind: "deny", reason: `operator policy denies ${toolName}`, source: `matrix:${key}` } : { kind: "ask", reason: `operator policy asks for ${key}`, source: `matrix:${key}`, grantTier: "tool" };
-  };
-  const exact = check(toolName);
-  if (exact !== null) return exact;
-  const parts = toolName.split("__");
-  if (parts.length >= 3) {
-    const server = check(`mcp__${parts[1]}__*`);
-    if (server !== null) return server;
-  }
-  if (toolName.startsWith("mcp__")) {
-    const family = check("mcp__*");
-    if (family !== null) return family;
-  }
-  return null;
-}
-function grantsShortCircuit(toolName, agent, grants, tier, pattern) {
-  if (grants === void 0) return false;
-  for (const grant of Object.values(grants)) {
-    if (grant.tool !== toolName) continue;
-    if (tier === "pattern") {
-      if (grant.pattern !== pattern) continue;
-    } else {
-      if (grant.pattern !== void 0) continue;
-    }
-    if (grant.agent !== void 0 && grant.agent !== agent) continue;
-    return true;
-  }
-  return false;
-}
-var HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</;
-var DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/;
-var OPAQUE_EXECUTORS = /* @__PURE__ */ new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "source", "."]);
-var INLINE_INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/;
-function decideSubCommand(sub, config, agent) {
-  const agentCfg = agent !== void 0 ? config.agents?.[agent] : void 0;
-  const agentPatterns = agentCfg?.bashPatterns;
-  if (agentPatterns !== void 0) {
-    for (const { pattern, policy } of agentPatterns) {
-      if (!matchBashPattern(pattern, sub)) continue;
-      if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `agent pattern:${pattern}` };
-      if (policy === "ask") return { kind: "ask", reason: `bash rule "${pattern}" requires approval`, source: `agent pattern:${pattern}`, grantTier: "pattern", pattern };
-      return { kind: "allow", source: `agent pattern:${pattern}` };
-    }
-  }
-  const agentTool = agentCfg?.tools?.bash;
-  if (agentTool !== void 0) {
-    if (agentTool === "deny") return { kind: "deny", reason: `agent policy denies bash`, source: `agent:${agent}` };
-    if (agentTool === "ask") return { kind: "ask", reason: `agent policy asks for bash`, source: `agent:${agent}`, grantTier: "tool" };
-    return { kind: "allow", source: `agent:${agent}` };
-  }
-  const globalPatterns = [...config.bashPatterns ?? [], ...SHIPPED_BASH_PATTERNS];
-  for (const { pattern, policy } of globalPatterns) {
-    if (!matchBashPattern(pattern, sub)) continue;
-    if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` };
-    if (policy === "ask") return { kind: "ask", reason: `bash rule "${pattern}" requires approval`, source: `pattern:${pattern}`, grantTier: "pattern", pattern };
-    return { kind: "allow", source: `pattern:${pattern}` };
-  }
-  const globalTool = config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
-  if (globalTool === "deny") return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
-  if (globalTool === "ask") return { kind: "ask", reason: "operator policy asks for bash", source: "matrix:global", grantTier: "tool" };
-  return { kind: "allow", source: "matrix:global" };
-}
-function resolvePolicy(input) {
-  const { toolName, command, sandboxMode } = input;
-  const agent = input.agent ?? "(unknown)";
-  if (sandboxMode === "read-only" && MUTATION_TOOLS.has(toolName)) {
-    return { kind: "deny", reason: `read-only session: ${toolName} mutations are blocked`, source: "session:read-only" };
-  }
-  if (toolName === "bash") {
-    if (command === void 0 || command.trim().length === 0) {
-      return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
-    }
-    const subs = splitCompoundCommand(command);
-    if (subs.length === 0) return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
-    let sawAsk = null;
-    let firstAllow = null;
-    for (const raw of subs) {
-      const sub = stripEnvPrefixes(raw);
-      const subDecision = decideSubCommand(sub, input.config, agent);
-      if (subDecision.kind === "deny") {
-        const suffix = subs.length > 1 ? " (part of compound command)" : "";
-        return { kind: "deny", reason: `${subDecision.reason}${suffix}`, source: subDecision.source };
-      }
-      if (subDecision.kind === "ask" && sawAsk === null) sawAsk = subDecision;
-      if (subDecision.kind === "allow" && firstAllow === null) firstAllow = subDecision;
-    }
-    if (sawAsk !== null) {
-      const who = input.agent;
-      if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0 && grantsShortCircuit(toolName, who, input.config.grants, "pattern", sawAsk.pattern)) {
-        return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
-      }
-      if (sawAsk.grantTier === "tool" && grantsShortCircuit(toolName, who, input.config.grants, "tool", void 0)) {
-        return { kind: "allow", source: "grant:tool" };
-      }
-      return sawAsk;
-    }
-    const opaque = subs.map(stripEnvPrefixes).find((sub) => {
-      const argv0 = sub.split(/\s+/)[0] ?? "";
-      if (OPAQUE_EXECUTORS.has(argv0)) return true;
-      return INLINE_INTERPRETERS.test(argv0) && /(?:^|\s)(?:-c|-e|--eval)\b/.test(sub);
-    });
-    if (opaque !== void 0) {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
-        return { kind: "allow", source: "grant:command" };
-      }
-      return {
-        kind: "ask",
-        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code \u2014 approve explicitly`,
-        source: "scan:opaque-executor",
-        grantTier: "pattern",
-        pattern: command
-      };
-    }
-    if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
-        return { kind: "allow", source: "grant:command" };
-      }
-      return {
-        kind: "ask",
-        reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly",
-        source: "scan:hidden-danger",
-        grantTier: "pattern",
-        pattern: command
-      };
-    }
-    return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
-  }
-  const agentCfg = input.agent !== void 0 ? input.config.agents?.[input.agent] : void 0;
-  const agentPolicy = agentCfg?.tools?.[toolName];
-  if (agentPolicy !== void 0) {
-    if (agentPolicy === "deny") return { kind: "deny", reason: `agent policy denies ${toolName}`, source: `agent:${agent}` };
-    if (agentPolicy === "ask") {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
-        return { kind: "allow", source: "grant:tool" };
-      }
-      return { kind: "ask", reason: `agent policy asks for ${toolName}`, source: `agent:${agent}`, grantTier: "tool" };
-    }
-    return { kind: "allow", source: `agent:${agent}` };
-  }
-  const globalPolicy = input.config.tools?.[toolName] ?? SHIPPED_TOOL_DEFAULTS[toolName];
-  if (globalPolicy !== void 0) {
-    if (globalPolicy === "deny") return { kind: "deny", reason: `operator policy denies ${toolName}`, source: "matrix:global" };
-    if (globalPolicy === "ask") {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
-        return { kind: "allow", source: "grant:tool" };
-      }
-      return { kind: "ask", reason: `operator policy asks for ${toolName}`, source: "matrix:global", grantTier: "tool" };
-    }
-    return { kind: "allow", source: "matrix:global" };
-  }
-  if (isMcpToolName(toolName)) {
-    const ladder = mcpLadder(toolName, input.config.tools);
-    if (ladder !== null) return ladder;
-  }
-  const fallback = input.config.defaults?.unknownTools ?? "ask";
-  if (fallback === "deny") return { kind: "deny", reason: `unconfigured tool ${toolName} denied by default`, source: "defaults" };
-  if (fallback === "ask") {
-    if (grantsShortCircuit(toolName, input.agent, input.config.grants, "tool", void 0)) {
-      return { kind: "allow", source: "grant:tool" };
-    }
-    return { kind: "ask", reason: `unconfigured tool ${toolName} requires approval (default)`, source: "defaults", grantTier: "tool" };
-  }
-  return { kind: "allow", source: "defaults" };
-}
-function isMcpToolName(toolName) {
-  return toolName.startsWith("mcp__");
-}
-function grantProposalFor(decision, toolName, command, agent) {
-  if (decision.grantTier === "pattern" && decision.pattern !== void 0) {
-    return { tool: toolName, pattern: decision.pattern, agent };
-  }
-  return { tool: toolName, agent };
-}
-
 // src/index.ts
+init_policy();
+init_mcp_tools();
 var publishedCatalog = /* @__PURE__ */ new Map();
 var name = "enpoi-capabilities";
 var inject = ["tools", "systemPrompt", "settings", "timer"];
@@ -488,6 +713,23 @@ var OrchestrationSettingsSchema = Schema.object({
   // key rather than relying on unknown-key survival.
   whiteboard: Schema.any()
 });
+async function pruneRemovedMcpPolicyRows(settings, servers, readConfig) {
+  if (!canFenceMcpWrites(settings) || servers.length === 0) return 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const ops = servers.flatMap((server) => mcpPolicyRemovalOps(server, readConfig()));
+    if (ops.length === 0) return 0;
+    const revision = settings.describe?.().find((entry) => entry.ns === ORCH_NS)?.revision;
+    try {
+      await settings.mutate(ORCH_NS, ops, revision);
+      return ops.length;
+    } catch (error) {
+      const conflict = error;
+      if ((conflict?.code === "SETTINGS_CONFLICT" || conflict?.code === "settings/conflict") && attempt < 2) continue;
+      throw error;
+    }
+  }
+  return 0;
+}
 function apply(ctx) {
   try {
     const settingsApi = ctx.get("settings");
@@ -504,8 +746,17 @@ function apply(ctx) {
       return void 0;
     }
   }
+  void Promise.resolve().then(() => (init_rpc(), rpc_exports)).then((remote) => {
+    try {
+      remote.mountCapabilitiesRemote(ctx);
+    } catch (error) {
+      process.stderr.write(`[enpoi-capabilities] capabilities remote mount failed: ${String(error)}
+`);
+    }
+  }).catch(() => {
+  });
   const disposeGuard = ctx.tools.guard((exec) => {
-    const decision = evaluateToolCall(exec.name, exec.arguments, initialCapabilitiesState(getGlobalDefaults()));
+    const decision = evaluateToolCall(exec.name, exec.arguments, initialCapabilitiesState(getGlobalDefaults()), readMcpCatalogDefs());
     if (!decision.allowed) {
       return decision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.`;
     }
@@ -705,6 +956,34 @@ function apply(ctx) {
       return {};
     }
   }
+  function readMcpCatalogDefs() {
+    try {
+      const settings = ctx.get("settings");
+      const value = settings?.get?.(ORCH_NS);
+      if (value === void 0) return void 0;
+      const catalog = value.mcpServers;
+      if (catalog === void 0 || catalog === null || typeof catalog !== "object" || Array.isArray(catalog)) return void 0;
+      return catalog;
+    } catch {
+      return void 0;
+    }
+  }
+  function readMcpServerNames() {
+    const catalog = readMcpCatalogDefs();
+    return catalog === void 0 ? void 0 : Object.entries(catalog).map(([id, def]) => mcpServerNameOf(id, def));
+  }
+  function currentPresetOf(session) {
+    try {
+      const projections = ctx.get("sessionProjections");
+      const value = projections?.stateOf?.(session, "agentPreset");
+      return typeof value === "string" && value !== "" ? value : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  function askingAgentOf(exec) {
+    return agentRoleOf(exec.agent, currentPresetOf);
+  }
   function readSandboxMode(agent) {
     try {
       const session = agent?.session;
@@ -719,14 +998,9 @@ function apply(ctx) {
       return void 0;
     }
   }
-  function agentNameOf(exec) {
-    const a = exec.agent;
-    if (a === void 0) return void 0;
-    return a.agentPreset ?? a.preset ?? a.name ?? a.label;
-  }
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
     const state = initialCapabilitiesState(getGlobalDefaults());
-    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state);
+    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs());
     if (!capabilityDecision.allowed) {
       return { kind: "deny", reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` };
     }
@@ -735,21 +1009,22 @@ function apply(ctx) {
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
-      agent: agentNameOf(exec),
+      agent: askingAgentOf(exec),
       config,
-      sandboxMode: readSandboxMode(exec.agent)
+      sandboxMode: readSandboxMode(exec.agent),
+      mcpServerNames: readMcpServerNames() ?? []
     });
     if (decision.kind === "allow") return await next();
     if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
     if (typeof exec.callId === "string" && pendingGrants.size < 128) {
-      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : void 0, agentNameOf(exec)));
+      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : void 0, askingAgentOf(exec)));
     }
     return { kind: "ask", reason: decision.reason };
   }));
   ctx.effect(() => disposePolicy, "enpoi-capabilities: permission policy pre-execute");
   async function persistGrant(proposal) {
     const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    const grant = { id, tool: proposal.tool, ...proposal.pattern !== void 0 ? { pattern: proposal.pattern } : {}, ...proposal.agent !== void 0 ? { agent: proposal.agent } : {}, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const grant = standingGrantRecord(id, proposal, (/* @__PURE__ */ new Date()).toISOString());
     const settings = ctx.get("settings");
     if (settings?.mutate === void 0) {
       process.stderr.write("[enpoi-capabilities] grant persistence failed: settings service unavailable\n");
@@ -773,6 +1048,27 @@ function apply(ctx) {
       }
     }
   }
+  let lastMcpServerNames = readMcpServerNames();
+  const disposeMcpPolicyCleanup = ctx.on("settings/updated", ((ns) => {
+    if (String(ns) !== ORCH_NS) return;
+    const names = readMcpServerNames();
+    if (names === void 0) return;
+    const previous = lastMcpServerNames;
+    lastMcpServerNames = names;
+    if (previous === void 0) return;
+    const current = new Set(names);
+    const removed = [...new Set(previous.filter((name2) => !current.has(name2)))];
+    if (removed.length === 0) return;
+    const settings = ctx.get("settings");
+    void pruneRemovedMcpPolicyRows(settings, removed, readPermissionConfig).then((count) => {
+      if (count > 0) process.stderr.write(`[enpoi-capabilities] removed MCP policy rows: ${count} row(s) for ${removed.join(", ")}
+`);
+    }).catch((error) => {
+      process.stderr.write(`[enpoi-capabilities] removed MCP policy cleanup failed: ${String(error)}
+`);
+    });
+  }));
+  ctx.effect(() => disposeMcpPolicyCleanup, "enpoi-capabilities: removed-MCP policy cleanup");
   const disposeGrantWatch = ctx.on("session/event", ((session, event) => {
     if (event?.type !== "approval/decided") return void 0;
     const outcome = event.data?.outcome;
@@ -813,5 +1109,6 @@ export {
   evaluateToolCall,
   initialCapabilitiesState,
   inject,
-  name
+  name,
+  pruneRemovedMcpPolicyRows
 };
