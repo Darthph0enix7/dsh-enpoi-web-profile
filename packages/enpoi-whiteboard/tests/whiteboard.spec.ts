@@ -9,11 +9,15 @@ import {
   estimateTokens,
   findEntryTarget,
   lintPaths,
+  migrateLegacyStore,
   normalizeDoc,
   normalizeStore,
+  removeEntry,
+  removeStoreEntry,
   renderWhiteboard,
   resolveBoard,
   setPinned,
+  sweepSessionBoards,
   type WhiteboardBoard,
   type WhiteboardDoc,
   type WhiteboardStore,
@@ -127,6 +131,107 @@ describe('enpoi-whiteboard board vocabulary', () => {
     // The new shape round-trips through the normalizer unchanged.
     const round = normalizeStore(JSON.parse(JSON.stringify(layeredStore())) as unknown)
     expect(round).toEqual(layeredStore())
+  })
+
+  it('migrates the real legacy global board into its writing session and leaves global empty', () => {
+    const legacy = {
+      version: 4,
+      scope: 'global',
+      entries: [
+        {
+          id: 'wb-fact-1',
+          kind: 'fact',
+          text: 'DeepSeek Harness GUI is running on http://127.0.0.1:3080',
+          pinned: true,
+          pinnedAt: 1790156322892,
+          version: 1,
+        },
+        {
+          id: 'wb-rule-1',
+          kind: 'rule',
+          text: 'Always run verification before claiming completion',
+          pinned: false,
+          pinnedAt: 0,
+          version: 1,
+        },
+        {
+          id: 'wb-task-1',
+          kind: 'task',
+          text: 'Demonstrate whiteboard read, write, pin, and replace operations (Completed)',
+          pinned: false,
+          pinnedAt: 1790156333464,
+          version: 2,
+        },
+      ],
+      updatedAt: 1790156496640,
+    }
+    const sessionId = 'session-297eded4-4cd1-4d61-aacc-3190bb44b09e'
+    const first = migrateLegacyStore(legacy, sessionId)
+    expect(first.migrated).toBe(true)
+    expect(first.attributedTo).toBe(sessionId)
+    expect(first.entries).toBe(3)
+    expect(first.store.version).toBe(4)
+    expect(first.store.docs.global).toBeUndefined()
+    expect(first.store.docs.sessions[sessionId]?.entries.map((entry) => entry.id))
+      .toEqual(['wb-fact-1', 'wb-rule-1', 'wb-task-1'])
+    expect(first.store.docs.sessions[sessionId]?.updatedAt).toBe(1790156496640)
+
+    // The three legacy entries resolve only in the attributed session.
+    expect(resolveBoard(first.store, { sessionId }).entries).toHaveLength(3)
+    expect(resolveBoard(first.store, { sessionId: 'session-other' }).entries).toHaveLength(0)
+    expect(renderWhiteboard(resolveBoard(first.store, { sessionId: 'session-other' }))).toBe('')
+
+    // Deterministic + idempotent: the migrated value is a fixed point.
+    const second = migrateLegacyStore(JSON.parse(JSON.stringify(first.store)) as unknown, sessionId)
+    expect(second.migrated).toBe(false)
+    expect(second.store).toEqual(first.store)
+
+    // The general rule needs no external hint: `meta.writtenBySessionId` alone suffices.
+    const stamped = migrateLegacyStore({ ...legacy, meta: { writtenBySessionId: sessionId } })
+    expect(stamped.attributedTo).toBe(sessionId)
+    expect(stamped.store).toEqual(first.store)
+    // Reads apply the same attribution without the migration call.
+    expect(normalizeStore({ ...legacy, meta: { writtenBySessionId: sessionId } })).toEqual(first.store)
+    // A legacy global without attribution keeps the old global behavior.
+    expect(migrateLegacyStore(legacy).store.docs.global?.entries).toHaveLength(3)
+  })
+
+  it('removes one entry by id and returns it in full', () => {
+    const board = normalizeStore({
+      version: 2,
+      scope: 'session',
+      sessionId: 's',
+      entries: [
+        { id: 'a', kind: 'rule', text: 'keep', version: 1 },
+        { id: 'b', kind: 'fact', text: 'drop me', pinned: true, pinnedAt: 5, version: 3 },
+      ],
+    }).docs.sessions['s']!
+    const removal = removeEntry(board, 'b', 99)
+    expect(removal.ok).toBe(true)
+    if (!removal.ok) throw new Error('unreachable')
+    expect(removal.removed).toMatchObject({ id: 'b', kind: 'fact', text: 'drop me', pinned: true, version: 3 })
+    expect(removal.board.entries.map((entry) => entry.id)).toEqual(['a'])
+    expect(removal.board.updatedAt).toBe(99)
+    expect(removeEntry(board, 'missing', 99).ok).toBe(false)
+  })
+
+  it('sweeps session boards to the newest limit and reports what it dropped', () => {
+    const store = normalizeStore({
+      version: 1,
+      docs: {
+        sessions: {
+          oldest: { version: 1, updatedAt: 10, entries: [{ id: 'a', kind: 'fact', text: 'oldest', version: 1 }] },
+          middle: { version: 1, updatedAt: 20, entries: [{ id: 'b', kind: 'fact', text: 'middle', version: 1 }] },
+          newest: { version: 1, updatedAt: 30, entries: [{ id: 'c', kind: 'fact', text: 'newest', version: 1 }] },
+        },
+      },
+    })
+    const swept = sweepSessionBoards(store, 2)
+    expect(swept.dropped).toEqual(['oldest'])
+    expect(Object.keys(swept.store.docs.sessions).sort()).toEqual(['middle', 'newest'])
+    // A fixed point at or under the limit, and other buckets untouched.
+    expect(sweepSessionBoards(store, 3).dropped).toEqual([])
+    expect(swept.store.docs.projects).toEqual({})
   })
 
   it('renders pinned first, marks stale, and carries the board version', () => {
@@ -401,6 +506,64 @@ describe('enpoi-whiteboard tools', () => {
     expect(JSON.stringify(settings.board)).toBe(before)
   })
 
+  it('forgets one entry in its authoring scope and returns the removed text', async () => {
+    const settings = makeSettings(layeredStore())
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+
+    const global = await definitions.get('whiteboard_forget')!.execute({ id: 'g1' }, sessionExec)
+    expect(global.ok).toBe(true)
+    expect(global.removed).toMatchObject({ id: 'g1', kind: 'fact', text: 'global one', scope: 'global', version: 1 })
+    expect(String(global.note)).toContain('global one')
+    expect((settings.board as WhiteboardStore).docs.global?.entries.map((entry) => entry.id)).toEqual(['g2'])
+
+    const session = await definitions.get('whiteboard_forget')!.execute({ id: 's1' }, sessionExec)
+    expect(session.removed).toMatchObject({ id: 's1', text: 'session one', scope: 'session' })
+    expect((settings.board as WhiteboardStore).docs.sessions['sess-1']?.entries.map((entry) => entry.id)).toEqual(['p1'])
+
+    // The project board is untouched by a session forget of the entry that overrides it.
+    expect((settings.board as WhiteboardStore).docs.projects['/p']?.entries).toHaveLength(1)
+
+    const missing = await definitions.get('whiteboard_forget')!.execute({ id: 'nope' }, sessionExec)
+    expect(missing.ok).toBe(false)
+    expect(String(missing.message)).toContain('resolved board')
+  })
+
+  it('replaces an entry under the default session scope wherever it is authored', async () => {
+    const settings = makeSettings(layeredStore())
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+    const inProject = { agent: { session: { id: 'sess-3', header: { cwd: '/p' } } } }
+
+    // `g1` lives in the global bucket and `p1` in the project bucket for sess-2.
+    const global = await definitions.get('whiteboard_write')!.execute({
+      mode: 'replace',
+      entries: [{ id: 'g1', kind: 'fact', text: 'global one rewritten' }],
+    }, otherExec)
+    expect(global.ok).toBe(true)
+    expect((settings.board as WhiteboardStore).docs.global?.entries.find((entry) => entry.id === 'g1'))
+      .toMatchObject({ text: 'global one rewritten', version: 2 })
+
+    const project = await definitions.get('whiteboard_write')!.execute({
+      mode: 'replace',
+      entries: [{ id: 'p1', kind: 'rule', text: 'project one rewritten' }],
+    }, inProject)
+    expect(project.ok).toBe(true)
+    const stored = settings.board as WhiteboardStore
+    expect(stored.docs.projects['/p']?.entries.find((entry) => entry.id === 'p1'))
+      .toMatchObject({ text: 'project one rewritten', version: 2 })
+    // The session override of p1 stays exactly as authored.
+    expect(stored.docs.sessions['sess-1']?.entries.find((entry) => entry.id === 'p1'))
+      .toMatchObject({ text: 'session override of p1', version: 2 })
+
+    const missing = await definitions.get('whiteboard_write')!.execute({
+      mode: 'replace',
+      entries: [{ id: 'nope', kind: 'fact', text: 'x' }],
+    }, otherExec)
+    expect(missing.ok).toBe(false)
+    expect(String(missing.message)).toContain('no entry with id "nope" to replace')
+  })
+
   it('declares output schemas that accept every tool result', async () => {
     const settings = makeSettings()
     const { ctx, definitions } = makeCtx(settings)
@@ -410,9 +573,10 @@ describe('enpoi-whiteboard tools', () => {
     const read = await definitions.get('whiteboard_read')!.execute({}, sessionExec)
     const pin = await definitions.get('whiteboard_pin')!.execute({ id: 'r1' }, sessionExec)
     const unpin = await definitions.get('whiteboard_unpin')!.execute({ id: 'r1' }, sessionExec)
+    const forget = await definitions.get('whiteboard_forget')!.execute({ id: 'r1' }, sessionExec)
 
     const results: [string, Record<string, unknown>][] = [
-      ['whiteboard_write', write], ['whiteboard_read', read], ['whiteboard_pin', pin], ['whiteboard_unpin', unpin],
+      ['whiteboard_write', write], ['whiteboard_read', read], ['whiteboard_pin', pin], ['whiteboard_unpin', unpin], ['whiteboard_forget', forget],
     ]
     for (const [name, value] of results) {
       const definition = definitions.get(name)

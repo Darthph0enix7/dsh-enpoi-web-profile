@@ -4,22 +4,28 @@
  *
  * The board lives in the shared settings namespace `enpoi-orchestration` under
  * `whiteboard` (hot-swappable + cross-device via settings sync), is authored
- * only through the four tools (`whiteboard_read`, `whiteboard_write`,
- * `whiteboard_pin`, `whiteboard_unpin`), and is injected through the
- * runtime-context seam (`systemPrompt.context()`, a trailing replace-in-place
- * snapshot) — never the system prompt itself, so the frozen prefix keeps its
- * cache.
+ * only through the five tools (`whiteboard_read`, `whiteboard_write`,
+ * `whiteboard_pin`, `whiteboard_unpin`, `whiteboard_forget`), and is injected
+ * through the runtime-context seam (`systemPrompt.context()`, a trailing
+ * replace-in-place snapshot) — never the system prompt itself, so the frozen
+ * prefix keeps its cache.
  *
  * Boards are stored per scope and resolved per session: global → project
  * (matching the session cwd) → parent session (direct-child inheritance) →
  * session (matching the session id), later scopes overriding earlier ones by
  * entry id. The injected block and every read render the resolved view, so a
  * session-scoped entry never leaks into another session; a legacy single-board
- * document stays readable and migrates into the bucket its own scope names.
+ * document stays readable and migrates into the bucket its own scope names —
+ * a legacy `global` board attributed with `meta.writtenBySessionId` migrates
+ * into that session's bucket and leaves `global` empty, so every other session
+ * resolves empty. The Watchtower card renders only the session half of the
+ * resolved view; project/global entries stay behind a collapsed disclosure.
  *
  * Guarantees: a rendered resolved board over the hard budget REFUSES the write
  * (never silently trims); `path` entries are validated on write and flagged
- * `stale` — never deleted.
+ * `stale` — never deleted; `whiteboard_forget` returns the entry it removed.
+ * Session buckets are bounded by a one-sweep-per-activation GC that keeps the
+ * newest {@link DEFAULT_MAX_SESSION_BOARDS} boards.
  *
  * @module dsh-enpoi-whiteboard
  */
@@ -30,6 +36,7 @@ import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import {
   DEFAULT_BUDGET_TOKENS,
+  DEFAULT_MAX_SESSION_BOARDS,
   WHITEBOARD_CONTEXT_NAME,
   WHITEBOARD_CONTEXT_ORDER,
   applyStoreWrites,
@@ -38,11 +45,14 @@ import {
   findEntryTarget,
   isWhiteboardScope,
   lintPaths,
+  migrateLegacyStore,
   normalizeStore,
   readBoard,
+  removeStoreEntry,
   renderWhiteboard,
   resolveBoard,
   setStorePinned,
+  sweepSessionBoards,
   versionLine,
   writeBoard,
   type BoardScopeFacts,
@@ -62,10 +72,13 @@ export const inject = ['tools']
 export interface Config {
   /** Hard rendered-token budget (doc 67 §B); writes over it are refused. */
   budgetTokens?: number
+  /** Bounded GC: how many session boards to keep across activations. */
+  maxSessionBoards?: number
 }
 
 export const Config = Schema.object({
   budgetTokens: Schema.number().default(DEFAULT_BUDGET_TOKENS),
+  maxSessionBoards: Schema.number().default(DEFAULT_MAX_SESSION_BOARDS),
 })
 
 /** Shared settings namespace (owned by enpoi-capabilities). */
@@ -109,17 +122,28 @@ function settingsOf(ctx: Context): SettingsLike | undefined {
   }
 }
 
+/** One-time-per-process notice that a legacy board is being read in memory. */
+let legacyReadLogged = false
+
 /**
  * Read the current multi-scope store. Never throws: a missing settings service
  * or a malformed value answers the empty store, so the plugin can never break a
  * turn (doc 66 invariant 1). A legacy single-board document is migrated in
- * memory and rewritten in the new shape by the next write.
+ * memory — a `meta.writtenBySessionId` global board lands in that session's
+ * bucket — and rewritten in the new shape by the next write or by the one-time
+ * settings migration.
  * @param ctx - owning plugin context.
  * @returns the normalized store.
  */
 export function readWhiteboardStore(ctx: Context): WhiteboardStore {
   try {
-    return normalizeStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard)
+    const migration = migrateLegacyStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard)
+    if (migration.migrated && !legacyReadLogged) {
+      legacyReadLogged = true
+      const destination = migration.attributedTo === undefined ? 'global' : `session ${migration.attributedTo}`
+      process.stderr.write(`[enpoi-whiteboard] legacy board read (${migration.entries} entries) — migrated in memory into ${destination}\n`)
+    }
+    return migration.store
   } catch {
     return normalizeStore(undefined)
   }
@@ -309,7 +333,56 @@ function writeTargetFor(exec: ToolExecLike | undefined, args: Record<string, unk
   }
 }
 
-/** The four board tools (doc 67 §B). */
+/** Stable key for one storage bucket (groups replace requests by authoring board). */
+function targetKey(target: WhiteboardTarget): string {
+  if (target.scope === 'global') return 'global'
+  if (target.scope === 'project') return `project:${target.projectId}`
+  return `session:${target.sessionId}`
+}
+
+/**
+ * Plan one write's storage targets. Append writes, and any write with an
+ * explicit `scope`, use the explicit/default target. A replace under the
+ * default session scope mirrors pin/unpin's authoring-board targeting: each
+ * entry's `replaceId` is replaced where it actually lives (own session →
+ * parent session → project → global), so replacing a project or global entry
+ * never fails on a session lookup.
+ * @param store - the store the transition runs against.
+ * @param fallback - the explicit/default target.
+ * @param facts - the caller's scope facts.
+ * @param requests - the requested entries.
+ * @param mode - `append` (default) or `replace` by id.
+ * @param explicitScope - whether the caller named a scope.
+ * @returns the target groups, or a refusal message.
+ */
+function planWriteTargets(
+  store: WhiteboardStore,
+  fallback: WhiteboardTarget,
+  facts: BoardScopeFacts,
+  requests: readonly WhiteboardWriteRequest[],
+  mode: 'append' | 'replace',
+  explicitScope: boolean,
+): { ok: true; groups: Array<{ target: WhiteboardTarget; requests: WhiteboardWriteRequest[] }> } | { ok: false; message: string } {
+  if (mode !== 'replace' || explicitScope) return { ok: true, groups: [{ target: fallback, requests: [...requests] }] }
+  const groups: Array<{ target: WhiteboardTarget; requests: WhiteboardWriteRequest[] }> = []
+  const byKey = new Map<string, number>()
+  for (const request of requests) {
+    const id = request.replaceId ?? request.id
+    if (typeof id !== 'string' || id.length === 0) {
+      return { ok: false, message: 'mode "replace" requires each entry to carry the id it replaces' }
+    }
+    const target = findEntryTarget(store, facts, id) ?? fallback
+    const key = targetKey(target)
+    const at = byKey.get(key)
+    if (at === undefined) {
+      byKey.set(key, groups.length)
+      groups.push({ target, requests: [request] })
+    } else groups[at]!.requests.push(request)
+  }
+  return { ok: true, groups }
+}
+
+/** The five board tools (doc 67 §B). */
 function registerTools(ctx: Context, config: Required<Config>): void {
   const tools = (ctx as unknown as { tools?: { register?: (definition: unknown) => void } }).tools
   if (tools?.register === undefined) {
@@ -361,7 +434,7 @@ function registerTools(ctx: Context, config: Required<Config>): void {
     name: 'whiteboard_write',
     description: [
       'Author the pinned context board for one scope. scope defaults to session (your own session); project stores under your session cwd (or projectId) and applies to that project; global applies to every session.',
-      'Append entries, or replace entries by id (every replace bumps the entry version).',
+      'Append entries, or replace entries by id (every replace bumps the entry version). A replace under the default session scope replaces the entry in the scope that authored it, so a project/global entry is replaced there.',
       'Kinds: path (project-relative path — validated on write, flagged stale when missing, never deleted), rule, fact, task.',
       'The resolved block has a HARD token budget; an over-budget write is refused and nothing changes.',
       'Keep only core context the orchestrator must not have to repeat: current docs, invariants, task state.',
@@ -422,16 +495,24 @@ function registerTools(ctx: Context, config: Required<Config>): void {
       }
       const target = writeTargetFor(exec, args)
       if ('error' in target) return refusal(target.error)
+      const explicitScope = isWhiteboardScope(args.scope)
+      const facts = sessionFacts(exec)
       const committed = await commitStore(ctx, config, target.checkFacts, (store, now) => {
-        const applied = applyStoreWrites(store, target.target, requests, mode, now)
-        if (!applied.ok) return applied
-        const board = readBoard(applied.store, target.target)
-        return board === undefined
-          ? { ok: true, store: applied.store }
-          : { ok: true, store: writeBoard(applied.store, target.target, linted(board, exec)) }
+        const plan = planWriteTargets(store, target.target, facts, requests, mode, explicitScope)
+        if (!plan.ok) return plan
+        let next = store
+        for (const group of plan.groups) {
+          const applied = applyStoreWrites(next, group.target, group.requests, mode, now)
+          if (!applied.ok) return applied
+          const board = readBoard(applied.store, group.target)
+          next = board === undefined
+            ? applied.store
+            : writeBoard(applied.store, group.target, linted(board, exec))
+        }
+        return { ok: true, store: next }
       })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      const resolved = resolveBoard(committed.store, sessionFacts(exec))
+      const resolved = resolveBoard(committed.store, facts)
       const stale = resolved.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
       return {
         ...boardView(linted(resolved, exec), config.budgetTokens),
@@ -501,6 +582,62 @@ function registerTools(ctx: Context, config: Required<Config>): void {
       return { ...boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens), note: `unpinned ${id}` }
     },
   })
+
+  tools.register({
+    name: 'whiteboard_forget',
+    description: 'Delete one whiteboard entry in the scope that authored it (own session, then parent session, then project, then global). The removed entry — including its text — is returned, so nothing is ever dropped silently.',
+    parameters: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Entry id from whiteboard_read' } },
+      required: ['id'],
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ...BOARD_RESULT_PROPERTIES,
+          removed: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string' }, kind: { type: 'string' }, text: { type: 'string' },
+              pinned: { type: 'boolean' }, version: { type: 'number' }, scope: { type: 'string' },
+            },
+            required: ['id', 'kind', 'text', 'pinned', 'version', 'scope'],
+          },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) => [{ type: 'text', text: renderForgetResult(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args: Record<string, unknown>, exec: ToolExecLike) {
+      const id = typeof args.id === 'string' ? args.id : ''
+      if (id.length === 0) return refusal('id is required')
+      const facts = sessionFacts(exec)
+      let removed: Record<string, unknown> | undefined
+      const committed = await commitStore(ctx, config, facts, (store, now) => {
+        const target = findEntryTarget(store, facts, id)
+        if (target === undefined) return { ok: false, message: `no entry with id "${id}" in this session's resolved board` }
+        const result = removeStoreEntry(store, target, id, now)
+        if (!result.ok) return result
+        removed = {
+          id: result.removed.id,
+          kind: result.removed.kind,
+          text: result.removed.text,
+          pinned: result.removed.pinned,
+          version: result.removed.version,
+          scope: target.scope,
+        }
+        return { ok: true, store: result.store }
+      })
+      if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
+      const view = boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens)
+      return removed === undefined
+        ? { ...view, note: `forgot ${id}` }
+        : { ...view, removed, note: `forgot ${id}: ${String(removed.text)}` }
+    },
+  })
 }
 
 /** Model-facing render for a successful board read. */
@@ -518,6 +655,64 @@ function renderWriteResult(value: Record<string, unknown>): string {
   const head = `Whiteboard v${String(value.version)} (${String(value.scope)}) — ${stale.length} stale path flag(s).`
   const rendered = typeof value.rendered === 'string' && value.rendered.length > 0 ? value.rendered : '(empty)'
   return `${head}\n${rendered}`
+}
+
+/** Model-facing render for a forgotten entry — the removed text is always reported. */
+function renderForgetResult(value: Record<string, unknown>): string {
+  if (value.ok !== true) return String(value.message ?? 'Whiteboard forget refused.')
+  const raw = value.removed
+  const removed = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined
+  const head = removed === undefined
+    ? 'Whiteboard entry forgotten.'
+    : `Forgot [${String(removed.kind)}] ${String(removed.text)} — ${String(removed.id)} (${String(removed.scope)}).`
+  const rendered = typeof value.rendered === 'string' && value.rendered.length > 0 ? value.rendered : '(empty)'
+  return `${head}\n${rendered}`
+}
+
+/** Delay before the activation sweep, so the settings service has mounted. */
+const SESSION_SWEEP_DELAY_MS = 2_000
+
+/**
+ * Bounded GC: keep only the newest `maxSessionBoards` session buckets. The
+ * harness has no session-delete event a plugin can hook (delete disposes the
+ * live session and removes its log), so the trigger is one sweep per plugin
+ * activation — every profile restart prunes what accumulated. Best-effort: a
+ * missing settings service or a conflict leaves the store untouched; one line
+ * reports what was dropped.
+ * @param ctx - owning plugin context.
+ * @param config - resolved plugin config.
+ */
+async function sweepSessionBoardsNow(ctx: Context, config: Required<Config>): Promise<void> {
+  const pending = sweepSessionBoards(readWhiteboardStore(ctx), config.maxSessionBoards)
+  if (pending.dropped.length === 0) return
+  let dropped: string[] = []
+  const committed = await commitStore(ctx, config, {}, (current) => {
+    const next = sweepSessionBoards(current, config.maxSessionBoards)
+    dropped = next.dropped
+    return { ok: true, store: next.store }
+  })
+  if (!committed.ok) {
+    process.stderr.write(`[enpoi-whiteboard] session-board GC skipped: ${committed.message}\n`)
+    return
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(`[enpoi-whiteboard] session-board GC dropped ${dropped.length} board(s) over the ${config.maxSessionBoards} limit: ${dropped.join(', ')}\n`)
+  }
+}
+
+/**
+ * Schedule the one-time-per-activation bounded GC.
+ * @param ctx - owning plugin context.
+ * @param config - resolved plugin config.
+ */
+function scheduleSessionSweep(ctx: Context, config: Required<Config>): void {
+  const timer = setTimeout(() => {
+    void sweepSessionBoardsNow(ctx, config).catch((error: unknown) => {
+      process.stderr.write(`[enpoi-whiteboard] session-board GC failed: ${String(error)}\n`)
+    })
+  }, SESSION_SWEEP_DELAY_MS)
+  timer.unref()
+  ctx.effect(() => () => { clearTimeout(timer) }, 'enpoi-whiteboard: session-board GC')
 }
 
 /**
@@ -552,8 +747,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     budgetTokens: typeof config.budgetTokens === 'number' && Number.isFinite(config.budgetTokens) && config.budgetTokens > 0
       ? Math.floor(config.budgetTokens)
       : DEFAULT_BUDGET_TOKENS,
+    maxSessionBoards: typeof config.maxSessionBoards === 'number' && Number.isFinite(config.maxSessionBoards) && config.maxSessionBoards >= 1
+      ? Math.floor(config.maxSessionBoards)
+      : DEFAULT_MAX_SESSION_BOARDS,
   }
   registerTools(ctx, resolved)
   installInjection(ctx)
-  process.stderr.write(`[enpoi-whiteboard] mounted (budget ${resolved.budgetTokens} tokens; per-scope board resolved lazily per assembly; runtime-context seam)\n`)
+  scheduleSessionSweep(ctx, resolved)
+  process.stderr.write(`[enpoi-whiteboard] mounted (budget ${resolved.budgetTokens} tokens, ${resolved.maxSessionBoards} session boards max; per-scope board resolved lazily per assembly; runtime-context seam)\n`)
 }

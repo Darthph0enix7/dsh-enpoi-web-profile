@@ -7,14 +7,23 @@
  * Storage contract (doc 66 §3c, doc 67 §B): `enpoi-orchestration.whiteboard`
  * holds `{ version, docs: { global?: Board, projects: { <cwd>: Board },
  * sessions: { <sessionId>: Board } } }`. A legacy single-board document is
- * still readable and migrates into the bucket its own scope names. Every entry
- * carries a version; path entries are validated on write and flagged stale —
- * never auto-deleted.
+ * still readable and migrates into the bucket its own scope names; a legacy
+ * global board that carries `meta.writtenBySessionId` belongs to that session
+ * and migrates into its session bucket, leaving `global` empty
+ * ({@link migrateLegacyStore}). Every entry carries a version; path entries
+ * are validated on write and flagged stale — never auto-deleted.
  *
  * Resolution contract: a read merges global → project (matching the session
  * cwd) → parent session (direct-child inheritance) → session (matching the
  * session id), later scopes overriding earlier ones by entry id, and reports
- * each resolved entry's authoring scope.
+ * each resolved entry's authoring scope. The injected block is that resolved
+ * view (session entries plus explicitly shared project/global ones); the
+ * Watchtower card's primary surface is session-only, with shared entries in a
+ * collapsed disclosure.
+ *
+ * Bounded GC: session buckets do not accumulate forever — a sweep keeps only
+ * the newest {@link DEFAULT_MAX_SESSION_BOARDS} by `updatedAt`
+ * ({@link sweepSessionBoards}).
  *
  * @module dsh-enpoi-whiteboard/board
  */
@@ -70,6 +79,18 @@ export type WhiteboardTarget =
   | { scope: 'project'; projectId: string }
   | { scope: 'session'; sessionId: string }
 
+/** Attribution recorded on a legacy single-board document. */
+export interface WhiteboardDocMeta {
+  /**
+   * Session id whose board a legacy `scope: global` document actually was.
+   * Set by the one-time migration (`migrateLegacyStore`) or by whoever wrote
+   * the legacy document; a global board carrying it migrates into
+   * `sessions[writtenBySessionId]` instead of `global`, so every other session
+   * resolves empty.
+   */
+  writtenBySessionId?: string
+}
+
 /** The persisted (pre-multi-scope) single-board document, kept for migration. */
 export interface WhiteboardDoc {
   /** Board version: 0 when never written, +1 per successful write. */
@@ -79,6 +100,8 @@ export interface WhiteboardDoc {
   sessionId?: string
   /** Project (session cwd) the board applies to when `scope === 'project'`. */
   projectId?: string
+  /** Legacy attribution; see {@link WhiteboardDocMeta}. */
+  meta?: WhiteboardDocMeta
   entries: WhiteboardEntry[]
   /** Epoch ms of the last write. */
   updatedAt: number
@@ -118,6 +141,9 @@ export const WHITEBOARD_HEADER = '### Pinned context'
 
 /** Hard rendered budget (doc 67 §B) — a write over it is refused, never trimmed. */
 export const DEFAULT_BUDGET_TOKENS = 1500
+
+/** How many session buckets the bounded GC keeps (newest by `updatedAt`). */
+export const DEFAULT_MAX_SESSION_BOARDS = 200
 
 /** Conservative chars-per-token estimate used for the rendered block. */
 export const CHARS_PER_TOKEN = 4
@@ -220,6 +246,10 @@ export function normalizeDoc(raw: unknown): WhiteboardDoc {
   }
   if (typeof raw.sessionId === 'string' && raw.sessionId.length > 0) doc.sessionId = raw.sessionId
   if (typeof raw.projectId === 'string' && raw.projectId.length > 0) doc.projectId = raw.projectId
+  const writtenBySessionId = isRecord(raw.meta) && typeof raw.meta.writtenBySessionId === 'string'
+    ? raw.meta.writtenBySessionId.trim()
+    : ''
+  if (writtenBySessionId.length > 0) doc.meta = { writtenBySessionId }
   return doc
 }
 
@@ -229,10 +259,32 @@ function emptyStore(): WhiteboardStore {
 }
 
 /**
+ * Place one legacy document into the bucket its own scope names. A legacy
+ * `global` board carrying `meta.writtenBySessionId` is that session's board and
+ * lands in its session bucket with `global` left empty — the one-time
+ * attribution migration, deterministic and idempotent (a bucket-shaped
+ * document never reaches here).
+ * @param legacy - the normalized legacy document.
+ * @returns the migrated store.
+ */
+function legacyStore(legacy: WhiteboardDoc): WhiteboardStore {
+  const store = emptyStore()
+  store.version = legacy.version
+  const board: WhiteboardBoard = { version: legacy.version, entries: legacy.entries, updatedAt: legacy.updatedAt }
+  if (legacy.scope === 'project' && legacy.projectId !== undefined) store.docs.projects[legacy.projectId] = board
+  else if (legacy.scope === 'session' && legacy.sessionId !== undefined) store.docs.sessions[legacy.sessionId] = board
+  else if (legacy.meta?.writtenBySessionId !== undefined) store.docs.sessions[legacy.meta.writtenBySessionId] = board
+  else store.docs.global = board
+  return store
+}
+
+/**
  * Coerce the settings value into the multi-scope store. A legacy single-board
  * document migrates into the bucket its own scope names (a session board into
- * `sessions[<id>]`, a project board into `projects[<cwd>]`, otherwise
- * `global`), so an old document never leaks into sessions it did not cover.
+ * `sessions[<id>]`, a project board into `projects[<cwd>]`, else — when a
+ * `meta.writtenBySessionId` attribution is present — that session's bucket,
+ * otherwise `global`), so an old document never leaks into sessions it did not
+ * cover.
  * @param raw - the `enpoi-orchestration.whiteboard` value, if any.
  * @returns a well-formed store.
  */
@@ -252,14 +304,51 @@ export function normalizeStore(raw: unknown): WhiteboardStore {
     }
     return store
   }
-  const legacy = normalizeDoc(raw)
-  const store = emptyStore()
-  store.version = legacy.version
-  const board: WhiteboardBoard = { version: legacy.version, entries: legacy.entries, updatedAt: legacy.updatedAt }
-  if (legacy.scope === 'project' && legacy.projectId !== undefined) store.docs.projects[legacy.projectId] = board
-  else if (legacy.scope === 'session' && legacy.sessionId !== undefined) store.docs.sessions[legacy.sessionId] = board
-  else store.docs.global = board
-  return store
+  return legacyStore(normalizeDoc(raw))
+}
+
+/** Result of the one-time legacy migration. */
+export interface LegacyMigrationResult {
+  /** The store in bucket shape. */
+  store: WhiteboardStore
+  /** True when the input was a legacy single-board document and was migrated. */
+  migrated: boolean
+  /** Sessions bucket the legacy global board was attributed to, when it was. */
+  attributedTo?: string
+  /** Entries carried by the legacy board (0 for an already bucket-shaped input). */
+  entries: number
+}
+
+/**
+ * Migrate a legacy single-board document into the bucket shape, attributing a
+ * legacy `global` board to a session. Deterministic and idempotent: a document
+ * that already carries `docs` is only normalized. The attribution comes from
+ * `meta.writtenBySessionId` when present, or from `attributeToSessionId` (the
+ * caller's one-time knowledge of who wrote the legacy board).
+ * @param raw - the raw `enpoi-orchestration.whiteboard` value.
+ * @param attributeToSessionId - session to attribute a legacy global board to when it carries none.
+ * @returns the migrated store, whether a migration ran, and the attributed session.
+ */
+export function migrateLegacyStore(raw: unknown, attributeToSessionId?: string): LegacyMigrationResult {
+  if (!isRecord(raw)) return { store: normalizeStore(raw), migrated: false, entries: 0 }
+  if (isRecord(raw.docs)) {
+    return { store: normalizeStore(raw), migrated: false, entries: 0 }
+  }
+  const doc = normalizeDoc(raw)
+  let attributedTo = doc.scope === 'global' && doc.meta?.writtenBySessionId !== undefined
+    ? doc.meta.writtenBySessionId
+    : undefined
+  if (attributedTo === undefined && doc.scope === 'global'
+    && typeof attributeToSessionId === 'string' && attributeToSessionId.length > 0) {
+    doc.meta = { ...doc.meta, writtenBySessionId: attributeToSessionId }
+    attributedTo = attributeToSessionId
+  }
+  return {
+    store: legacyStore(doc),
+    migrated: true,
+    entries: doc.entries.length,
+    ...(attributedTo === undefined ? {} : { attributedTo }),
+  }
 }
 
 /** The stored board one target reads, if it has been written yet. */
@@ -596,6 +685,75 @@ export function setStorePinned(
   if (!pinnedResult.ok) return pinnedResult
   const board: WhiteboardBoard = { ...pinnedResult.board, version: current.version + 1, updatedAt: now }
   return { ok: true, store: writeBoard(store, target, board) }
+}
+
+/**
+ * Delete one entry from a stored board. The removed entry is returned in full,
+ * so a forget is never a silent drop. The caller owns the board-version bump.
+ * @param board - the current stored board.
+ * @param id - the entry id.
+ * @param now - epoch ms stamped on the board.
+ * @returns the next board plus the removed entry, or an error message.
+ */
+export function removeEntry(
+  board: WhiteboardBoard,
+  id: string,
+  now: number,
+): { ok: true; board: WhiteboardBoard; removed: WhiteboardEntry } | { ok: false; message: string } {
+  const index = board.entries.findIndex((entry) => entry.id === id)
+  if (index === -1) return { ok: false, message: `no entry with id "${id}"` }
+  const removed = { ...board.entries[index]! }
+  const entries = board.entries.filter((_, at) => at !== index).map((entry) => ({ ...entry }))
+  return { ok: true, board: { ...board, entries, updatedAt: now }, removed }
+}
+
+/**
+ * Delete one entry from the scope bucket that authored it and bump that
+ * board's version, mirroring {@link setStorePinned}'s authoring-board lookup.
+ * @param store - the current store.
+ * @param target - the authoring scope bucket (from {@link findEntryTarget}).
+ * @param id - the entry id.
+ * @param now - epoch ms stamped onto the board.
+ * @returns the next store plus the removed entry, or an error message.
+ */
+export function removeStoreEntry(
+  store: WhiteboardStore,
+  target: WhiteboardTarget,
+  id: string,
+  now: number,
+): { ok: true; store: WhiteboardStore; removed: WhiteboardEntry } | { ok: false; message: string } {
+  const current = readBoard(store, target)
+  if (current === undefined) return { ok: false, message: `no entry with id "${id}"` }
+  const removal = removeEntry(current, id, now)
+  if (!removal.ok) return removal
+  const board: WhiteboardBoard = { ...removal.board, version: current.version + 1, updatedAt: now }
+  return { ok: true, store: writeBoard(store, target, board), removed: removal.removed }
+}
+
+/**
+ * Bounded GC for session buckets: keep only the `limit` most recently updated
+ * boards, dropping the oldest by `updatedAt` (ties broken by session id).
+ * Dropped board text is returned by id, never silently discarded.
+ * @param store - the current store.
+ * @param limit - how many session boards to keep.
+ * @returns the next store and the dropped session ids.
+ */
+export function sweepSessionBoards(
+  store: WhiteboardStore,
+  limit: number,
+): { store: WhiteboardStore; dropped: string[] } {
+  const ids = Object.keys(store.docs.sessions)
+  if (!Number.isFinite(limit) || ids.length <= Math.max(0, Math.floor(limit))) return { store, dropped: [] }
+  const ordered = [...ids].sort((left, right) => {
+    const leftAt = store.docs.sessions[left]?.updatedAt ?? 0
+    const rightAt = store.docs.sessions[right]?.updatedAt ?? 0
+    if (leftAt !== rightAt) return leftAt - rightAt
+    return left < right ? -1 : 1
+  })
+  const dropped = ordered.slice(0, ids.length - Math.max(0, Math.floor(limit)))
+  const sessions = { ...store.docs.sessions }
+  for (const id of dropped) delete sessions[id]
+  return { store: { ...store, docs: { ...store.docs, sessions } }, dropped }
 }
 
 /** The minimal fields the freshness line reads. */

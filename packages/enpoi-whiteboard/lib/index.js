@@ -8,6 +8,7 @@ var WHITEBOARD_CONTEXT_ORDER = 140;
 var WHITEBOARD_CONTEXT_NAME = "whiteboard";
 var WHITEBOARD_HEADER = "### Pinned context";
 var DEFAULT_BUDGET_TOKENS = 1500;
+var DEFAULT_MAX_SESSION_BOARDS = 200;
 var CHARS_PER_TOKEN = 4;
 var EMPTY_WHITEBOARD = Object.freeze({
   version: 0,
@@ -73,35 +74,58 @@ function normalizeDoc(raw) {
   };
   if (typeof raw.sessionId === "string" && raw.sessionId.length > 0) doc.sessionId = raw.sessionId;
   if (typeof raw.projectId === "string" && raw.projectId.length > 0) doc.projectId = raw.projectId;
+  const writtenBySessionId = isRecord(raw.meta) && typeof raw.meta.writtenBySessionId === "string" ? raw.meta.writtenBySessionId.trim() : "";
+  if (writtenBySessionId.length > 0) doc.meta = { writtenBySessionId };
   return doc;
 }
 function emptyStore() {
   return { version: 0, docs: { projects: {}, sessions: {} } };
 }
-function normalizeStore(raw) {
-  if (!isRecord(raw)) return emptyStore();
-  if (isRecord(raw.docs)) {
-    const store2 = emptyStore();
-    store2.version = finiteVersion(raw.version);
-    if (isRecord(raw.docs.global)) store2.docs.global = normalizeBoard(raw.docs.global);
-    for (const bucket of ["projects", "sessions"]) {
-      const value = raw.docs[bucket];
-      if (!isRecord(value)) continue;
-      for (const [key, board2] of Object.entries(value)) {
-        if (key.length === 0 || !isRecord(board2)) continue;
-        store2.docs[bucket][key] = normalizeBoard(board2);
-      }
-    }
-    return store2;
-  }
-  const legacy = normalizeDoc(raw);
+function legacyStore(legacy) {
   const store = emptyStore();
   store.version = legacy.version;
   const board = { version: legacy.version, entries: legacy.entries, updatedAt: legacy.updatedAt };
   if (legacy.scope === "project" && legacy.projectId !== void 0) store.docs.projects[legacy.projectId] = board;
   else if (legacy.scope === "session" && legacy.sessionId !== void 0) store.docs.sessions[legacy.sessionId] = board;
+  else if (legacy.meta?.writtenBySessionId !== void 0) store.docs.sessions[legacy.meta.writtenBySessionId] = board;
   else store.docs.global = board;
   return store;
+}
+function normalizeStore(raw) {
+  if (!isRecord(raw)) return emptyStore();
+  if (isRecord(raw.docs)) {
+    const store = emptyStore();
+    store.version = finiteVersion(raw.version);
+    if (isRecord(raw.docs.global)) store.docs.global = normalizeBoard(raw.docs.global);
+    for (const bucket of ["projects", "sessions"]) {
+      const value = raw.docs[bucket];
+      if (!isRecord(value)) continue;
+      for (const [key, board] of Object.entries(value)) {
+        if (key.length === 0 || !isRecord(board)) continue;
+        store.docs[bucket][key] = normalizeBoard(board);
+      }
+    }
+    return store;
+  }
+  return legacyStore(normalizeDoc(raw));
+}
+function migrateLegacyStore(raw, attributeToSessionId) {
+  if (!isRecord(raw)) return { store: normalizeStore(raw), migrated: false, entries: 0 };
+  if (isRecord(raw.docs)) {
+    return { store: normalizeStore(raw), migrated: false, entries: 0 };
+  }
+  const doc = normalizeDoc(raw);
+  let attributedTo = doc.scope === "global" && doc.meta?.writtenBySessionId !== void 0 ? doc.meta.writtenBySessionId : void 0;
+  if (attributedTo === void 0 && doc.scope === "global" && typeof attributeToSessionId === "string" && attributeToSessionId.length > 0) {
+    doc.meta = { ...doc.meta, writtenBySessionId: attributeToSessionId };
+    attributedTo = attributeToSessionId;
+  }
+  return {
+    store: legacyStore(doc),
+    migrated: true,
+    entries: doc.entries.length,
+    ...attributedTo === void 0 ? {} : { attributedTo }
+  };
 }
 function readBoard(store, target) {
   if (target.scope === "global") return store.docs.global;
@@ -262,6 +286,35 @@ function setStorePinned(store, target, id, pinned, now) {
   const board = { ...pinnedResult.board, version: current.version + 1, updatedAt: now };
   return { ok: true, store: writeBoard(store, target, board) };
 }
+function removeEntry(board, id, now) {
+  const index = board.entries.findIndex((entry) => entry.id === id);
+  if (index === -1) return { ok: false, message: `no entry with id "${id}"` };
+  const removed = { ...board.entries[index] };
+  const entries = board.entries.filter((_, at) => at !== index).map((entry) => ({ ...entry }));
+  return { ok: true, board: { ...board, entries, updatedAt: now }, removed };
+}
+function removeStoreEntry(store, target, id, now) {
+  const current = readBoard(store, target);
+  if (current === void 0) return { ok: false, message: `no entry with id "${id}"` };
+  const removal = removeEntry(current, id, now);
+  if (!removal.ok) return removal;
+  const board = { ...removal.board, version: current.version + 1, updatedAt: now };
+  return { ok: true, store: writeBoard(store, target, board), removed: removal.removed };
+}
+function sweepSessionBoards(store, limit) {
+  const ids = Object.keys(store.docs.sessions);
+  if (!Number.isFinite(limit) || ids.length <= Math.max(0, Math.floor(limit))) return { store, dropped: [] };
+  const ordered = [...ids].sort((left, right) => {
+    const leftAt = store.docs.sessions[left]?.updatedAt ?? 0;
+    const rightAt = store.docs.sessions[right]?.updatedAt ?? 0;
+    if (leftAt !== rightAt) return leftAt - rightAt;
+    return left < right ? -1 : 1;
+  });
+  const dropped = ordered.slice(0, ids.length - Math.max(0, Math.floor(limit)));
+  const sessions = { ...store.docs.sessions };
+  for (const id of dropped) delete sessions[id];
+  return { store: { ...store, docs: { ...store.docs, sessions } }, dropped };
+}
 function versionLine(doc) {
   return `${WHITEBOARD_HEADER} v${doc.version} (${doc.scope}${doc.updatedAt > 0 ? ` \xB7 updated ${new Date(doc.updatedAt).toISOString()}` : ""})`;
 }
@@ -270,7 +323,8 @@ function versionLine(doc) {
 var name = "enpoi-whiteboard";
 var inject = ["tools"];
 var Config = Schema.object({
-  budgetTokens: Schema.number().default(DEFAULT_BUDGET_TOKENS)
+  budgetTokens: Schema.number().default(DEFAULT_BUDGET_TOKENS),
+  maxSessionBoards: Schema.number().default(DEFAULT_MAX_SESSION_BOARDS)
 });
 var ORCH_NS = "enpoi-orchestration";
 function settingsOf(ctx) {
@@ -280,9 +334,17 @@ function settingsOf(ctx) {
     return void 0;
   }
 }
+var legacyReadLogged = false;
 function readWhiteboardStore(ctx) {
   try {
-    return normalizeStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard);
+    const migration = migrateLegacyStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard);
+    if (migration.migrated && !legacyReadLogged) {
+      legacyReadLogged = true;
+      const destination = migration.attributedTo === void 0 ? "global" : `session ${migration.attributedTo}`;
+      process.stderr.write(`[enpoi-whiteboard] legacy board read (${migration.entries} entries) \u2014 migrated in memory into ${destination}
+`);
+    }
+    return migration.store;
   } catch {
     return normalizeStore(void 0);
   }
@@ -404,6 +466,30 @@ function writeTargetFor(exec, args) {
     checkFacts: sessionId === own.sessionId ? own : { sessionId }
   };
 }
+function targetKey(target) {
+  if (target.scope === "global") return "global";
+  if (target.scope === "project") return `project:${target.projectId}`;
+  return `session:${target.sessionId}`;
+}
+function planWriteTargets(store, fallback, facts, requests, mode, explicitScope) {
+  if (mode !== "replace" || explicitScope) return { ok: true, groups: [{ target: fallback, requests: [...requests] }] };
+  const groups = [];
+  const byKey = /* @__PURE__ */ new Map();
+  for (const request of requests) {
+    const id = request.replaceId ?? request.id;
+    if (typeof id !== "string" || id.length === 0) {
+      return { ok: false, message: 'mode "replace" requires each entry to carry the id it replaces' };
+    }
+    const target = findEntryTarget(store, facts, id) ?? fallback;
+    const key = targetKey(target);
+    const at = byKey.get(key);
+    if (at === void 0) {
+      byKey.set(key, groups.length);
+      groups.push({ target, requests: [request] });
+    } else groups[at].requests.push(request);
+  }
+  return { ok: true, groups };
+}
 function registerTools(ctx, config) {
   const tools = ctx.tools;
   if (tools?.register === void 0) {
@@ -457,7 +543,7 @@ function registerTools(ctx, config) {
     name: "whiteboard_write",
     description: [
       "Author the pinned context board for one scope. scope defaults to session (your own session); project stores under your session cwd (or projectId) and applies to that project; global applies to every session.",
-      "Append entries, or replace entries by id (every replace bumps the entry version).",
+      "Append entries, or replace entries by id (every replace bumps the entry version). A replace under the default session scope replaces the entry in the scope that authored it, so a project/global entry is replaced there.",
       "Kinds: path (project-relative path \u2014 validated on write, flagged stale when missing, never deleted), rule, fact, task.",
       "The resolved block has a HARD token budget; an over-budget write is refused and nothing changes.",
       "Keep only core context the orchestrator must not have to repeat: current docs, invariants, task state."
@@ -518,14 +604,22 @@ function registerTools(ctx, config) {
       }
       const target = writeTargetFor(exec, args);
       if ("error" in target) return refusal(target.error);
+      const explicitScope = isWhiteboardScope(args.scope);
+      const facts = sessionFacts(exec);
       const committed = await commitStore(ctx, config, target.checkFacts, (store, now) => {
-        const applied = applyStoreWrites(store, target.target, requests, mode, now);
-        if (!applied.ok) return applied;
-        const board = readBoard(applied.store, target.target);
-        return board === void 0 ? { ok: true, store: applied.store } : { ok: true, store: writeBoard(applied.store, target.target, linted(board, exec)) };
+        const plan = planWriteTargets(store, target.target, facts, requests, mode, explicitScope);
+        if (!plan.ok) return plan;
+        let next = store;
+        for (const group of plan.groups) {
+          const applied = applyStoreWrites(next, group.target, group.requests, mode, now);
+          if (!applied.ok) return applied;
+          const board = readBoard(applied.store, group.target);
+          next = board === void 0 ? applied.store : writeBoard(applied.store, group.target, linted(board, exec));
+        }
+        return { ok: true, store: next };
       });
       if (!committed.ok) return refusal(committed.message, committed.tokens === void 0 ? {} : { tokens: committed.tokens, budget: committed.budget });
-      const resolved = resolveBoard(committed.store, sessionFacts(exec));
+      const resolved = resolveBoard(committed.store, facts);
       const stale = resolved.entries.filter((entry) => entry.stale === true).map((entry) => entry.id);
       return {
         ...boardView(linted(resolved, exec), config.budgetTokens),
@@ -595,6 +689,64 @@ function registerTools(ctx, config) {
       return { ...boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens), note: `unpinned ${id}` };
     }
   });
+  tools.register({
+    name: "whiteboard_forget",
+    description: "Delete one whiteboard entry in the scope that authored it (own session, then parent session, then project, then global). The removed entry \u2014 including its text \u2014 is returned, so nothing is ever dropped silently.",
+    parameters: {
+      type: "object",
+      properties: { id: { type: "string", description: "Entry id from whiteboard_read" } },
+      required: ["id"]
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ...BOARD_RESULT_PROPERTIES,
+          removed: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string" },
+              kind: { type: "string" },
+              text: { type: "string" },
+              pinned: { type: "boolean" },
+              version: { type: "number" },
+              scope: { type: "string" }
+            },
+            required: ["id", "kind", "text", "pinned", "version", "scope"]
+          }
+        },
+        required: ["ok"]
+      },
+      render: (_args, value) => [{ type: "text", text: renderForgetResult(value) }]
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const id = typeof args.id === "string" ? args.id : "";
+      if (id.length === 0) return refusal("id is required");
+      const facts = sessionFacts(exec);
+      let removed;
+      const committed = await commitStore(ctx, config, facts, (store, now) => {
+        const target = findEntryTarget(store, facts, id);
+        if (target === void 0) return { ok: false, message: `no entry with id "${id}" in this session's resolved board` };
+        const result = removeStoreEntry(store, target, id, now);
+        if (!result.ok) return result;
+        removed = {
+          id: result.removed.id,
+          kind: result.removed.kind,
+          text: result.removed.text,
+          pinned: result.removed.pinned,
+          version: result.removed.version,
+          scope: target.scope
+        };
+        return { ok: true, store: result.store };
+      });
+      if (!committed.ok) return refusal(committed.message, committed.tokens === void 0 ? {} : { tokens: committed.tokens, budget: committed.budget });
+      const view = boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens);
+      return removed === void 0 ? { ...view, note: `forgot ${id}` } : { ...view, removed, note: `forgot ${id}: ${String(removed.text)}` };
+    }
+  });
 }
 function renderWhiteboardResult(value) {
   const entries = Array.isArray(value.entries) ? value.entries : [];
@@ -609,6 +761,47 @@ function renderWriteResult(value) {
   const rendered = typeof value.rendered === "string" && value.rendered.length > 0 ? value.rendered : "(empty)";
   return `${head}
 ${rendered}`;
+}
+function renderForgetResult(value) {
+  if (value.ok !== true) return String(value.message ?? "Whiteboard forget refused.");
+  const raw = value.removed;
+  const removed = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : void 0;
+  const head = removed === void 0 ? "Whiteboard entry forgotten." : `Forgot [${String(removed.kind)}] ${String(removed.text)} \u2014 ${String(removed.id)} (${String(removed.scope)}).`;
+  const rendered = typeof value.rendered === "string" && value.rendered.length > 0 ? value.rendered : "(empty)";
+  return `${head}
+${rendered}`;
+}
+var SESSION_SWEEP_DELAY_MS = 2e3;
+async function sweepSessionBoardsNow(ctx, config) {
+  const pending = sweepSessionBoards(readWhiteboardStore(ctx), config.maxSessionBoards);
+  if (pending.dropped.length === 0) return;
+  let dropped = [];
+  const committed = await commitStore(ctx, config, {}, (current) => {
+    const next = sweepSessionBoards(current, config.maxSessionBoards);
+    dropped = next.dropped;
+    return { ok: true, store: next.store };
+  });
+  if (!committed.ok) {
+    process.stderr.write(`[enpoi-whiteboard] session-board GC skipped: ${committed.message}
+`);
+    return;
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(`[enpoi-whiteboard] session-board GC dropped ${dropped.length} board(s) over the ${config.maxSessionBoards} limit: ${dropped.join(", ")}
+`);
+  }
+}
+function scheduleSessionSweep(ctx, config) {
+  const timer = setTimeout(() => {
+    void sweepSessionBoardsNow(ctx, config).catch((error) => {
+      process.stderr.write(`[enpoi-whiteboard] session-board GC failed: ${String(error)}
+`);
+    });
+  }, SESSION_SWEEP_DELAY_MS);
+  timer.unref();
+  ctx.effect(() => () => {
+    clearTimeout(timer);
+  }, "enpoi-whiteboard: session-board GC");
 }
 function installInjection(ctx) {
   const systemPrompt = ctx.get("systemPrompt");
@@ -632,11 +825,13 @@ function installInjection(ctx) {
 }
 function apply(ctx, config = {}) {
   const resolved = {
-    budgetTokens: typeof config.budgetTokens === "number" && Number.isFinite(config.budgetTokens) && config.budgetTokens > 0 ? Math.floor(config.budgetTokens) : DEFAULT_BUDGET_TOKENS
+    budgetTokens: typeof config.budgetTokens === "number" && Number.isFinite(config.budgetTokens) && config.budgetTokens > 0 ? Math.floor(config.budgetTokens) : DEFAULT_BUDGET_TOKENS,
+    maxSessionBoards: typeof config.maxSessionBoards === "number" && Number.isFinite(config.maxSessionBoards) && config.maxSessionBoards >= 1 ? Math.floor(config.maxSessionBoards) : DEFAULT_MAX_SESSION_BOARDS
   };
   registerTools(ctx, resolved);
   installInjection(ctx);
-  process.stderr.write(`[enpoi-whiteboard] mounted (budget ${resolved.budgetTokens} tokens; per-scope board resolved lazily per assembly; runtime-context seam)
+  scheduleSessionSweep(ctx, resolved);
+  process.stderr.write(`[enpoi-whiteboard] mounted (budget ${resolved.budgetTokens} tokens, ${resolved.maxSessionBoards} session boards max; per-scope board resolved lazily per assembly; runtime-context seam)
 `);
 }
 export {
