@@ -5,18 +5,21 @@
  * The board lives in the shared settings namespace `enpoi-orchestration` under
  * `whiteboard` (hot-swappable + cross-device via settings sync), is authored
  * only through the four tools (`whiteboard_read`, `whiteboard_write`,
- * `whiteboard_pin`, `whiteboard_unpin`), and is injected into every assembly
- * through the runtime-context seam (`systemPrompt.context()`, a trailing
- * replace-in-place snapshot) — never the system prompt itself, so the frozen
- * prefix keeps its cache.
+ * `whiteboard_pin`, `whiteboard_unpin`), and is injected through the
+ * runtime-context seam (`systemPrompt.context()`, a trailing replace-in-place
+ * snapshot) — never the system prompt itself, so the frozen prefix keeps its
+ * cache.
  *
- * Children inherit by construction: the contribution is global, so every
- * agent's assembly (parent or delegated child) renders it, and the rendered
- * header carries the board version the spawn recorded.
+ * Boards are stored per scope and resolved per session: global → project
+ * (matching the session cwd) → parent session (direct-child inheritance) →
+ * session (matching the session id), later scopes overriding earlier ones by
+ * entry id. The injected block and every read render the resolved view, so a
+ * session-scoped entry never leaks into another session; a legacy single-board
+ * document stays readable and migrates into the bucket its own scope names.
  *
- * Guarantees: a rendered board over the hard budget is REFUSED (never silently
- * trimmed); `path` entries are validated on write and flagged `stale` — never
- * deleted.
+ * Guarantees: a rendered resolved board over the hard budget REFUSES the write
+ * (never silently trims); `path` entries are validated on write and flagged
+ * `stale` — never deleted.
  *
  * @module dsh-enpoi-whiteboard
  */
@@ -29,18 +32,24 @@ import {
   DEFAULT_BUDGET_TOKENS,
   WHITEBOARD_CONTEXT_NAME,
   WHITEBOARD_CONTEXT_ORDER,
-  applyWrites,
-  boardApplies,
+  applyStoreWrites,
   checkBudget,
   estimateTokens,
+  findEntryTarget,
+  isWhiteboardScope,
   lintPaths,
-  normalizeDoc,
+  normalizeStore,
+  readBoard,
   renderWhiteboard,
-  setPinned,
+  resolveBoard,
+  setStorePinned,
   versionLine,
+  writeBoard,
   type BoardScopeFacts,
-  type WhiteboardDoc,
+  type ResolvedBoard,
   type WhiteboardEntry,
+  type WhiteboardStore,
+  type WhiteboardTarget,
   type WhiteboardWriteRequest,
 } from './board'
 
@@ -101,18 +110,30 @@ function settingsOf(ctx: Context): SettingsLike | undefined {
 }
 
 /**
- * Read the current board. Never throws: a missing settings service or a
- * malformed value answers the empty board, so the plugin can never break a
- * turn (doc 66 invariant 1).
+ * Read the current multi-scope store. Never throws: a missing settings service
+ * or a malformed value answers the empty store, so the plugin can never break a
+ * turn (doc 66 invariant 1). A legacy single-board document is migrated in
+ * memory and rewritten in the new shape by the next write.
  * @param ctx - owning plugin context.
- * @returns the current board.
+ * @returns the normalized store.
  */
-export function readWhiteboard(ctx: Context): WhiteboardDoc {
+export function readWhiteboardStore(ctx: Context): WhiteboardStore {
   try {
-    return normalizeDoc(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard)
+    return normalizeStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard)
   } catch {
-    return normalizeDoc(undefined)
+    return normalizeStore(undefined)
   }
+}
+
+/**
+ * Read the board resolved for one assembly's scope facts (global → project →
+ * parent session → session).
+ * @param ctx - owning plugin context.
+ * @param facts - the reader's scope facts; omitted resolves global only.
+ * @returns the resolved view.
+ */
+export function readWhiteboard(ctx: Context, facts: BoardScopeFacts = {}): ResolvedBoard {
+  return resolveBoard(readWhiteboardStore(ctx), facts)
 }
 
 /** The cwd a tool call resolves `path` entries against. */
@@ -121,9 +142,33 @@ function toolCwd(exec: ToolExecLike | undefined): string {
   return typeof cwd === 'string' && cwd.length > 0 ? cwd : process.cwd()
 }
 
+/** The scope facts one agent contributes (a tool-call session or an assembly). */
+function agentFacts(agent: ToolExecLike['agent']): BoardScopeFacts {
+  const facts: BoardScopeFacts = {}
+  const session = agent?.session
+  const id = session?.id
+  if (typeof id === 'string' && id.length > 0) facts.sessionId = id
+  const parent = session?.header?.parentSession
+  if (typeof parent === 'string' && parent.length > 0) facts.parentSessionId = parent
+  const cwd = session?.header?.cwd
+  if (typeof cwd === 'string' && cwd.length > 0) facts.projectId = cwd
+  return facts
+}
+
+/** The scope facts one tool call contributes. */
+function sessionFacts(exec: ToolExecLike | undefined): BoardScopeFacts {
+  return agentFacts(exec?.agent)
+}
+
 /** Resolve one entry's path text against a cwd (absolute entries pass through). */
 function resolveEntryPath(entry: WhiteboardEntry, cwd: string): string {
   return isAbsolute(entry.text) ? entry.text : resolve(cwd, entry.text)
+}
+
+/** The board with its path entries linted against the calling session's cwd. */
+function linted<T extends { entries: readonly WhiteboardEntry[] }>(doc: T, exec: ToolExecLike | undefined): T {
+  const cwd = toolCwd(exec)
+  return lintPaths(doc, (entry) => resolveEntryPath(entry, cwd), existsSync, Date.now()).doc
 }
 
 /** A write refusal surfaced to the model verbatim. */
@@ -131,39 +176,43 @@ function refusal(message: string, extra: Record<string, unknown> = {}): Record<s
   return { ok: false, reason: 'refused', message, ...extra }
 }
 
-/** The result of one fenced board commit. */
+/** The result of one fenced store commit. */
 type CommitResult =
-  | { ok: true; doc: WhiteboardDoc }
+  | { ok: true; store: WhiteboardStore }
   | { ok: false; message: string; tokens?: number; budget?: number }
 
 /**
- * Read-modify-write the board under the namespace revision fence: a concurrent
+ * Read-modify-write the store under the namespace revision fence: a concurrent
  * writer (another tool call, or the operator's settings surface) is re-read and
- * the transition replayed, so a write is never silently clobbered.
+ * the transition replayed, so a write is never silently clobbered. The candidate
+ * is budget-checked as the resolved view of `checkFacts` — the audience the
+ * write targets (or the writer's own session for a global write).
  * @param ctx - owning plugin context.
  * @param config - resolved plugin config.
- * @param build - pure transition from the current board to the candidate.
- * @returns the committed board, or a refusal message.
+ * @param checkFacts - the scope facts the budget check resolves against.
+ * @param build - pure transition from the current store to the candidate.
+ * @returns the committed store, or a refusal message.
  */
-async function commitBoard(
+async function commitStore(
   ctx: Context,
   config: Required<Config>,
-  build: (doc: WhiteboardDoc, now: number) => { ok: true; doc: WhiteboardDoc } | { ok: false; message: string },
+  checkFacts: BoardScopeFacts,
+  build: (store: WhiteboardStore, now: number) => { ok: true; store: WhiteboardStore } | { ok: false; message: string },
 ): Promise<CommitResult> {
   const settings = settingsOf(ctx)
   if (settings?.mutate === undefined) return { ok: false, message: 'settings service unavailable — board not written' }
   let lastError: unknown
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const now = Date.now()
-    const current = readWhiteboard(ctx)
+    const current = readWhiteboardStore(ctx)
     const built = build(current, now)
     if (!built.ok) return { ok: false, message: built.message }
-    const next: WhiteboardDoc = { ...built.doc, version: current.version + 1, updatedAt: now }
-    const check = checkBudget(next, config.budgetTokens)
+    const next: WhiteboardStore = { ...built.store, version: current.version + 1 }
+    const check = checkBudget(resolveBoard(next, checkFacts), config.budgetTokens)
     if (!check.ok) {
       return {
         ok: false,
-        message: `Over budget: the board renders ${check.tokens} tokens (budget ${check.budget}). Nothing was written.`,
+        message: `Over budget: the resolved board renders ${check.tokens} tokens (budget ${check.budget}). Nothing was written.`,
         tokens: check.tokens,
         budget: check.budget,
       }
@@ -171,7 +220,7 @@ async function commitBoard(
     const revision = settings.describe?.().find((entry) => entry.ns === ORCH_NS)?.revision
     try {
       await settings.mutate(ORCH_NS, [{ op: 'set', path: ['whiteboard'], value: next }], revision)
-      return { ok: true, doc: next }
+      return { ok: true, store: next }
     } catch (error) {
       lastError = error
       if ((error as { code?: string })?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
@@ -181,34 +230,82 @@ async function commitBoard(
   return { ok: false, message: `board write failed after retries: ${String(lastError)}` }
 }
 
-/** The board with its paths linted against the calling session's cwd. */
-function linted(doc: WhiteboardDoc, exec: ToolExecLike | undefined): WhiteboardDoc {
-  const cwd = toolCwd(exec)
-  return lintPaths(doc, (entry) => resolveEntryPath(entry, cwd), existsSync, Date.now()).doc
+/**
+ * Result fields every whiteboard tool may return (the `boardView` shape plus the
+ * optional `note`). Declared once so a tool output schema cannot drift from the
+ * real result — `whiteboard_pin`/`whiteboard_unpin` shipped without `scope` and
+ * the harness rejected their (correct) output as invalid.
+ */
+const BOARD_RESULT_PROPERTIES = {
+  ok: { type: 'boolean' as const },
+  reason: { type: 'string' as const },
+  message: { type: 'string' as const },
+  version: { type: 'number' as const },
+  scope: { type: 'string' as const },
+  tokens: { type: 'number' as const },
+  budget: { type: 'number' as const },
+  entries: { type: 'array' as const, items: { type: 'object' as const, additionalProperties: true } },
+  stale: { type: 'array' as const, items: { type: 'string' as const } },
+  rendered: { type: 'string' as const },
+  versionLine: { type: 'string' as const },
+  note: { type: 'string' as const },
 }
 
-/** Render + numbers for one tool result. */
-function boardView(doc: WhiteboardDoc, budgetTokens: number): Record<string, unknown> {
-  const rendered = renderWhiteboard(doc)
-  const entries = doc.entries.map((entry) => ({
+/** The resolved view plus numbers for one tool result. */
+function boardView(resolved: ResolvedBoard, budgetTokens: number): Record<string, unknown> {
+  const rendered = renderWhiteboard(resolved)
+  const entries = resolved.entries.map((entry) => ({
     id: entry.id,
     kind: entry.kind,
     text: entry.text,
     pinned: entry.pinned,
     version: entry.version,
+    scope: entry.scope,
     ...(entry.stale === true ? { stale: true } : {}),
   }))
-  const stale = doc.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
+  const stale = resolved.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
   return {
     ok: true,
-    version: doc.version,
-    scope: doc.scope,
+    version: resolved.version,
+    scope: resolved.scope,
     tokens: estimateTokens(rendered),
     budget: budgetTokens,
     entries,
     stale,
     rendered,
-    versionLine: versionLine(doc),
+    versionLine: versionLine(resolved),
+  }
+}
+
+/** The write target plus the facts its budget check resolves. */
+type WriteTarget = { target: WhiteboardTarget; checkFacts: BoardScopeFacts }
+
+/**
+ * Resolve one write's storage target. `scope` is explicit or defaults to the
+ * caller's own session; explicit `sessionId`/`projectId` override the calling
+ * session's identity. The budget check resolves the audience a write targets:
+ * a project write checks global + that project, a session write checks the
+ * writer's whole resolved view (its own session defaults here), and a global
+ * write checks the writer's view — the best available approximation.
+ * @param exec - the tool execution identity.
+ * @param args - the tool arguments.
+ * @returns the target and check facts, or an error message.
+ */
+function writeTargetFor(exec: ToolExecLike | undefined, args: Record<string, unknown>): WriteTarget | { error: string } {
+  const own = sessionFacts(exec)
+  const scope = isWhiteboardScope(args.scope) ? args.scope : 'session'
+  if (scope === 'global') return { target: { scope: 'global' }, checkFacts: own }
+  if (scope === 'project') {
+    const explicit = typeof args.projectId === 'string' && args.projectId.length > 0 ? args.projectId : undefined
+    const projectId = explicit ?? toolCwd(exec)
+    return { target: { scope: 'project', projectId }, checkFacts: { projectId } }
+  }
+  const explicit = typeof args.sessionId === 'string' && args.sessionId.length > 0 ? args.sessionId : undefined
+  const sessionId = explicit ?? own.sessionId
+  if (sessionId === undefined) return { error: 'scope "session" requires a session id and this execution has none' }
+  return {
+    target: { scope: 'session', sessionId },
+    checkFacts: sessionId === own.sessionId ? own : { sessionId },
   }
 }
 
@@ -222,18 +319,17 @@ function registerTools(ctx: Context, config: Required<Config>): void {
 
   tools.register({
     name: 'whiteboard_read',
-    description: 'Read the pinned shared context board (orchestrator-authored core context injected into every agent). Returns entries, the rendered block, its token cost, and stale path flags.',
+    description: [
+      'Read the pinned context board resolved for this session: global entries, then this project\'s, then this session\'s (a direct child also inherits its parent session\'s), later scopes overriding earlier ones by entry id.',
+      'Every entry reports the scope that authored it. Returns the exact injected block, its token cost, and stale path flags.',
+    ].join(' '),
     parameters: { type: 'object', properties: {}, required: [] },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          ok: { type: 'boolean' },
-          version: { type: 'number' },
-          scope: { type: 'string' },
-          tokens: { type: 'number' },
-          budget: { type: 'number' },
+          ...BOARD_RESULT_PROPERTIES,
           entries: {
             type: 'array',
             items: {
@@ -241,9 +337,10 @@ function registerTools(ctx: Context, config: Required<Config>): void {
               additionalProperties: false,
               properties: {
                 id: { type: 'string' }, kind: { type: 'string' }, text: { type: 'string' },
-                pinned: { type: 'boolean' }, version: { type: 'number' }, stale: { type: 'boolean' },
+                pinned: { type: 'boolean' }, version: { type: 'number' }, scope: { type: 'string' },
+                stale: { type: 'boolean' },
               },
-              required: ['id', 'kind', 'text', 'pinned', 'version'],
+              required: ['id', 'kind', 'text', 'pinned', 'version', 'scope'],
             },
           },
           stale: { type: 'array', items: { type: 'string' } },
@@ -256,23 +353,24 @@ function registerTools(ctx: Context, config: Required<Config>): void {
     },
     isConcurrencySafe: () => true,
     async execute(_args: unknown, exec: ToolExecLike) {
-      return boardView(linted(readWhiteboard(ctx), exec), config.budgetTokens)
+      return boardView(linted(readWhiteboard(ctx, sessionFacts(exec)), exec), config.budgetTokens)
     },
   })
 
   tools.register({
     name: 'whiteboard_write',
     description: [
-      'Author the pinned shared context board: append entries, or replace entries by id (every replace bumps the entry version).',
+      'Author the pinned context board for one scope. scope defaults to session (your own session); project stores under your session cwd (or projectId) and applies to that project; global applies to every session.',
+      'Append entries, or replace entries by id (every replace bumps the entry version).',
       'Kinds: path (project-relative path — validated on write, flagged stale when missing, never deleted), rule, fact, task.',
-      'The rendered board has a HARD token budget; an over-budget write is refused and nothing changes.',
+      'The resolved block has a HARD token budget; an over-budget write is refused and nothing changes.',
       'Keep only core context the orchestrator must not have to repeat: current docs, invariants, task state.',
     ].join(' '),
     parameters: {
       type: 'object',
       properties: {
         mode: { type: 'string', enum: ['append', 'replace'], description: 'append (default) adds entries; replace overwrites the entry named by replaceId' },
-        scope: { type: 'string', enum: ['session', 'project', 'global'], description: 'Where the board applies (default: keep the current scope)' },
+        scope: { type: 'string', enum: ['session', 'project', 'global'], description: 'Where entries land (default: session — the calling session)' },
         sessionId: { type: 'string', description: 'Session id when scope=session (default: the calling session)' },
         projectId: { type: 'string', description: 'Project cwd when scope=project (default: the calling session cwd)' },
         entries: {
@@ -297,14 +395,7 @@ function registerTools(ctx: Context, config: Required<Config>): void {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean' }, reason: { type: 'string' }, message: { type: 'string' },
-          tokens: { type: 'number' }, budget: { type: 'number' },
-          version: { type: 'number' }, scope: { type: 'string' },
-          entries: { type: 'array', items: { type: 'object', additionalProperties: true } },
-          stale: { type: 'array', items: { type: 'string' } },
-          rendered: { type: 'string' }, versionLine: { type: 'string' }, note: { type: 'string' },
-        },
+        properties: { ...BOARD_RESULT_PROPERTIES },
         required: ['ok'],
       },
       render: (_args, value) => [{ type: 'text', text: renderWriteResult(value) }],
@@ -329,19 +420,21 @@ function registerTools(ctx: Context, config: Required<Config>): void {
           ...(row.pinned === true ? { pinned: true } : {}),
         })
       }
-      // Scope facts: explicit args win; otherwise the calling session supplies
-      // them, so an unqualified write authors the board that applies here.
-      const facts = scopeFactsForWrite(ctx, exec, args)
-      const committed = await commitBoard(ctx, config, (doc, now) => {
-        const shaped: WhiteboardDoc = { ...doc, ...facts }
-        const applied = applyWrites(shaped, requests, mode, now)
+      const target = writeTargetFor(exec, args)
+      if ('error' in target) return refusal(target.error)
+      const committed = await commitStore(ctx, config, target.checkFacts, (store, now) => {
+        const applied = applyStoreWrites(store, target.target, requests, mode, now)
         if (!applied.ok) return applied
-        return { ok: true, doc: linted(applied.doc, exec) }
+        const board = readBoard(applied.store, target.target)
+        return board === undefined
+          ? { ok: true, store: applied.store }
+          : { ok: true, store: writeBoard(applied.store, target.target, linted(board, exec)) }
       })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      const stale = committed.doc.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
+      const resolved = resolveBoard(committed.store, sessionFacts(exec))
+      const stale = resolved.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
       return {
-        ...boardView(committed.doc, config.budgetTokens),
+        ...boardView(linted(resolved, exec), config.budgetTokens),
         note: stale.length > 0 ? `${stale.length} path entry(ies) flagged stale (missing on disk) — prune or repoint them` : 'written',
       }
     },
@@ -349,7 +442,7 @@ function registerTools(ctx: Context, config: Required<Config>): void {
 
   tools.register({
     name: 'whiteboard_pin',
-    description: 'Pin a whiteboard entry: pinned entries sort first and are never compacted. Pinning never rewrites the entry text.',
+    description: 'Pin a whiteboard entry in the scope that authored it (pinned entries sort first and are never compacted). Pinning never rewrites the entry text.',
     parameters: {
       type: 'object',
       properties: { id: { type: 'string', description: 'Entry id from whiteboard_read' } },
@@ -358,7 +451,7 @@ function registerTools(ctx: Context, config: Required<Config>): void {
     output: {
       schema: {
         type: 'object', additionalProperties: false,
-        properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, message: { type: 'string' }, version: { type: 'number' }, tokens: { type: 'number' }, budget: { type: 'number' }, entries: { type: 'array', items: { type: 'object', additionalProperties: true } }, stale: { type: 'array', items: { type: 'string' } }, rendered: { type: 'string' }, versionLine: { type: 'string' }, note: { type: 'string' } },
+        properties: { ...BOARD_RESULT_PROPERTIES },
         required: ['ok'],
       },
       render: (_args, value) => [{ type: 'text', text: renderWriteResult(value) }],
@@ -367,15 +460,20 @@ function registerTools(ctx: Context, config: Required<Config>): void {
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
-      const committed = await commitBoard(ctx, config, (doc, now) => setPinned(doc, id, true, now))
+      const facts = sessionFacts(exec)
+      const committed = await commitStore(ctx, config, facts, (store, now) => {
+        const target = findEntryTarget(store, facts, id)
+        if (target === undefined) return { ok: false, message: `no entry with id "${id}" in this session's resolved board` }
+        return setStorePinned(store, target, id, true, now)
+      })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      return { ...boardView(linted(committed.doc, exec), config.budgetTokens), note: `pinned ${id}` }
+      return { ...boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens), note: `pinned ${id}` }
     },
   })
 
   tools.register({
     name: 'whiteboard_unpin',
-    description: 'Unpin a whiteboard entry. Unpinning never deletes the entry; the operator prunes explicitly.',
+    description: 'Unpin a whiteboard entry in the scope that authored it. Unpinning never deletes the entry; the operator prunes explicitly.',
     parameters: {
       type: 'object',
       properties: { id: { type: 'string', description: 'Entry id from whiteboard_read' } },
@@ -384,7 +482,7 @@ function registerTools(ctx: Context, config: Required<Config>): void {
     output: {
       schema: {
         type: 'object', additionalProperties: false,
-        properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, message: { type: 'string' }, version: { type: 'number' }, tokens: { type: 'number' }, budget: { type: 'number' }, entries: { type: 'array', items: { type: 'object', additionalProperties: true } }, stale: { type: 'array', items: { type: 'string' } }, rendered: { type: 'string' }, versionLine: { type: 'string' }, note: { type: 'string' } },
+        properties: { ...BOARD_RESULT_PROPERTIES },
         required: ['ok'],
       },
       render: (_args, value) => [{ type: 'text', text: renderWriteResult(value) }],
@@ -393,58 +491,40 @@ function registerTools(ctx: Context, config: Required<Config>): void {
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
-      const committed = await commitBoard(ctx, config, (doc, now) => setPinned(doc, id, false, now))
+      const facts = sessionFacts(exec)
+      const committed = await commitStore(ctx, config, facts, (store, now) => {
+        const target = findEntryTarget(store, facts, id)
+        if (target === undefined) return { ok: false, message: `no entry with id "${id}" in this session's resolved board` }
+        return setStorePinned(store, target, id, false, now)
+      })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      return { ...boardView(linted(committed.doc, exec), config.budgetTokens), note: `unpinned ${id}` }
+      return { ...boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens), note: `unpinned ${id}` }
     },
   })
-}
-
-/** Resolve the scope facts one write authors the board under. */
-function scopeFactsForWrite(
-  ctx: Context,
-  exec: ToolExecLike | undefined,
-  args: Record<string, unknown>,
-): Partial<WhiteboardDoc> {
-  const scope = args.scope
-  if (scope !== 'session' && scope !== 'project' && scope !== 'global') return {}
-  if (scope === 'global') return { scope: 'global' }
-  if (scope === 'project') {
-    const projectId = typeof args.projectId === 'string' && args.projectId.length > 0
-      ? args.projectId
-      : exec?.agent?.session?.header?.cwd ?? process.cwd()
-    return { scope: 'project', projectId }
-  }
-  const sessionId = typeof args.sessionId === 'string' && args.sessionId.length > 0
-    ? args.sessionId
-    : exec?.agent?.session?.id
-  return typeof sessionId === 'string' && sessionId.length > 0
-    ? { scope: 'session', sessionId }
-    : { scope: 'session' }
 }
 
 /** Model-facing render for a successful board read. */
 function renderWhiteboardResult(value: Record<string, unknown>): string {
   const entries = Array.isArray(value.entries) ? value.entries as Array<Record<string, unknown>> : []
-  if (entries.length === 0) return `Whiteboard v${String(value.version)} is empty (0/${String(value.budget)} tokens).`
-  const lines = entries.map((entry) => `• ${entry.pinned === true ? '📌 ' : ''}[${String(entry.kind)}] ${String(entry.text)}${entry.stale === true ? ' (stale)' : ''} — ${String(entry.id)} v${String(entry.version)}`)
-  return [...lines, `— v${String(value.version)} · ${String(value.tokens)}/${String(value.budget)} tokens`].join('\n')
+  if (entries.length === 0) return `Whiteboard v${String(value.version)} resolves to no entries for this session (0/${String(value.budget)} tokens).`
+  const lines = entries.map((entry) => `• ${entry.pinned === true ? '📌 ' : ''}[${String(entry.kind)}] ${String(entry.text)}${entry.stale === true ? ' (stale)' : ''} — ${String(entry.id)} v${String(entry.version)} · ${String(entry.scope)}`)
+  return [...lines, `— v${String(value.version)} · ${String(value.scope)} · ${String(value.tokens)}/${String(value.budget)} tokens`].join('\n')
 }
 
 /** Model-facing render for a board mutation (or its refusal). */
 function renderWriteResult(value: Record<string, unknown>): string {
   if (value.ok !== true) return String(value.message ?? 'Whiteboard write refused.')
   const stale = Array.isArray(value.stale) ? value.stale as string[] : []
-  const head = `Whiteboard v${String(value.version)} — ${stale.length} stale path flag(s).`
+  const head = `Whiteboard v${String(value.version)} (${String(value.scope)}) — ${stale.length} stale path flag(s).`
   const rendered = typeof value.rendered === 'string' && value.rendered.length > 0 ? value.rendered : '(empty)'
   return `${head}\n${rendered}`
 }
 
 /**
- * Install the runtime-context contribution. The contribution is global by
- * construction, so every agent assembly (orchestrator, worker, delegated
- * council seat) renders the same authored truth and records the version its
- * request carried.
+ * Install the runtime-context contribution. The contribution renders the board
+ * resolved for each assembling agent (session → project → global), so every
+ * agent sees exactly the entries that apply to it — a session-scoped entry
+ * never leaks into another session, and a global entry applies everywhere.
  */
 function installInjection(ctx: Context): void {
   const systemPrompt = ctx.get('systemPrompt') as SystemPromptLike | undefined
@@ -457,16 +537,8 @@ function installInjection(ctx: Context): void {
     order: WHITEBOARD_CONTEXT_ORDER,
     text: (assembly) => {
       try {
-        const doc = readWhiteboard(ctx)
-        const facts: BoardScopeFacts = {}
-        const session = assembly?.agent?.session
-        if (typeof session?.id === 'string') facts.sessionId = session.id
-        const parent = session?.header?.parentSession
-        if (typeof parent === 'string') facts.parentSessionId = parent
-        const cwd = session?.header?.cwd
-        if (typeof cwd === 'string') facts.projectId = cwd
-        if (!boardApplies(doc, facts)) return ''
-        return renderWhiteboard(doc)
+        const resolved = resolveBoard(readWhiteboardStore(ctx), agentFacts(assembly?.agent))
+        return renderWhiteboard(resolved)
       } catch {
         return ''
       }
@@ -483,5 +555,5 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
   registerTools(ctx, resolved)
   installInjection(ctx)
-  process.stderr.write(`[enpoi-whiteboard] mounted (budget ${resolved.budgetTokens} tokens; board read lazily per assembly; runtime-context seam)\n`)
+  process.stderr.write(`[enpoi-whiteboard] mounted (budget ${resolved.budgetTokens} tokens; per-scope board resolved lazily per assembly; runtime-context seam)\n`)
 }

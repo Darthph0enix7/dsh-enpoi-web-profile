@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto'
 import {
   BROKER_KEPT_TOOLS,
   COUNCIL_DENIED_TOOLS,
+  COUNCIL_KEPT_TOOLS,
   councilDiag,
   disposeSeatFibers,
   estimateTokens,
@@ -179,8 +180,11 @@ export async function serviceEvidenceQueue(
       label: queue.length === 1 ? `council broker: ${queue[0].ticket}` : `council broker: ${queue.length} questions (epoch ${epoch})`,
       persona: BROKER_PERSONA,
       initialPrompt: prompt,
-      // Broker keeps the research surface; everything else stays denied.
-      denyTools: COUNCIL_DENIED_TOOLS.filter(t => !(BROKER_KEPT_TOOLS as readonly string[]).includes(t)),
+      // Broker keeps the research surface; everything else stays denied, and
+      // the shared whiteboard survives every tier (COUNCIL_KEPT_TOOLS).
+      denyTools: COUNCIL_DENIED_TOOLS
+        .filter(t => !(BROKER_KEPT_TOOLS as readonly string[]).includes(t))
+        .filter(t => !(COUNCIL_KEPT_TOOLS as readonly string[]).includes(t)),
     }, signal)
     const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs)
     const parsed = parseFactSheets(text)

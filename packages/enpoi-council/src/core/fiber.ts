@@ -113,7 +113,20 @@ export const COUNCIL_DENIED_TOOLS = [
 // Oracle amendment #2 — no DECLARED_READ loophole).
 export const RETRIEVAL_TOOLS = ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'] as const
 
-export const DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS]
+/**
+ * Tools every council fiber keeps regardless of fencing tier: the pinned
+ * whiteboard. Seats are fenced off retrieval and mutation, but the board is
+ * shared deliberation context — one seat records a finding the others read —
+ * so it is subtracted from every deny composition (debaters, referee, broker,
+ * registered-council denies) and survives the seat hand-off.
+ */
+export const COUNCIL_KEPT_TOOLS = [
+  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin',
+] as const
+
+const isKeptTool = (name: string): boolean => (COUNCIL_KEPT_TOOLS as readonly string[]).includes(name)
+
+export const DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS].filter(name => !isKeptTool(name))
 
 /**
  * The deny list for one fiber: the base list plus every REGISTERED council's
@@ -124,6 +137,7 @@ export const DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS
  */
 export function councilDenyList(registeredCouncilTools: readonly string[]): string[] {
   return [...new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter(id => id !== 'roundtable' && id !== 'chorus')])]
+    .filter(name => !isKeptTool(name))
 }
 
 // The BROKER child keeps the research surface (it is the errand boy's door).

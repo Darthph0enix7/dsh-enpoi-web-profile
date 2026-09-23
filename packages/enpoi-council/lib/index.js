@@ -156,9 +156,16 @@ var COUNCIL_DENIED_TOOLS = [
   "request_evidence"
 ];
 var RETRIEVAL_TOOLS = ["read", "glob", "grep", "read_image", "web_search", "web_fetch"];
-var DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS];
+var COUNCIL_KEPT_TOOLS = [
+  "whiteboard_read",
+  "whiteboard_write",
+  "whiteboard_pin",
+  "whiteboard_unpin"
+];
+var isKeptTool = (name2) => COUNCIL_KEPT_TOOLS.includes(name2);
+var DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS].filter((name2) => !isKeptTool(name2));
 function councilDenyList(registeredCouncilTools) {
-  return [.../* @__PURE__ */ new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter((id) => id !== "roundtable" && id !== "chorus")])];
+  return [.../* @__PURE__ */ new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter((id) => id !== "roundtable" && id !== "chorus")])].filter((name2) => !isKeptTool(name2));
 }
 var BROKER_KEPT_TOOLS = [...RETRIEVAL_TOOLS];
 function resolveChainSnapshot(ctx, id) {
@@ -20574,8 +20581,9 @@ async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, ti
       label: queue.length === 1 ? `council broker: ${queue[0].ticket}` : `council broker: ${queue.length} questions (epoch ${epoch})`,
       persona: BROKER_PERSONA,
       initialPrompt: prompt,
-      // Broker keeps the research surface; everything else stays denied.
-      denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t))
+      // Broker keeps the research surface; everything else stays denied, and
+      // the shared whiteboard survives every tier (COUNCIL_KEPT_TOOLS).
+      denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t)).filter((t) => !COUNCIL_KEPT_TOOLS.includes(t))
     }, signal);
     const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
     const parsed = parseFactSheets(text);

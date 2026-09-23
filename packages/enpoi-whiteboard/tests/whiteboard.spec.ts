@@ -3,17 +3,22 @@ import {
   DEFAULT_BUDGET_TOKENS,
   WHITEBOARD_CONTEXT_NAME,
   WHITEBOARD_CONTEXT_ORDER,
+  applyStoreWrites,
   applyWrites,
-  boardApplies,
   checkBudget,
   estimateTokens,
+  findEntryTarget,
   lintPaths,
   normalizeDoc,
+  normalizeStore,
   renderWhiteboard,
+  resolveBoard,
   setPinned,
+  type WhiteboardBoard,
   type WhiteboardDoc,
+  type WhiteboardStore,
 } from '../src/board'
-import { apply as applyWhiteboard, readWhiteboard } from '../src/index'
+import { apply as applyWhiteboard, readWhiteboard, readWhiteboardStore } from '../src/index'
 
 /** In-memory settings service with revision fencing (conflict on a stale writer). */
 function makeSettings(initialBoard?: unknown) {
@@ -37,7 +42,7 @@ function makeSettings(initialBoard?: unknown) {
 
 /** Fake ctx capturing registered tool definitions. */
 function makeCtx(settings: ReturnType<typeof makeSettings>) {
-  const definitions = new Map<string, { name: string; execute: (args: unknown, exec?: unknown) => Promise<Record<string, unknown>> }>()
+  const definitions = new Map<string, { name: string; execute: (args: unknown, exec?: unknown) => Promise<Record<string, unknown>>; output?: { schema: unknown } }>()
   const ctx = {
     get: (name: string) => (name === 'settings' ? settings : undefined),
     tools: { register: (definition: { name: string }) => { definitions.set(definition.name, definition as never) } },
@@ -48,17 +53,85 @@ function makeCtx(settings: ReturnType<typeof makeSettings>) {
 }
 
 const sessionExec = { agent: { session: { id: 'sess-1', header: { cwd: '/tmp/opencode/heart-home' } } } }
+const otherExec = { agent: { session: { id: 'sess-2', header: { cwd: '/tmp/opencode/heart-home' } } } }
+
+/** A store with one entry in every layer; the session overrides by id. */
+function layeredStore(): WhiteboardStore {
+  return normalizeStore({
+    version: 9,
+    docs: {
+      global: {
+        version: 2,
+        updatedAt: 100,
+        entries: [
+          { id: 'g1', kind: 'fact', text: 'global one', version: 1 },
+          { id: 'g2', kind: 'fact', text: 'global two', version: 1 },
+        ],
+      },
+      projects: {
+        '/p': { version: 1, updatedAt: 200, entries: [{ id: 'p1', kind: 'rule', text: 'project one', version: 1 }] },
+      },
+      sessions: {
+        'sess-1': {
+          version: 1,
+          updatedAt: 300,
+          entries: [
+            { id: 's1', kind: 'task', text: 'session one', version: 1 },
+            { id: 'p1', kind: 'rule', text: 'session override of p1', version: 2 },
+          ],
+        },
+      },
+    },
+  })
+}
 
 describe('enpoi-whiteboard board vocabulary', () => {
-  it('normalizes a malformed stored value into the empty board', () => {
+  it('normalizes a malformed stored value into the empty board and store', () => {
     expect(normalizeDoc(undefined)).toMatchObject({ version: 0, entries: [] })
     expect(normalizeDoc({ version: 'x', entries: [{ kind: 'bogus', text: 'x' }, { kind: 'rule', text: '' }] })).toMatchObject({ version: 0, entries: [] })
+    const store = normalizeStore({ version: 'x', docs: { projects: null, sessions: 'nope' } })
+    expect(store).toMatchObject({ version: 0, docs: { projects: {}, sessions: {} } })
+    expect(store.docs.global).toBeUndefined()
+  })
+
+  it('migrates a legacy single board into the bucket its own scope names', () => {
+    const global = normalizeStore({
+      version: 4,
+      scope: 'global',
+      updatedAt: 11,
+      entries: [{ id: 'g', kind: 'fact', text: 'global fact', version: 1 }],
+    })
+    expect(global.version).toBe(4)
+    expect(global.docs.global?.entries[0]).toMatchObject({ id: 'g' })
+    expect(global.docs.sessions).toEqual({})
+
+    const session = normalizeStore({
+      version: 2,
+      scope: 'session',
+      sessionId: 'sess-9',
+      updatedAt: 12,
+      entries: [{ id: 's', kind: 'rule', text: 'session rule', version: 1 }],
+    })
+    expect(session.docs.sessions['sess-9']?.entries[0]).toMatchObject({ id: 's' })
+    expect(session.docs.global).toBeUndefined()
+
+    const project = normalizeStore({
+      version: 1,
+      scope: 'project',
+      projectId: '/p',
+      updatedAt: 13,
+      entries: [{ id: 'p', kind: 'rule', text: 'project rule', version: 1 }],
+    })
+    expect(project.docs.projects['/p']?.entries[0]).toMatchObject({ id: 'p' })
+
+    // The new shape round-trips through the normalizer unchanged.
+    const round = normalizeStore(JSON.parse(JSON.stringify(layeredStore())) as unknown)
+    expect(round).toEqual(layeredStore())
   })
 
   it('renders pinned first, marks stale, and carries the board version', () => {
-    const doc: WhiteboardDoc = {
+    const doc: WhiteboardBoard = {
       version: 4,
-      scope: 'global',
       updatedAt: 0,
       entries: [
         { id: 'a', kind: 'fact', text: 'plain', pinned: false, pinnedAt: 0, version: 1 },
@@ -85,58 +158,157 @@ describe('enpoi-whiteboard board vocabulary', () => {
   })
 
   it('append rejects a duplicate id; replace bumps the entry version', () => {
-    const base = normalizeDoc({ version: 1, entries: [{ id: 'a', kind: 'rule', text: 'one', version: 1 }] })
+    const base = normalizeStore({ version: 1, scope: 'global', entries: [{ id: 'a', kind: 'rule', text: 'one', version: 1 }] }).docs.global!
     const duplicate = applyWrites(base, [{ id: 'a', kind: 'rule', text: 'two' }], 'append', 5)
     expect(duplicate.ok).toBe(false)
     const replaced = applyWrites(base, [{ replaceId: 'a', kind: 'rule', text: 'two' }], 'replace', 5)
     expect(replaced.ok).toBe(true)
     if (!replaced.ok) throw new Error('unreachable')
-    expect(replaced.doc.entries[0]).toMatchObject({ text: 'two', version: 2 })
+    expect(replaced.board.entries[0]).toMatchObject({ text: 'two', version: 2 })
   })
 
   it('lint flags missing paths and never deletes them', () => {
-    const doc = normalizeDoc({
+    const board = normalizeStore({
       version: 2,
+      scope: 'global',
       entries: [
         { id: 'a', kind: 'path', text: 'missing.md', version: 1 },
         { id: 'b', kind: 'rule', text: 'keep', version: 1 },
       ],
-    })
-    const { doc: linted, stale } = lintPaths(doc, (entry) => `/root/${entry.text}`, (path) => path === '/root/keep.md', 99)
+    }).docs.global!
+    const { doc: linted, stale } = lintPaths(board, (entry) => `/root/${entry.text}`, (path) => path === '/root/keep.md', 99)
     expect(stale).toEqual(['a'])
     expect(linted.entries).toHaveLength(2)
     expect(linted.entries[0]).toMatchObject({ id: 'a', stale: true, lastValidatedAt: 99 })
     expect(linted.entries[1]!.stale).toBeUndefined()
   })
 
-  it('pin/unpin toggles the flag without touching text or version', () => {
-    const doc = normalizeDoc({ version: 1, entries: [{ id: 'a', kind: 'rule', text: 'one', version: 3 }] })
-    const pinned = setPinned(doc, 'a', true, 7)
+  it('pin/unpin toggles the flag without touching text or entry version', () => {
+    const board = normalizeStore({ version: 1, scope: 'global', entries: [{ id: 'a', kind: 'rule', text: 'one', version: 3 }] }).docs.global!
+    const pinned = setPinned(board, 'a', true, 7)
     expect(pinned.ok).toBe(true)
     if (!pinned.ok) throw new Error('unreachable')
-    expect(pinned.doc.entries[0]).toMatchObject({ pinned: true, pinnedAt: 7, version: 3, text: 'one' })
-    const unpinned = setPinned(pinned.doc, 'a', false, 8)
+    expect(pinned.board.entries[0]).toMatchObject({ pinned: true, pinnedAt: 7, version: 3, text: 'one' })
+    const unpinned = setPinned(pinned.board, 'a', false, 8)
     expect(unpinned.ok).toBe(true)
     if (!unpinned.ok) throw new Error('unreachable')
-    expect(unpinned.doc.entries[0]).toMatchObject({ pinned: false, pinnedAt: 7, version: 3 })
+    expect(unpinned.board.entries[0]).toMatchObject({ pinned: false, pinnedAt: 7, version: 3 })
   })
 
-  it('scope resolution prefers the specific board and lets a direct child inherit', () => {
-    const globalDoc = normalizeDoc({ version: 1, scope: 'global', entries: [{ id: 'g', kind: 'rule', text: 'g', version: 1 }] })
-    expect(boardApplies(globalDoc, {})).toBe(true)
-    const sessionDoc = normalizeDoc({ version: 1, scope: 'session', sessionId: 'parent', entries: [{ id: 's', kind: 'rule', text: 's', version: 1 }] })
-    expect(boardApplies(sessionDoc, { sessionId: 'parent' })).toBe(true)
-    expect(boardApplies(sessionDoc, { sessionId: 'child', parentSessionId: 'parent' })).toBe(true)
-    expect(boardApplies(sessionDoc, { sessionId: 'unrelated' })).toBe(false)
-    const projectDoc = normalizeDoc({ version: 1, scope: 'project', projectId: '/p', entries: [{ id: 'p', kind: 'rule', text: 'p', version: 1 }] })
-    expect(boardApplies(projectDoc, { projectId: '/p' })).toBe(true)
-    expect(boardApplies(projectDoc, { projectId: '/other' })).toBe(false)
+  it('resolves global → project → session, overriding by id with per-entry provenance', () => {
+    const resolved = resolveBoard(layeredStore(), { sessionId: 'sess-1', projectId: '/p' })
+    expect(resolved.version).toBe(9)
+    expect(resolved.scope).toBe('session')
+    expect(resolved.updatedAt).toBe(300)
+    const byId = new Map(resolved.entries.map((entry) => [entry.id, entry]))
+    expect(byId.get('g2')).toMatchObject({ text: 'global two', scope: 'global' })
+    expect(byId.get('g1')).toMatchObject({ text: 'global one', scope: 'global' })
+    expect(byId.get('p1')).toMatchObject({ text: 'session override of p1', scope: 'session', version: 2 })
+    expect(byId.get('s1')).toMatchObject({ text: 'session one', scope: 'session' })
+    // Stable merge order: global first, later contributions appended.
+    expect(resolved.entries.map((entry) => entry.id)).toEqual(['g1', 'g2', 'p1', 's1'])
+  })
+
+  it('resolves an unrelated session without the session-scoped entries', () => {
+    const store = layeredStore()
+    const other = resolveBoard(store, { sessionId: 'sess-2', projectId: '/p' })
+    expect(other.scope).toBe('project')
+    expect(other.entries.map((entry) => entry.id)).toEqual(['g1', 'g2', 'p1'])
+    expect(other.entries.find((entry) => entry.id === 'p1')).toMatchObject({ text: 'project one', scope: 'project' })
+    // A session with no matching project and no parent resolves global only.
+    const bare = resolveBoard(store, { sessionId: 'nowhere' })
+    expect(bare.entries.map((entry) => [entry.id, entry.scope])).toEqual([['g1', 'global'], ['g2', 'global']])
+    expect(bare.scope).toBe('global')
+  })
+
+  it('lets a direct child inherit its parent session board', () => {
+    const store = normalizeStore({
+      version: 1,
+      docs: { sessions: { parent: { version: 1, updatedAt: 5, entries: [{ id: 'p', kind: 'rule', text: 'parent rule', version: 1 }] } } },
+    })
+    const child = resolveBoard(store, { sessionId: 'child', parentSessionId: 'parent' })
+    expect(child.entries).toEqual([expect.objectContaining({ id: 'p', scope: 'session' })])
+    const childWithOwn = resolveBoard(normalizeStore({
+      version: 2,
+      docs: {
+        sessions: {
+          parent: { version: 1, updatedAt: 5, entries: [{ id: 'p', kind: 'rule', text: 'parent rule', version: 1 }] },
+          child: { version: 1, updatedAt: 6, entries: [{ id: 'c', kind: 'rule', text: 'child rule', version: 1 }] },
+        },
+      },
+    }), { sessionId: 'child', parentSessionId: 'parent' })
+    expect(childWithOwn.entries.map((entry) => entry.id)).toEqual(['p', 'c'])
+  })
+
+  it('findEntryTarget prefers the most specific board that holds the id', () => {
+    const store = layeredStore()
+    const facts = { sessionId: 'sess-1', projectId: '/p' }
+    expect(findEntryTarget(store, facts, 's1')).toEqual({ scope: 'session', sessionId: 'sess-1' })
+    expect(findEntryTarget(store, facts, 'p1')).toEqual({ scope: 'session', sessionId: 'sess-1' })
+    expect(findEntryTarget(store, { sessionId: 'sess-2', projectId: '/p' }, 'p1')).toEqual({ scope: 'project', projectId: '/p' })
+    expect(findEntryTarget(store, { sessionId: 'sess-2' }, 'g1')).toEqual({ scope: 'global' })
+    expect(findEntryTarget(store, { sessionId: 'sess-2' }, 'nope')).toBeUndefined()
+  })
+
+  it('applies a store write to one bucket and bumps that board and the store version', () => {
+    const store = layeredStore()
+    const applied = applyStoreWrites(store, { scope: 'session', sessionId: 'sess-1' }, [{ id: 'new', kind: 'fact', text: 'added' }], 'append', 42)
+    expect(applied.ok).toBe(true)
+    if (!applied.ok) throw new Error('unreachable')
+    const board = applied.store.docs.sessions['sess-1']!
+    expect(board.version).toBe(2)
+    expect(board.updatedAt).toBe(42)
+    expect(board.entries.map((entry) => entry.id)).toEqual(['s1', 'p1', 'new'])
+    // Other buckets are untouched copies.
+    expect(applied.store.docs.global?.entries).toHaveLength(2)
+    expect(applied.store.docs.projects['/p']?.version).toBe(1)
   })
 })
 
+/** Minimal JSON-Schema check for the declared tool output contracts. */
+function assertSchema(schema: unknown, value: unknown, path: string): void {
+  const node = schema as {
+    type?: string
+    properties?: Record<string, unknown>
+    additionalProperties?: boolean
+    required?: string[]
+    items?: unknown
+  } | undefined
+  if (node === undefined) throw new Error(`${path}: missing schema`)
+  if (node.type === 'object') {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path}: expected object`)
+    const record = value as Record<string, unknown>
+    for (const [key, entry] of Object.entries(record)) {
+      const property = node.properties?.[key]
+      if (property === undefined) {
+        if (node.additionalProperties === false) throw new Error(`${path}.${key} is not a declared property`)
+        continue
+      }
+      assertSchema(property, entry, `${path}.${key}`)
+    }
+    for (const key of node.required ?? []) {
+      if (!(key in record)) throw new Error(`${path}.${key} is required`)
+    }
+    return
+  }
+  if (node.type === 'array') {
+    if (!Array.isArray(value)) throw new Error(`${path}: expected array`)
+    for (const entry of value) assertSchema(node.items, entry, path)
+    return
+  }
+  if (node.type === 'boolean' && typeof value !== 'boolean') throw new Error(`${path}: expected boolean`)
+  if (node.type === 'number' && typeof value !== 'number') throw new Error(`${path}: expected number`)
+  if (node.type === 'string' && typeof value !== 'string') throw new Error(`${path}: expected string`)
+}
+
 describe('enpoi-whiteboard tools', () => {
-  it('round-trips a write (version bump) and a read', async () => {
-    const settings = makeSettings()
+  it('defaults writes to the calling session and migrates a legacy doc on the way', async () => {
+    const settings = makeSettings({
+      version: 4,
+      scope: 'global',
+      updatedAt: 11,
+      entries: [{ id: 'legacy', kind: 'fact', text: 'legacy global fact', version: 1 }],
+    })
     const { ctx, definitions } = makeCtx(settings)
     applyWhiteboard(ctx as never, {})
 
@@ -144,34 +316,109 @@ describe('enpoi-whiteboard tools', () => {
       entries: [{ id: 'rule-1', kind: 'rule', text: 'Never restart the service without asking.', pinned: true }],
     }, sessionExec)
     expect(write.ok).toBe(true)
-    expect(write.version).toBe(1)
-    expect(settings.board).toMatchObject({ version: 1, scope: 'global' })
-    expect((settings.board as WhiteboardDoc).entries[0]).toMatchObject({ id: 'rule-1', pinned: true, version: 1 })
-
-    const read = await definitions.get('whiteboard_read')!.execute({}, sessionExec)
-    expect(read.ok).toBe(true)
-    expect(read.version).toBe(1)
-    expect(read.tokens).toBe(estimateTokens(String(read.rendered)))
+    expect(write.version).toBe(5)
+    expect(write.scope).toBe('session')
+    const stored = settings.board as WhiteboardStore
+    expect(stored.version).toBe(5)
+    expect(Object.keys(stored.docs.sessions)).toEqual(['sess-1'])
+    expect(stored.docs.sessions['sess-1']?.entries[0]).toMatchObject({ id: 'rule-1', pinned: true, version: 1 })
+    // The legacy doc lives on in the migrated global bucket.
+    expect(stored.docs.global?.entries[0]).toMatchObject({ id: 'legacy' })
+    expect(stored.docs.projects).toEqual({})
   })
 
-  it('refuses an over-budget write and writes nothing', async () => {
+  it('honors explicit project and global scopes', async () => {
     const settings = makeSettings()
     const { ctx, definitions } = makeCtx(settings)
-    applyWhiteboard(ctx as never, { budgetTokens: 40 })
+    applyWhiteboard(ctx as never, {})
+    const write = definitions.get('whiteboard_write')!
 
-    const small = await definitions.get('whiteboard_write')!.execute({
-      entries: [{ id: 'a', kind: 'rule', text: 'ok' }],
+    const global = await write.execute({ scope: 'global', entries: [{ id: 'g', kind: 'fact', text: 'everywhere' }] }, sessionExec)
+    expect(global.scope).toBe('global')
+    expect((settings.board as WhiteboardStore).docs.global?.entries[0]).toMatchObject({ id: 'g' })
+
+    const project = await write.execute({
+      scope: 'project',
+      projectId: '/proj',
+      entries: [{ id: 'p', kind: 'rule', text: 'this project only' }],
     }, sessionExec)
-    expect(small.ok).toBe(true)
+    expect(project.ok).toBe(true)
+    // The result is the caller's resolved view; the entry landed in the project bucket.
+    expect(project.scope).toBe('global')
+    expect((settings.board as WhiteboardStore).docs.projects['/proj']?.entries[0]).toMatchObject({ id: 'p' })
+
+    // A session inside that project resolves both layers.
+    const inProject = { agent: { session: { id: 'sess-3', header: { cwd: '/proj' } } } }
+    const projectRead = await definitions.get('whiteboard_read')!.execute({}, inProject)
+    expect(projectRead.scope).toBe('project')
+    expect((projectRead.entries as Array<Record<string, unknown>>).map((entry) => entry.id)).toEqual(['g', 'p'])
+
+    // Default project scope is the calling session's cwd.
+    await write.execute({ projectId: undefined, scope: 'project', entries: [{ id: 'p2', kind: 'rule', text: 'cwd project' }] }, sessionExec)
+    expect((settings.board as WhiteboardStore).docs.projects['/tmp/opencode/heart-home']?.entries[0]).toMatchObject({ id: 'p2' })
+  })
+
+  it('reads the resolved view and keeps a session entry invisible to another session', async () => {
+    const settings = makeSettings(layeredStore())
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+
+    const mine = await definitions.get('whiteboard_read')!.execute({}, sessionExec)
+    expect(mine.ok).toBe(true)
+    expect(mine.scope).toBe('session')
+    expect((mine.entries as Array<Record<string, unknown>>).map((entry) => entry.id)).toEqual(['g1', 'g2', 's1', 'p1'])
+    expect((mine.entries as Array<Record<string, unknown>>).find((entry) => entry.id === 'p1'))
+      .toMatchObject({ text: 'session override of p1', scope: 'session' })
+    expect(String(mine.rendered)).toContain('session one')
+
+    // The same project, a different session: the session entry is invisible.
+    const theirs = await definitions.get('whiteboard_read')!.execute({}, otherExec)
+    expect((theirs.entries as Array<Record<string, unknown>>).map((entry) => entry.id)).toEqual(['g1', 'g2'])
+    expect(String(theirs.rendered)).toContain('global one')
+    expect(String(theirs.rendered)).not.toContain('session one')
+  })
+
+  it('refuses a write over the resolved budget and writes nothing', async () => {
+    const settings = makeSettings()
+    const { ctx, definitions } = makeCtx(settings)
+    // 50 tokens = 200 rendered characters.
+    applyWhiteboard(ctx as never, { budgetTokens: 50 })
+    const write = definitions.get('whiteboard_write')!
+
+    const global = await write.execute({
+      scope: 'global',
+      entries: [{ id: 'g', kind: 'fact', text: 'G'.repeat(90) }],
+    }, sessionExec)
+    expect(global.ok).toBe(true)
     const before = JSON.stringify(settings.board)
 
-    const huge = await definitions.get('whiteboard_write')!.execute({
-      entries: [{ id: 'b', kind: 'fact', text: 'y'.repeat(4000) }],
+    const session = await write.execute({
+      entries: [{ id: 's', kind: 'fact', text: 'S'.repeat(90) }],
     }, sessionExec)
-    expect(huge.ok).toBe(false)
-    expect(String(huge.message)).toContain('Over budget')
-    expect(Number(huge.tokens)).toBeGreaterThan(40)
+    expect(session.ok).toBe(false)
+    expect(String(session.message)).toContain('Over budget')
+    expect(Number(session.tokens)).toBeGreaterThan(50)
     expect(JSON.stringify(settings.board)).toBe(before)
+  })
+
+  it('declares output schemas that accept every tool result', async () => {
+    const settings = makeSettings()
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+
+    const write = await definitions.get('whiteboard_write')!.execute({ entries: [{ id: 'r1', kind: 'rule', text: 'Rule' }] }, sessionExec)
+    const read = await definitions.get('whiteboard_read')!.execute({}, sessionExec)
+    const pin = await definitions.get('whiteboard_pin')!.execute({ id: 'r1' }, sessionExec)
+    const unpin = await definitions.get('whiteboard_unpin')!.execute({ id: 'r1' }, sessionExec)
+
+    const results: [string, Record<string, unknown>][] = [
+      ['whiteboard_write', write], ['whiteboard_read', read], ['whiteboard_pin', pin], ['whiteboard_unpin', unpin],
+    ]
+    for (const [name, value] of results) {
+      const definition = definitions.get(name)
+      expect(definition, name).toBeDefined()
+      expect(() => { assertSchema(definition!.output?.schema, value, name) }, name).not.toThrow()
+    }
   })
 
   it('flags a missing path entry as stale instead of deleting it', async () => {
@@ -184,27 +431,45 @@ describe('enpoi-whiteboard tools', () => {
     }, sessionExec)
     expect(result.ok).toBe(true)
     expect(result.stale).toEqual(['p1'])
-    const stored = (settings.board as WhiteboardDoc).entries.find((entry) => entry.id === 'p1')
+    const stored = (settings.board as WhiteboardStore).docs.sessions['sess-1']!.entries.find((entry) => entry.id === 'p1')
     expect(stored).toMatchObject({ stale: true, kind: 'path' })
   })
 
-  it('pins and unpins by id through the settings service', async () => {
-    const settings = makeSettings()
+  it('pins and unpins each entry in its own scope', async () => {
+    const settings = makeSettings(layeredStore())
     const { ctx, definitions } = makeCtx(settings)
     applyWhiteboard(ctx as never, {})
-    await definitions.get('whiteboard_write')!.execute({ entries: [{ id: 'a', kind: 'task', text: 'ship the heart' }] }, sessionExec)
 
-    const pinned = await definitions.get('whiteboard_pin')!.execute({ id: 'a' }, sessionExec)
-    expect(pinned.ok).toBe(true)
-    expect((settings.board as WhiteboardDoc).entries[0]!.pinned).toBe(true)
+    const pinnedGlobal = await definitions.get('whiteboard_pin')!.execute({ id: 'g1' }, sessionExec)
+    expect(pinnedGlobal.ok).toBe(true)
+    let stored = settings.board as WhiteboardStore
+    expect(stored.docs.global?.entries.find((entry) => entry.id === 'g1')?.pinned).toBe(true)
+    expect(stored.docs.sessions['sess-1']?.entries.find((entry) => entry.id === 's1')?.pinned).toBe(false)
 
-    const unpinned = await definitions.get('whiteboard_unpin')!.execute({ id: 'a' }, sessionExec)
+    const pinnedSession = await definitions.get('whiteboard_pin')!.execute({ id: 's1' }, sessionExec)
+    expect(pinnedSession.ok).toBe(true)
+    stored = settings.board as WhiteboardStore
+    expect(stored.docs.sessions['sess-1']?.entries.find((entry) => entry.id === 's1')?.pinned).toBe(true)
+    expect(stored.docs.projects['/p']?.entries.find((entry) => entry.id === 'p1')?.pinned).toBe(false)
+
+    const unpinned = await definitions.get('whiteboard_unpin')!.execute({ id: 'g1' }, sessionExec)
     expect(unpinned.ok).toBe(true)
-    expect((settings.board as WhiteboardDoc).entries[0]!.pinned).toBe(false)
+    stored = settings.board as WhiteboardStore
+    expect(stored.docs.global?.entries.find((entry) => entry.id === 'g1')?.pinned).toBe(false)
 
     const missing = await definitions.get('whiteboard_pin')!.execute({ id: 'nope' }, sessionExec)
     expect(missing.ok).toBe(false)
-    expect(String(missing.message)).toContain('no entry with id')
+    expect(String(missing.message)).toContain('resolved board')
+  })
+
+  it('refuses a session write when the execution carries no session id', async () => {
+    const settings = makeSettings()
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+    const result = await definitions.get('whiteboard_write')!.execute({ entries: [{ id: 'a', kind: 'rule', text: 'x' }] }, {})
+    expect(result.ok).toBe(false)
+    expect(String(result.message)).toContain('requires a session id')
+    expect(settings.board).toBeUndefined()
   })
 
   it('replays the write across a settings revision conflict (no silent clobber)', async () => {
@@ -222,48 +487,84 @@ describe('enpoi-whiteboard tools', () => {
 })
 
 describe('enpoi-whiteboard context injection (real system-prompt seam)', () => {
-  it('renders the board into a parent assembly and a delegated child assembly', async () => {
+  /** Boot the real Context + SystemPrompt seam with a settings stub. */
+  async function boot(initial: unknown, budgetTokens = DEFAULT_BUDGET_TOKENS) {
     const { Context } = await import('@deepseek-ai/cordis')
     const SystemPrompt = (await import('@deepseek-ai/dsh-system-prompt')).default
     const { renderContextSnapshot } = await import('@deepseek-ai/dsh-system-prompt')
-
     const ctx = new Context() as unknown as {
       plugin: (plugin: unknown, config?: unknown) => Promise<unknown>
       provide: (name: string, value: unknown) => void
       systemPrompt: { assemble: (input: unknown) => Promise<unknown> }
       get: (name: string) => unknown
     }
-    const settings = makeSettings(normalizeDoc({
+    const settings = makeSettings(initial)
+    ctx.provide('settings', settings)
+    await ctx.plugin(SystemPrompt, {})
+    applyWhiteboard(ctx as never, { budgetTokens })
+    return { ctx, settings, renderContextSnapshot }
+  }
+
+  it('migrates a legacy session board and injects it into its own session and direct child only', async () => {
+    const { ctx, renderContextSnapshot } = await boot({
       version: 3,
       scope: 'session',
       sessionId: 'parent-session',
       entries: [{ id: 'a', kind: 'path', text: 'docs/67-heart-implementation-plan.md', pinned: true, pinnedAt: 1, version: 2 }],
-    }))
-    ctx.provide('settings', settings)
-    await ctx.plugin(SystemPrompt, {})
-    applyWhiteboard(ctx as never, { budgetTokens: 1500 })
+    })
 
     const parent = { session: { id: 'parent-session', header: { cwd: '/home/adam' } } }
-    const parentAssembly = await ctx.systemPrompt.assemble({ scope: parent, agent: parent }) as never
-    const parentSnapshot = renderContextSnapshot(parentAssembly)
+    const parentSnapshot = renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: parent, agent: parent })) as string
     expect(parentSnapshot).toContain('### Pinned context (v3)')
     expect(parentSnapshot).toContain('docs/67-heart-implementation-plan.md')
 
-    // A direct child (durable parentSession lineage) inherits the parent board,
-    // and its request records the version it inherited.
+    // A direct child (durable parentSession lineage) inherits the parent board.
     const child = { session: { id: 'child-session', header: { cwd: '/home/adam', parentSession: 'parent-session' } } }
-    const childAssembly = await ctx.systemPrompt.assemble({ scope: child, agent: child }) as never
-    const childSnapshot = renderContextSnapshot(childAssembly)
+    const childSnapshot = renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: child, agent: child })) as string
     expect(childSnapshot).toContain('### Pinned context (v3)')
 
     // An unrelated session renders nothing (a session board never leaks).
     const unrelated = { session: { id: 'other-session', header: { cwd: '/home/adam' } } }
-    const otherAssembly = await ctx.systemPrompt.assemble({ scope: unrelated, agent: unrelated }) as never
-    expect(renderContextSnapshot(otherAssembly)).not.toContain('Pinned context')
+    const otherSnapshot = renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: unrelated, agent: unrelated })) as string
+    expect(otherSnapshot).not.toContain('Pinned context')
 
     // The contribution sits after the keeper's state checkpoint (130).
     expect(WHITEBOARD_CONTEXT_ORDER).toBeGreaterThan(130)
     expect(WHITEBOARD_CONTEXT_NAME).toBe('whiteboard')
+  })
+
+  it('injects each session its own resolved view (global applies everywhere, sessions stay private)', async () => {
+    const { ctx, renderContextSnapshot } = await boot(normalizeStore({
+      version: 7,
+      docs: {
+        global: { version: 1, updatedAt: 1, entries: [{ id: 'g', kind: 'fact', text: 'GLOBAL-FACT', version: 1 }] },
+        sessions: {
+          'session-a': { version: 1, updatedAt: 2, entries: [{ id: 'a', kind: 'rule', text: 'A-ONLY', version: 1 }] },
+          'session-b': { version: 1, updatedAt: 3, entries: [{ id: 'b', kind: 'task', text: 'B-ONLY', version: 1 }] },
+        },
+      },
+    }))
+
+    const assemble = async (id: string): Promise<string> => {
+      const agent = { session: { id, header: { cwd: '/home/adam' } } }
+      return renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: agent, agent })) as string
+    }
+
+    const a = await assemble('session-a')
+    expect(a).toContain('GLOBAL-FACT')
+    expect(a).toContain('A-ONLY')
+    expect(a).not.toContain('B-ONLY')
+    expect(a).toContain('(v7)')
+
+    const b = await assemble('session-b')
+    expect(b).toContain('GLOBAL-FACT')
+    expect(b).toContain('B-ONLY')
+    expect(b).not.toContain('A-ONLY')
+
+    const c = await assemble('session-c')
+    expect(c).toContain('GLOBAL-FACT')
+    expect(c).not.toContain('A-ONLY')
+    expect(c).not.toContain('B-ONLY')
   })
 })
 
@@ -271,5 +572,6 @@ describe('enpoi-whiteboard settings fallback', () => {
   it('reads the empty board when settings are unavailable', () => {
     const ctx = { get: () => undefined }
     expect(readWhiteboard(ctx as never)).toMatchObject({ version: 0, entries: [] })
+    expect(readWhiteboardStore(ctx as never)).toEqual({ version: 0, docs: { projects: {}, sessions: {} } })
   })
 })

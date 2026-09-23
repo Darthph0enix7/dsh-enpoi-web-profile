@@ -1,11 +1,20 @@
 /**
- * enpoi-whiteboard — pinned-board vocabulary: normalization, rendering, the
- * hard token budget, and the path/staleness lint. Pure functions only; the
- * settings transport, tools and runtime-context injection live in ./index.ts.
+ * enpoi-whiteboard — pinned-board vocabulary: per-scope storage, resolution,
+ * normalization, rendering, the hard token budget, and the path/staleness lint.
+ * Pure functions only; the settings transport, tools and runtime-context
+ * injection live in ./index.ts.
  *
  * Storage contract (doc 66 §3c, doc 67 §B): `enpoi-orchestration.whiteboard`
- * holds `{ version, scope, entries }`. Every entry carries a version; path
- * entries are validated on write and flagged stale — never auto-deleted.
+ * holds `{ version, docs: { global?: Board, projects: { <cwd>: Board },
+ * sessions: { <sessionId>: Board } } }`. A legacy single-board document is
+ * still readable and migrates into the bucket its own scope names. Every entry
+ * carries a version; path entries are validated on write and flagged stale —
+ * never auto-deleted.
+ *
+ * Resolution contract: a read merges global → project (matching the session
+ * cwd) → parent session (direct-child inheritance) → session (matching the
+ * session id), later scopes overriding earlier ones by entry id, and reports
+ * each resolved entry's authoring scope.
  *
  * @module dsh-enpoi-whiteboard/board
  */
@@ -35,7 +44,33 @@ export interface WhiteboardEntry {
   stale?: boolean
 }
 
-/** The persisted board document under `enpoi-orchestration.whiteboard`. */
+/** One scope's stored board. */
+export interface WhiteboardBoard {
+  /** Board version: 0 when never written, +1 per successful write to this board. */
+  version: number
+  entries: WhiteboardEntry[]
+  /** Epoch ms of the last write to this board. */
+  updatedAt: number
+}
+
+/** The normalized multi-scope store under `enpoi-orchestration.whiteboard`. */
+export interface WhiteboardStore {
+  /** Store version: 0 when never written, +1 per successful write. */
+  version: number
+  docs: {
+    global?: WhiteboardBoard
+    projects: Record<string, WhiteboardBoard>
+    sessions: Record<string, WhiteboardBoard>
+  }
+}
+
+/** One storage bucket a write can target. */
+export type WhiteboardTarget =
+  | { scope: 'global' }
+  | { scope: 'project'; projectId: string }
+  | { scope: 'session'; sessionId: string }
+
+/** The persisted (pre-multi-scope) single-board document, kept for migration. */
 export interface WhiteboardDoc {
   /** Board version: 0 when never written, +1 per successful write. */
   version: number
@@ -47,6 +82,29 @@ export interface WhiteboardDoc {
   entries: WhiteboardEntry[]
   /** Epoch ms of the last write. */
   updatedAt: number
+}
+
+/** One resolved entry, carrying the scope whose board authored it. */
+export interface ResolvedEntry extends WhiteboardEntry {
+  /** The authoring scope: session entries override project and global by id. */
+  scope: WhiteboardScope
+}
+
+/** The resolved view one session's reads and the injected block render. */
+export interface ResolvedBoard {
+  /** Store version: bumps once per successful write to any scope. */
+  version: number
+  /** The most specific scope that contributed an entry; `global` when none did. */
+  scope: WhiteboardScope
+  entries: ResolvedEntry[]
+  /** Latest `updatedAt` among the contributing boards. */
+  updatedAt: number
+}
+
+/** The minimal board fields rendering and budget measurement read. */
+export interface RenderableBoard {
+  version: number
+  entries: readonly WhiteboardEntry[]
 }
 
 /** Runtime-context position: after the keeper's state checkpoint (130). */
@@ -64,10 +122,17 @@ export const DEFAULT_BUDGET_TOKENS = 1500
 /** Conservative chars-per-token estimate used for the rendered block. */
 export const CHARS_PER_TOKEN = 4
 
-/** The empty board every read falls back to. */
+/** The empty legacy board every single-doc read falls back to. */
 export const EMPTY_WHITEBOARD: WhiteboardDoc = Object.freeze({
   version: 0,
   scope: 'global' as WhiteboardScope,
+  entries: [] as WhiteboardEntry[],
+  updatedAt: 0,
+})
+
+/** The empty per-scope board a first write starts from. */
+const EMPTY_BOARD: WhiteboardBoard = Object.freeze({
+  version: 0,
   entries: [] as WhiteboardEntry[],
   updatedAt: 0,
 })
@@ -89,10 +154,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function finiteVersion(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0
+}
+
 /**
  * Coerce one stored entry into a well-formed entry, dropping nothing but
  * repairing absent optional fields. A value with no usable text or kind is
- * skipped by {@link normalizeDoc}.
+ * skipped by {@link normalizeBoard}.
  */
 export function normalizeEntry(raw: unknown): WhiteboardEntry | undefined {
   if (!isRecord(raw)) return undefined
@@ -117,37 +186,176 @@ export function normalizeEntry(raw: unknown): WhiteboardEntry | undefined {
 }
 
 /**
- * Coerce the settings value into a board document. Unknown keys and malformed
- * entries are dropped, so a hand-edited settings file can never break a turn.
+ * Coerce one stored per-scope board. Unknown keys and malformed entries are
+ * dropped, so a hand-edited settings file can never break a turn.
+ * @param raw - the stored board value, if any.
+ * @returns a well-formed board.
+ */
+export function normalizeBoard(raw: unknown): WhiteboardBoard {
+  if (!isRecord(raw)) return { ...EMPTY_BOARD, entries: [] }
+  const entries = Array.isArray(raw.entries)
+    ? raw.entries.map(normalizeEntry).filter((entry): entry is WhiteboardEntry => entry !== undefined)
+    : []
+  return {
+    version: finiteVersion(raw.version),
+    entries,
+    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
+  }
+}
+
+/**
+ * Coerce the legacy single-board document. Kept for the normalizer every
+ * pre-multi-scope consumer reads through; {@link normalizeStore} migrates it.
  * @param raw - the `enpoi-orchestration.whiteboard` value, if any.
  * @returns a well-formed board.
  */
 export function normalizeDoc(raw: unknown): WhiteboardDoc {
   if (!isRecord(raw)) return { ...EMPTY_WHITEBOARD, entries: [] }
-  const entries = Array.isArray(raw.entries)
-    ? raw.entries.map(normalizeEntry).filter((entry): entry is WhiteboardEntry => entry !== undefined)
-    : []
-  const version = typeof raw.version === 'number' && Number.isFinite(raw.version) && raw.version >= 0
-    ? Math.floor(raw.version)
-    : 0
+  const board = normalizeBoard(raw)
   const doc: WhiteboardDoc = {
-    version,
+    version: board.version,
     scope: isWhiteboardScope(raw.scope) ? raw.scope : 'global',
-    entries,
-    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
+    entries: board.entries,
+    updatedAt: board.updatedAt,
   }
   if (typeof raw.sessionId === 'string' && raw.sessionId.length > 0) doc.sessionId = raw.sessionId
   if (typeof raw.projectId === 'string' && raw.projectId.length > 0) doc.projectId = raw.projectId
   return doc
 }
 
+/** The empty store every read falls back to. */
+function emptyStore(): WhiteboardStore {
+  return { version: 0, docs: { projects: {}, sessions: {} } }
+}
+
 /**
- * Render the board as the exact text injected into the runtime-context
- * snapshot. Compact by construction: one line per entry, pinned first.
+ * Coerce the settings value into the multi-scope store. A legacy single-board
+ * document migrates into the bucket its own scope names (a session board into
+ * `sessions[<id>]`, a project board into `projects[<cwd>]`, otherwise
+ * `global`), so an old document never leaks into sessions it did not cover.
+ * @param raw - the `enpoi-orchestration.whiteboard` value, if any.
+ * @returns a well-formed store.
+ */
+export function normalizeStore(raw: unknown): WhiteboardStore {
+  if (!isRecord(raw)) return emptyStore()
+  if (isRecord(raw.docs)) {
+    const store = emptyStore()
+    store.version = finiteVersion(raw.version)
+    if (isRecord(raw.docs.global)) store.docs.global = normalizeBoard(raw.docs.global)
+    for (const bucket of ['projects', 'sessions'] as const) {
+      const value = raw.docs[bucket]
+      if (!isRecord(value)) continue
+      for (const [key, board] of Object.entries(value)) {
+        if (key.length === 0 || !isRecord(board)) continue
+        store.docs[bucket][key] = normalizeBoard(board)
+      }
+    }
+    return store
+  }
+  const legacy = normalizeDoc(raw)
+  const store = emptyStore()
+  store.version = legacy.version
+  const board: WhiteboardBoard = { version: legacy.version, entries: legacy.entries, updatedAt: legacy.updatedAt }
+  if (legacy.scope === 'project' && legacy.projectId !== undefined) store.docs.projects[legacy.projectId] = board
+  else if (legacy.scope === 'session' && legacy.sessionId !== undefined) store.docs.sessions[legacy.sessionId] = board
+  else store.docs.global = board
+  return store
+}
+
+/** The stored board one target reads, if it has been written yet. */
+export function readBoard(store: WhiteboardStore, target: WhiteboardTarget): WhiteboardBoard | undefined {
+  if (target.scope === 'global') return store.docs.global
+  if (target.scope === 'project') return store.docs.projects[target.projectId]
+  return store.docs.sessions[target.sessionId]
+}
+
+/** Copy-on-write placement of one board into its scope bucket. */
+export function writeBoard(store: WhiteboardStore, target: WhiteboardTarget, board: WhiteboardBoard): WhiteboardStore {
+  const docs: WhiteboardStore['docs'] = {
+    ...store.docs,
+    projects: { ...store.docs.projects },
+    sessions: { ...store.docs.sessions },
+  }
+  if (target.scope === 'global') docs.global = board
+  else if (target.scope === 'project') docs.projects[target.projectId] = board
+  else docs.sessions[target.sessionId] = board
+  return { ...store, docs }
+}
+
+/** The scope facts one assembly resolves the board against. */
+export interface BoardScopeFacts {
+  /** The assembling agent's session id. */
+  sessionId?: string
+  /** The assembling session's durable parent session id (direct-child inheritance). */
+  parentSessionId?: string
+  /** The assembling session's project identity (session cwd). */
+  projectId?: string
+}
+
+/**
+ * Resolve the store for one assembly. Global entries come first, then the
+ * matching project's, then the parent session's (direct-child inheritance),
+ * then the session's own; a later scope overriding an earlier entry with the
+ * same id. Each resolved entry reports its authoring scope, so a caller can
+ * tell a session override from a global default.
+ * @param store - the normalized store.
+ * @param facts - the assembly's scope facts.
+ * @returns the resolved view (empty entries when nothing matches).
+ */
+export function resolveBoard(store: WhiteboardStore, facts: BoardScopeFacts): ResolvedBoard {
+  const layers: Array<{ scope: WhiteboardScope; board: WhiteboardBoard | undefined }> = [
+    { scope: 'global', board: store.docs.global },
+  ]
+  if (facts.projectId !== undefined) layers.push({ scope: 'project', board: store.docs.projects[facts.projectId] })
+  if (facts.parentSessionId !== undefined && facts.parentSessionId !== facts.sessionId) {
+    layers.push({ scope: 'session', board: store.docs.sessions[facts.parentSessionId] })
+  }
+  if (facts.sessionId !== undefined) layers.push({ scope: 'session', board: store.docs.sessions[facts.sessionId] })
+  const merged = new Map<string, ResolvedEntry>()
+  let scope: WhiteboardScope = 'global'
+  let updatedAt = 0
+  for (const layer of layers) {
+    const board = layer.board
+    if (board === undefined || board.entries.length === 0) continue
+    scope = layer.scope
+    if (board.updatedAt > updatedAt) updatedAt = board.updatedAt
+    for (const entry of board.entries) merged.set(entry.id, { ...entry, scope: layer.scope })
+  }
+  return { version: store.version, scope, entries: [...merged.values()], updatedAt }
+}
+
+/**
+ * Find the scope whose board authored one resolved entry, most specific first
+ * (own session, parent session, project, global). Pin/unpin commits there.
+ * @param store - the normalized store.
+ * @param facts - the caller's scope facts.
+ * @param id - the entry id from a resolved read.
+ * @returns the owning target, or `undefined` when no layer has the id.
+ */
+export function findEntryTarget(store: WhiteboardStore, facts: BoardScopeFacts, id: string): WhiteboardTarget | undefined {
+  const has = (board: WhiteboardBoard | undefined): boolean => board !== undefined && board.entries.some((entry) => entry.id === id)
+  if (facts.sessionId !== undefined && has(store.docs.sessions[facts.sessionId])) {
+    return { scope: 'session', sessionId: facts.sessionId }
+  }
+  if (facts.parentSessionId !== undefined && facts.parentSessionId !== facts.sessionId
+    && has(store.docs.sessions[facts.parentSessionId])) {
+    return { scope: 'session', sessionId: facts.parentSessionId }
+  }
+  if (facts.projectId !== undefined && has(store.docs.projects[facts.projectId])) {
+    return { scope: 'project', projectId: facts.projectId }
+  }
+  if (has(store.docs.global)) return { scope: 'global' }
+  return undefined
+}
+
+/**
+ * Render a board as the exact text injected into the runtime-context snapshot.
+ * Compact by construction: one line per entry, pinned first. Renders a resolved
+ * board and a stored board alike (both carry version + entries).
  * @param doc - the board to render.
  * @returns the block, or `''` when the board holds no entries.
  */
-export function renderWhiteboard(doc: WhiteboardDoc): string {
+export function renderWhiteboard(doc: RenderableBoard): string {
   if (doc.entries.length === 0) return ''
   const lines = doc.entries
     .slice()
@@ -193,12 +401,14 @@ export interface BudgetCheck {
 }
 
 /**
- * Check the complete rendered board against the hard budget.
- * @param doc - the candidate board.
+ * Check a complete rendered board against the hard budget. Writes run this over
+ * the resolved view their scope target resolves to, so a session entry cannot
+ * push a session's injected block over the limit.
+ * @param doc - the candidate board (stored or resolved).
  * @param budgetTokens - the configured hard budget.
  * @returns the check with the exact numbers for the refusal message.
  */
-export function checkBudget(doc: WhiteboardDoc, budgetTokens: number): BudgetCheck {
+export function checkBudget(doc: RenderableBoard, budgetTokens: number): BudgetCheck {
   const chars = boardChars(renderWhiteboard(doc))
   const tokens = Math.ceil(chars / CHARS_PER_TOKEN)
   const limit = budgetChars(budgetTokens)
@@ -216,8 +426,8 @@ export interface WhiteboardWriteRequest {
 }
 
 /** Result of linting path entries against the filesystem. */
-export interface LintResult {
-  doc: WhiteboardDoc
+export interface LintResult<T> {
+  doc: T
   /** Ids of path entries that no longer resolve. */
   stale: string[]
 }
@@ -225,19 +435,20 @@ export interface LintResult {
 /**
  * Validate every `path` entry against the filesystem and flag the missing ones.
  * Stale entries stay in the board (flagged, never deleted) so the operator can
- * see and prune them.
+ * see and prune them. Generic over stored and resolved boards: only `entries`
+ * is rewritten, every other field (including per-entry scope) survives.
  * @param doc - the board to lint.
  * @param resolvePath - maps an entry text to an absolute path.
  * @param exists - filesystem predicate (`fs.existsSync` in production).
  * @param now - epoch ms stamped into `lastValidatedAt`.
  * @returns the linted board and the stale ids.
  */
-export function lintPaths(
-  doc: WhiteboardDoc,
+export function lintPaths<T extends { entries: readonly WhiteboardEntry[] }>(
+  doc: T,
   resolvePath: (entry: WhiteboardEntry) => string,
   exists: (path: string) => boolean,
   now: number,
-): LintResult {
+): LintResult<T> {
   const stale: string[] = []
   const entries = doc.entries.map((entry): WhiteboardEntry => {
     if (entry.kind !== 'path') return entry
@@ -256,27 +467,27 @@ export function lintPaths(
     }
     return next
   })
-  return { doc: { ...doc, entries }, stale }
+  return { doc: { ...doc, entries: entries as T['entries'] }, stale }
 }
 
 /**
- * Apply a batch of write requests: `append` adds new entries (an explicit id
- * must be unused), `replace` overwrites entries by id and bumps their version.
- * Budget and path lint are the caller's remaining steps — this function is the
- * pure board transition.
- * @param doc - the current board.
+ * Apply a batch of write requests to one stored board: `append` adds new
+ * entries (an explicit id must be unused), `replace` overwrites entries by id
+ * and bumps their version. The caller owns the board-version bump, budget, and
+ * path lint — this function is the pure entry transition.
+ * @param board - the current stored board.
  * @param requests - entries to write.
  * @param mode - `append` (default) or `replace` by id.
- * @param now - epoch ms stamped on new entries and `updatedAt`.
+ * @param now - epoch ms stamped on new entries.
  * @returns the next board, or a refusal message.
  */
 export function applyWrites(
-  doc: WhiteboardDoc,
+  board: WhiteboardBoard,
   requests: readonly WhiteboardWriteRequest[],
   mode: 'append' | 'replace',
   now: number,
-): { ok: true; doc: WhiteboardDoc } | { ok: false; message: string } {
-  const entries = doc.entries.map((entry) => ({ ...entry }))
+): { ok: true; board: WhiteboardBoard } | { ok: false; message: string } {
+  const entries = board.entries.map((entry) => ({ ...entry }))
   for (const request of requests) {
     if (!isWhiteboardEntryKind(request.kind)) return { ok: false, message: `unknown entry kind "${String(request.kind)}"` }
     const text = typeof request.text === 'string' ? request.text.trim() : ''
@@ -313,63 +524,88 @@ export function applyWrites(
       version: 1,
     })
   }
-  return { ok: true, doc: { ...doc, entries } }
+  return { ok: true, board: { ...board, entries } }
 }
 
 /**
- * Toggle one entry's pinned flag. Unpin is the only way to make an entry
- * compactable; it never deletes anything.
- * @param doc - the current board.
+ * Apply writes to one scope bucket and bump that board's version.
+ * @param store - the current store.
+ * @param target - the scope bucket to write.
+ * @param requests - entries to write.
+ * @param mode - `append` (default) or `replace` by id.
+ * @param now - epoch ms stamped onto the board.
+ * @returns the next store, or a refusal message.
+ */
+export function applyStoreWrites(
+  store: WhiteboardStore,
+  target: WhiteboardTarget,
+  requests: readonly WhiteboardWriteRequest[],
+  mode: 'append' | 'replace',
+  now: number,
+): { ok: true; store: WhiteboardStore } | { ok: false; message: string } {
+  const current = readBoard(store, target) ?? EMPTY_BOARD
+  const applied = applyWrites(current, requests, mode, now)
+  if (!applied.ok) return applied
+  const board: WhiteboardBoard = { ...applied.board, version: current.version + 1, updatedAt: now }
+  return { ok: true, store: writeBoard(store, target, board) }
+}
+
+/**
+ * Toggle one entry's pinned flag in its authoring board and bump the board
+ * version. Unpin is the only way to make an entry compactable; it never
+ * deletes anything.
+ * @param board - the current stored board.
  * @param id - the entry id.
  * @param pinned - the flag to set.
  * @param now - epoch ms for `pinnedAt`.
  * @returns the next board, or an error message.
  */
 export function setPinned(
-  doc: WhiteboardDoc,
+  board: WhiteboardBoard,
   id: string,
   pinned: boolean,
   now: number,
-): { ok: true; doc: WhiteboardDoc } | { ok: false; message: string } {
-  const index = doc.entries.findIndex((entry) => entry.id === id)
+): { ok: true; board: WhiteboardBoard } | { ok: false; message: string } {
+  const index = board.entries.findIndex((entry) => entry.id === id)
   if (index === -1) return { ok: false, message: `no entry with id "${id}"` }
-  const entries = doc.entries.map((entry, at) => (at === index
+  const entries = board.entries.map((entry, at) => (at === index
     ? { ...entry, pinned, pinnedAt: pinned ? now : entry.pinnedAt }
     : { ...entry }))
-  return { ok: true, doc: { ...doc, entries } }
-}
-
-/** The scope facts one assembly resolves the board against. */
-export interface BoardScopeFacts {
-  /** The assembling agent's session id. */
-  sessionId?: string
-  /** The assembling session's durable parent session id (direct-child inheritance). */
-  parentSessionId?: string
-  /** The assembling session's project identity (session cwd). */
-  projectId?: string
+  return { ok: true, board: { ...board, entries } }
 }
 
 /**
- * Whether the board applies to an assembly. Most specific wins: a session board
- * applies to its own session and to its direct children (they inherit the
- * parent's authored truth); a project board applies to that project; a global
- * board applies everywhere.
- * @param doc - the board to test.
- * @param facts - the assembly's scope facts.
- * @returns whether the board renders into this assembly.
+ * Toggle one entry's pinned flag in the scope bucket that authored it.
+ * @param store - the current store.
+ * @param target - the authoring scope bucket (from {@link findEntryTarget}).
+ * @param id - the entry id.
+ * @param pinned - the flag to set.
+ * @param now - epoch ms stamped onto the board.
+ * @returns the next store, or an error message.
  */
-export function boardApplies(doc: WhiteboardDoc, facts: BoardScopeFacts): boolean {
-  if (doc.entries.length === 0) return false
-  if (doc.scope === 'global') return true
-  if (doc.scope === 'project') {
-    if (doc.projectId === undefined || facts.projectId === undefined) return false
-    return doc.projectId === facts.projectId
-  }
-  if (doc.sessionId === undefined) return false
-  return doc.sessionId === facts.sessionId || doc.sessionId === facts.parentSessionId
+export function setStorePinned(
+  store: WhiteboardStore,
+  target: WhiteboardTarget,
+  id: string,
+  pinned: boolean,
+  now: number,
+): { ok: true; store: WhiteboardStore } | { ok: false; message: string } {
+  const current = readBoard(store, target)
+  if (current === undefined) return { ok: false, message: `no entry with id "${id}"` }
+  const pinnedResult = setPinned(current, id, pinned, now)
+  if (!pinnedResult.ok) return pinnedResult
+  const board: WhiteboardBoard = { ...pinnedResult.board, version: current.version + 1, updatedAt: now }
+  return { ok: true, store: writeBoard(store, target, board) }
+}
+
+/** The minimal fields the freshness line reads. */
+export interface VersionLineFacts {
+  version: number
+  scope: WhiteboardScope
+  updatedAt: number
 }
 
 /** The board's freshness line, recorded by every spawn whose request carries it. */
-export function versionLine(doc: WhiteboardDoc): string {
+export function versionLine(doc: VersionLineFacts): string {
   return `${WHITEBOARD_HEADER} v${doc.version} (${doc.scope}${doc.updatedAt > 0 ? ` · updated ${new Date(doc.updatedAt).toISOString()}` : ''})`
 }

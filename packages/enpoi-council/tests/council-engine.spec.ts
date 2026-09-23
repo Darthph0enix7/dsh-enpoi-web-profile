@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   BROKER_KEPT_TOOLS,
   COUNCIL_DENIED_TOOLS,
+  COUNCIL_KEPT_TOOLS,
   DEBATER_DENIED_TOOLS,
   RETRIEVAL_TOOLS,
+  councilDenyList,
   estimateTokens,
   textOfContent,
 } from '../src/core/fiber.ts'
@@ -40,6 +42,19 @@ describe('evidence fencing (doc 54 §6, Oracle amendment #2)', () => {
   it('never names run_code (reserved PTC transport)', () => {
     expect(DEBATER_DENIED_TOOLS).not.toContain('run_code')
     expect(COUNCIL_DENIED_TOOLS).not.toContain('run_code')
+  })
+
+  it('keeps the pinned whiteboard in every fencing tier (debaters, chair, broker, registered councils)', () => {
+    expect(COUNCIL_KEPT_TOOLS).toContain('whiteboard_read')
+    expect(COUNCIL_KEPT_TOOLS).toContain('whiteboard_write')
+    for (const tool of COUNCIL_KEPT_TOOLS) {
+      expect(DEBATER_DENIED_TOOLS).not.toContain(tool)
+      expect(COUNCIL_DENIED_TOOLS).not.toContain(tool)
+      expect(councilDenyList(['roundtable'])).not.toContain(tool)
+      // A registered council id that collides with a board tool name must not
+      // sneak it back into a seat's deny list either.
+      expect(councilDenyList([tool])).not.toContain(tool)
+    }
   })
 })
 
