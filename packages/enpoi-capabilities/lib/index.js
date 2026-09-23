@@ -549,6 +549,7 @@ function apply(ctx) {
         return void 0;
       }
     }
+    let lastSyncSignature;
     async function syncMcpMounts() {
       const state = initialCapabilitiesState(getGlobalDefaults());
       const catalog = getServerCatalog();
@@ -561,8 +562,12 @@ function apply(ctx) {
         publishedMountErrors.delete(id);
       }
       if (want.size > 0 || mounted.size > 0) {
-        process.stderr.write(`[enpoi-capabilities] mcp sync: want=[${[...want].join(",")}] mounted=[${[...mounted.keys()].join(",")}]
+        const signature = `want=[${[...want].join(",")}] mounted=[${[...mounted.keys()].join(",")}]`;
+        if (signature !== lastSyncSignature) {
+          lastSyncSignature = signature;
+          process.stderr.write(`[enpoi-capabilities] mcp sync: ${signature}
 `);
+        }
       }
       for (const [id, fiber] of [...mounted]) {
         if (!want.has(id)) {
@@ -610,8 +615,12 @@ function apply(ctx) {
     }
     void syncMcpMounts();
     ctx.setTimeout(() => void syncMcpMounts(), 3e3);
+    let lastSyncedToggleMap;
     ctx.on("settings/updated", ((ns) => {
       if (String(ns) !== "enpoi-orchestration") return;
+      const toggleMap = JSON.stringify(initialCapabilitiesState(getGlobalDefaults()).mcp);
+      if (toggleMap === lastSyncedToggleMap) return;
+      lastSyncedToggleMap = toggleMap;
       void syncMcpMounts();
     }));
     let lastWrittenJson = "";

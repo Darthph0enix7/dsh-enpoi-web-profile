@@ -179,6 +179,9 @@ export function apply(ctx: Context): void {
       }
     }
 
+    /** Signature of the last logged sync: repeated settings pushes stay silent. */
+    let lastSyncSignature: string | undefined
+
     async function syncMcpMounts(): Promise<void> {
       const state = initialCapabilitiesState(getGlobalDefaults())
       const catalog = getServerCatalog()
@@ -195,7 +198,11 @@ export function apply(ctx: Context): void {
         publishedMountErrors.delete(id)
       }
       if (want.size > 0 || mounted.size > 0) {
-        process.stderr.write(`[enpoi-capabilities] mcp sync: want=[${[...want].join(',')}] mounted=[${[...mounted.keys()].join(',')}]\n`)
+        const signature = `want=[${[...want].join(',')}] mounted=[${[...mounted.keys()].join(',')}]`
+        if (signature !== lastSyncSignature) {
+          lastSyncSignature = signature
+          process.stderr.write(`[enpoi-capabilities] mcp sync: ${signature}\n`)
+        }
       }
       // Unmount disabled / removed servers
       for (const [id, fiber] of [...mounted]) {
@@ -246,8 +253,14 @@ export function apply(ctx: Context): void {
 
     void syncMcpMounts()
     ctx.setTimeout(() => void syncMcpMounts(), 3000)
+    // Only a change to the toggle map warrants a re-sync: the heartbeat writes
+    // mcpStatus into the same namespace, and reacting to that fed a loop.
+    let lastSyncedToggleMap: string | undefined
     ctx.on('settings/updated', ((ns: unknown) => {
       if (String(ns) !== 'enpoi-orchestration') return
+      const toggleMap = JSON.stringify(initialCapabilitiesState(getGlobalDefaults()).mcp)
+      if (toggleMap === lastSyncedToggleMap) return
+      lastSyncedToggleMap = toggleMap
       void syncMcpMounts()
     }) as (...args: unknown[]) => unknown)
 
