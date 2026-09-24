@@ -48,9 +48,10 @@ const DESCRIPTION = [
   'Read one Session\'s debug/transparency surface (doc 69 §9.1): execution latch, current model, pending asks,',
   'the last turn end with its structured error, bounded recent tool calls with previews, the injection index, the',
   'subagent tree, the main-model request summary, and (optionally) the diagnostics incident tail. Read-only — it',
-  'never prompts, mutates, or writes the session log. Bodies are excluded unless includeBodies:true is passed',
-  'explicitly AND the local operator grants allowed-once on the resulting approval card; that flag is HEAVY and',
-  'secret-bearing (full system prompt, tool schemas, message text).',
+  'never prompts, mutates, or writes the session log. Omit sessionId to inspect the calling session itself; pass',
+  'one only to inspect another Session, which must be attached (otherwise session/not-found). Bodies are excluded',
+  'unless includeBodies:true is passed explicitly AND the local operator grants allowed-once on the resulting',
+  'approval card; that flag is HEAVY and secret-bearing (full system prompt, tool schemas, message text).',
 ].join(' ')
 
 const OUTPUT_SCHEMA = {
@@ -82,19 +83,21 @@ const OUTPUT_SCHEMA = {
 /**
  * Parse the tool arguments at the boundary.
  * @param args - raw model-supplied arguments.
- * @returns the normalized request.
+ * @returns the normalized request; `sessionId` is undefined when the model
+ *   omitted it, which the caller resolves to the calling Session.
  * @throws {Error} with `code: 'gateway/bad-request'` for malformed input.
  */
 export function parseSessionDebugArgs(args: unknown): {
-  readonly sessionId: string
+  readonly sessionId: string | undefined
   readonly include: readonly IncludeSection[]
   readonly recentTools: number
   readonly includeBodies: boolean
 } {
   const request = (args ?? {}) as Record<string, unknown>
-  const sessionId = typeof request.sessionId === 'string' ? request.sessionId.trim() : ''
-  if (sessionId === '') {
-    const error = new Error('session_debug: sessionId must be a non-empty string') as Error & { code?: string }
+  const rawSessionId = request.sessionId
+  const sessionId = typeof rawSessionId === 'string' && rawSessionId.trim() !== '' ? rawSessionId.trim() : undefined
+  if (rawSessionId !== undefined && sessionId === undefined) {
+    const error = new Error('session_debug: sessionId must be a non-empty string when provided') as Error & { code?: string }
     error.code = 'gateway/bad-request'
     throw error
   }
@@ -137,6 +140,20 @@ async function approveIncludeBodies(ctx: Context, exec: ToolRunContext | undefin
 }
 
 /**
+ * The calling Agent's own Session id — the default when the model omits
+ * `sessionId`. The executing Agent always carries the live Session it drives;
+ * `Agent.id` is the same SessionId on the lightweight identity face.
+ * @param exec - the running `session_debug` call, when the registry supplied one.
+ * @returns the caller's Session id, or undefined when no Agent was attached.
+ */
+function callerSessionId(exec: ToolRunContext | undefined): string | undefined {
+  const agent = exec?.agent
+  if (agent === undefined) return undefined
+  const sessionId = agent.session?.id ?? agent.id
+  return sessionId === undefined ? undefined : String(sessionId)
+}
+
+/**
  * Register the `session_debug` tool on one tools scope.
  *
  * The preset mounts this plugin inside the agent-plane group, so the tool
@@ -154,7 +171,7 @@ export function registerSessionDebugTool(ctx: Context, options: SessionDebugTool
     parameters: {
       type: 'object',
       properties: {
-        sessionId: { type: 'string', description: 'Durable Session identity to inspect (required).' },
+        sessionId: { type: 'string', description: 'Durable Session identity to inspect. Omit to inspect the calling session (this Agent\'s own Session); a provided id must name an attached Session or the call returns session/not-found.' },
         include: {
           type: 'array',
           items: { type: 'string', enum: [...INCLUDE_SECTIONS] },
@@ -166,7 +183,7 @@ export function registerSessionDebugTool(ctx: Context, options: SessionDebugTool
           description: 'HEAVY + SECRET-BEARING: also return the captured system prompt, tool schemas, and message bodies. Requires an explicit allowed-once approval from the local operator (anything else refuses the bodies). Only pass this when the raw request must be inspected; never echo credentials from it.',
         },
       },
-      required: ['sessionId'],
+      // sessionId is optional: omission means "the calling session".
     },
     output: {
       schema: OUTPUT_SCHEMA,
@@ -190,12 +207,27 @@ export function registerSessionDebugTool(ctx: Context, options: SessionDebugTool
           incidents: null,
         }
       }
+      // An omitted sessionId means "this session": resolve the caller from the
+      // same exec/agent seam the includeBodies approval uses.
+      const sessionId = request.sessionId ?? callerSessionId(exec)
+      if (sessionId === undefined) {
+        return {
+          ok: false,
+          sessionId: '',
+          include: request.include,
+          notes: [],
+          error: { code: 'gateway/bad-request', message: 'session_debug: sessionId was omitted and the calling Agent has no Session' },
+          digest: null,
+          snapshot: null,
+          incidents: null,
+        }
+      }
       try {
         const sources = resolve()
         if (sources === undefined) {
           return {
             ok: false,
-            sessionId: request.sessionId,
+            sessionId,
             include: request.include,
             notes: ['no session read surface is present in this process'],
             error: { code: 'debug/unavailable', message: 'sessionController/remote.session with digest+requestSnapshot is unavailable' },
@@ -206,7 +238,7 @@ export function registerSessionDebugTool(ctx: Context, options: SessionDebugTool
         }
         const notes: string[] = []
         const digest = request.include.includes('digest')
-          ? foldDigest(await sources.digest({ sessionId: request.sessionId, recentTools: request.recentTools }))
+          ? foldDigest(await sources.digest({ sessionId, recentTools: request.recentTools }))
           : null
         let snapshot: Readonly<Record<string, unknown>> | null = null
         if (request.include.includes('snapshot')) {
@@ -224,18 +256,18 @@ export function registerSessionDebugTool(ctx: Context, options: SessionDebugTool
           } else {
             notes.push('snapshot bodies excluded (pass includeBodies:true explicitly to read them).')
           }
-          snapshot = foldSnapshot(await sources.requestSnapshot({ sessionId: request.sessionId, includeBodies }), includeBodies)
+          snapshot = foldSnapshot(await sources.requestSnapshot({ sessionId, includeBodies }), includeBodies)
         }
         let incidents: Readonly<Record<string, unknown>> | null = null
         if (request.include.includes('incidents')) {
           if (sources.incidents === undefined) notes.push('diagnostics service unavailable: incidents excluded.')
-          else incidents = foldIncidents(await sources.incidents(25), request.sessionId)
+          else incidents = foldIncidents(await sources.incidents(25), sessionId)
         }
-        return { ok: true, sessionId: request.sessionId, include: request.include, notes, error: null, digest, snapshot, incidents }
+        return { ok: true, sessionId, include: request.include, notes, error: null, digest, snapshot, incidents }
       } catch (error) {
         return {
           ok: false,
-          sessionId: request.sessionId,
+          sessionId,
           include: request.include,
           notes: [],
           error: errorFacts(error),

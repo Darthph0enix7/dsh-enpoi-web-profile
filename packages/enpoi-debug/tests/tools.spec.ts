@@ -61,7 +61,10 @@ function register(
 }
 
 /** The execution identity the registry hands the tool body in production. */
-const EXEC = { agent: { id: 'agent-1' }, signal: new AbortController().signal }
+const EXEC = {
+  agent: { id: 'agent-1', session: { id: 'session-caller' } },
+  signal: new AbortController().signal,
+}
 
 describe('session_debug tool', () => {
   it('registers a schema-valid tool that folds the digest by default', async () => {
@@ -176,11 +179,12 @@ describe('session_debug tool', () => {
     expect(clampRecentTools('nope')).toBe(10)
   })
 
-  it('preserves the gateway error code when the host call fails', async () => {
+  it('preserves the gateway error code when an explicit id is not attached, even with a callable caller session', async () => {
     const failure = Object.assign(new Error('session "x" not found (not attached)'), { code: 'session/not-found' })
     const { definition } = register(() => ({ digest: async () => { throw failure }, requestSnapshot: async () => snapshotValue() }))
-    const value = await definition.execute({ sessionId: 'x' })
+    const value = await definition.execute({ sessionId: 'x' }, EXEC)
     expect(value.ok).toBe(false)
+    expect(value.sessionId).toBe('x')
     expect(value.error).toEqual({ code: 'session/not-found', message: 'session "x" not found (not attached)' })
     expect(validateJsonSchemaValue(definition.output.schema, value)).toEqual([])
   })
@@ -192,12 +196,37 @@ describe('session_debug tool', () => {
     expect(value.error.code).toBe('debug/unavailable')
   })
 
-  it('rejects a missing sessionId with gateway/bad-request instead of throwing', async () => {
+  it('rejects a malformed provided sessionId with gateway/bad-request instead of throwing', async () => {
+    const { definition } = register(() => ({ digest: async () => digestValue(), requestSnapshot: async () => snapshotValue() }))
+    const value = await definition.execute({ sessionId: '   ' })
+    expect(value.ok).toBe(false)
+    expect(value.error.code).toBe('gateway/bad-request')
+    expect(parseSessionDebugArgs({}).sessionId).toBeUndefined()
+    expect(() => parseSessionDebugArgs({ sessionId: 42 })).toThrowError(/sessionId/)
+  })
+
+  it('defaults an omitted sessionId to the calling session and keeps an explicit id', async () => {
+    const asked: Array<{ sessionId?: string }> = []
+    const { definition } = register(() => ({
+      digest: async request => { asked.push(request); return digestValue() },
+      requestSnapshot: async () => snapshotValue(),
+    }))
+    const omitted = await definition.execute({}, EXEC)
+    expect(omitted.ok).toBe(true)
+    expect(omitted.sessionId).toBe('session-caller')
+    expect(asked[0]?.sessionId).toBe('session-caller')
+    const explicit = await definition.execute({ sessionId: 'other-session' }, EXEC)
+    expect(explicit.sessionId).toBe('other-session')
+    expect(asked[1]?.sessionId).toBe('other-session')
+  })
+
+  it('rejects an omitted sessionId when no calling Agent is attached', async () => {
     const { definition } = register(() => ({ digest: async () => digestValue(), requestSnapshot: async () => snapshotValue() }))
     const value = await definition.execute({})
     expect(value.ok).toBe(false)
+    expect(value.sessionId).toBe('')
     expect(value.error.code).toBe('gateway/bad-request')
-    expect(() => parseSessionDebugArgs({})).toThrowError(/sessionId/)
+    expect(validateJsonSchemaValue(definition.output.schema, value)).toEqual([])
   })
 
   it('folds incidents with this session first and renders a compact text form', async () => {

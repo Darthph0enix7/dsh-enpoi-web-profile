@@ -214,9 +214,10 @@ var DESCRIPTION = [
   "Read one Session's debug/transparency surface (doc 69 \xA79.1): execution latch, current model, pending asks,",
   "the last turn end with its structured error, bounded recent tool calls with previews, the injection index, the",
   "subagent tree, the main-model request summary, and (optionally) the diagnostics incident tail. Read-only \u2014 it",
-  "never prompts, mutates, or writes the session log. Bodies are excluded unless includeBodies:true is passed",
-  "explicitly AND the local operator grants allowed-once on the resulting approval card; that flag is HEAVY and",
-  "secret-bearing (full system prompt, tool schemas, message text)."
+  "never prompts, mutates, or writes the session log. Omit sessionId to inspect the calling session itself; pass",
+  "one only to inspect another Session, which must be attached (otherwise session/not-found). Bodies are excluded",
+  "unless includeBodies:true is passed explicitly AND the local operator grants allowed-once on the resulting",
+  "approval card; that flag is HEAVY and secret-bearing (full system prompt, tool schemas, message text)."
 ].join(" ");
 var OUTPUT_SCHEMA = {
   type: "object",
@@ -245,9 +246,10 @@ var OUTPUT_SCHEMA = {
 };
 function parseSessionDebugArgs(args) {
   const request = args ?? {};
-  const sessionId = typeof request.sessionId === "string" ? request.sessionId.trim() : "";
-  if (sessionId === "") {
-    const error = new Error("session_debug: sessionId must be a non-empty string");
+  const rawSessionId = request.sessionId;
+  const sessionId = typeof rawSessionId === "string" && rawSessionId.trim() !== "" ? rawSessionId.trim() : void 0;
+  if (rawSessionId !== void 0 && sessionId === void 0) {
+    const error = new Error("session_debug: sessionId must be a non-empty string when provided");
     error.code = "gateway/bad-request";
     throw error;
   }
@@ -275,6 +277,12 @@ async function approveIncludeBodies(ctx, exec) {
     return "unavailable";
   }
 }
+function callerSessionId(exec) {
+  const agent = exec?.agent;
+  if (agent === void 0) return void 0;
+  const sessionId = agent.session?.id ?? agent.id;
+  return sessionId === void 0 ? void 0 : String(sessionId);
+}
 function registerSessionDebugTool(ctx, options = {}) {
   const resolve = options.resolve ?? (() => resolveSessionSources(ctx));
   ctx.tools.register({
@@ -283,7 +291,7 @@ function registerSessionDebugTool(ctx, options = {}) {
     parameters: {
       type: "object",
       properties: {
-        sessionId: { type: "string", description: "Durable Session identity to inspect (required)." },
+        sessionId: { type: "string", description: "Durable Session identity to inspect. Omit to inspect the calling session (this Agent's own Session); a provided id must name an attached Session or the call returns session/not-found." },
         include: {
           type: "array",
           items: { type: "string", enum: [...INCLUDE_SECTIONS] },
@@ -294,8 +302,8 @@ function registerSessionDebugTool(ctx, options = {}) {
           type: "boolean",
           description: "HEAVY + SECRET-BEARING: also return the captured system prompt, tool schemas, and message bodies. Requires an explicit allowed-once approval from the local operator (anything else refuses the bodies). Only pass this when the raw request must be inspected; never echo credentials from it."
         }
-      },
-      required: ["sessionId"]
+      }
+      // sessionId is optional: omission means "the calling session".
     },
     output: {
       schema: OUTPUT_SCHEMA,
@@ -319,12 +327,25 @@ function registerSessionDebugTool(ctx, options = {}) {
           incidents: null
         };
       }
+      const sessionId = request.sessionId ?? callerSessionId(exec);
+      if (sessionId === void 0) {
+        return {
+          ok: false,
+          sessionId: "",
+          include: request.include,
+          notes: [],
+          error: { code: "gateway/bad-request", message: "session_debug: sessionId was omitted and the calling Agent has no Session" },
+          digest: null,
+          snapshot: null,
+          incidents: null
+        };
+      }
       try {
         const sources = resolve();
         if (sources === void 0) {
           return {
             ok: false,
-            sessionId: request.sessionId,
+            sessionId,
             include: request.include,
             notes: ["no session read surface is present in this process"],
             error: { code: "debug/unavailable", message: "sessionController/remote.session with digest+requestSnapshot is unavailable" },
@@ -334,7 +355,7 @@ function registerSessionDebugTool(ctx, options = {}) {
           };
         }
         const notes = [];
-        const digest = request.include.includes("digest") ? foldDigest(await sources.digest({ sessionId: request.sessionId, recentTools: request.recentTools })) : null;
+        const digest = request.include.includes("digest") ? foldDigest(await sources.digest({ sessionId, recentTools: request.recentTools })) : null;
         let snapshot = null;
         if (request.include.includes("snapshot")) {
           let includeBodies = request.includeBodies;
@@ -349,18 +370,18 @@ function registerSessionDebugTool(ctx, options = {}) {
           } else {
             notes.push("snapshot bodies excluded (pass includeBodies:true explicitly to read them).");
           }
-          snapshot = foldSnapshot(await sources.requestSnapshot({ sessionId: request.sessionId, includeBodies }), includeBodies);
+          snapshot = foldSnapshot(await sources.requestSnapshot({ sessionId, includeBodies }), includeBodies);
         }
         let incidents = null;
         if (request.include.includes("incidents")) {
           if (sources.incidents === void 0) notes.push("diagnostics service unavailable: incidents excluded.");
-          else incidents = foldIncidents(await sources.incidents(25), request.sessionId);
+          else incidents = foldIncidents(await sources.incidents(25), sessionId);
         }
-        return { ok: true, sessionId: request.sessionId, include: request.include, notes, error: null, digest, snapshot, incidents };
+        return { ok: true, sessionId, include: request.include, notes, error: null, digest, snapshot, incidents };
       } catch (error) {
         return {
           ok: false,
-          sessionId: request.sessionId,
+          sessionId,
           include: request.include,
           notes: [],
           error: errorFacts(error),
