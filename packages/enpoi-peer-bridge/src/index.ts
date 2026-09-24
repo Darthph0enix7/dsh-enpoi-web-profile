@@ -22,14 +22,23 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-// Type-only: load the `tools` and `approval` Context augmentations.
+// Type-only: load the `tools`, `approval`, and `userQuestions` Context augmentations.
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
+import type {} from '@deepseek-ai/dsh-user-questions'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import type { AskNotice, AskRecord, LocalAskDecision } from './asks.js'
-import { appendAskNotice, askLabel, askSummary, defaultNoticesPath, localDecisionToPeerAnswer } from './asks.js'
-import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerWebSocket } from './peer-client.js'
+import type { AskNotice, AskRecord, LocalAskDecision, QuestionSelection } from './asks.js'
+import {
+  appendAskNotice,
+  askLabel,
+  askSummary,
+  defaultNoticesPath,
+  localDecisionToPeerAnswer,
+  normalizeQuestionSelections,
+  renderQuestion,
+} from './asks.js'
+import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnswer, PeerQuestionItem, PeerWebSocket } from './peer-client.js'
 import { PeerBridgeError, PeerClient } from './peer-client.js'
 import { recordAssistantText, recordRpcId, recordTerminal, recordTurn } from './follow.js'
 import type { DialablePairing, PairingDocument } from './pairings.js'
@@ -318,6 +327,20 @@ export function registerTools(ctx: Context, config: Config, deps: BridgeDeps = {
                 kind: { type: 'string' },
                 toolName: { type: 'string' },
                 reason: { type: 'string' },
+                questions: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string' },
+                      question: { type: 'string' },
+                      multiSelect: { type: 'boolean' },
+                      options: { type: 'array', items: { type: 'string' } },
+                    },
+                    required: ['id', 'question', 'options'],
+                  },
+                },
                 since: { type: 'number' },
               },
               required: ['askId', 'kind', 'since'],
@@ -347,6 +370,14 @@ export function registerTools(ctx: Context, config: Config, deps: BridgeDeps = {
             kind: ask.kind,
             toolName: ask.kind === 'approval' ? ask.toolName ?? '' : '',
             reason: ask.kind === 'approval' ? ask.reason ?? '' : '',
+            questions: ask.kind === 'question'
+              ? (ask.questions ?? []).map(question => ({
+                id: question.id,
+                question: question.question,
+                multiSelect: question.multiSelect === true,
+                options: (question.options ?? []).map(option => option.label),
+              }))
+              : [],
             since: ask.since,
           })),
         }
@@ -359,19 +390,34 @@ export function registerTools(ctx: Context, config: Config, deps: BridgeDeps = {
   ctx.tools.register({
     name: 'peer_answer',
     description: [
-      'Answer one pending approval ask on a paired peer session with outcome allowed-once or rejected.',
-      'First answer wins — a peer/conflict means another participant already settled it and the answer',
-      'must not be retried blindly. Question asks are visible through peer_asks but cannot be answered',
-      'from this bridge yet (their structured answer vocabulary is not exposed).',
+      'Answer one pending ask on a paired peer session. Approvals take outcome allowed-once or rejected;',
+      'questions take answers[] naming each question id and the selected option labels (see peer_asks for',
+      'the ids and options). First answer wins — a peer/conflict means another participant already settled',
+      'it and the answer must not be retried blindly. A malformed selection is rejected here with the',
+      'reason and never reaches the host.',
     ].join(' '),
     parameters: {
       type: 'object',
       properties: {
         alias: { type: 'string', description: 'Pairing alias of the peer session.' },
         askId: { type: 'string', description: 'Remote ask id from peer_asks or a peer_ask result.' },
-        outcome: { type: 'string', enum: ['allowed-once', 'rejected'], description: 'Approval outcome.' },
+        outcome: { type: 'string', enum: ['allowed-once', 'rejected'], description: 'Approval outcome (allowed-always is not grantable from a peer).' },
+        answers: {
+          type: 'array',
+          description: 'Question-ask answer: one entry per remote question id with the selected option labels.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', description: 'Question id from peer_asks.' },
+              selected: { type: 'array', items: { type: 'string' }, description: 'Selected option labels.' },
+              custom: { type: 'string', description: 'Optional free-text answer.' },
+            },
+            required: ['id', 'selected'],
+          },
+        },
       },
-      required: ['alias', 'askId', 'outcome'],
+      required: ['alias', 'askId'],
     },
     output: {
       schema: {
@@ -394,19 +440,58 @@ export function registerTools(ctx: Context, config: Config, deps: BridgeDeps = {
       const alias = requireAlias(request.alias)
       const askId = typeof request.askId === 'string' && request.askId !== '' ? request.askId : undefined
       if (askId === undefined) return { ok: false, error: { code: 'gateway/bad-request', message: 'peer_answer needs an askId' } }
-      if (request.outcome !== 'allowed-once' && request.outcome !== 'rejected') {
-        return { ok: false, error: { code: 'gateway/bad-request', message: 'peer_answer outcome must be allowed-once or rejected' } }
+      const outcome = request.outcome
+      const rawAnswers = Array.isArray(request.answers) ? request.answers : undefined
+      if (outcome !== undefined && rawAnswers !== undefined) {
+        return badRequest('peer_answer takes either outcome (approval) or answers (question), not both')
+      }
+      if (outcome === undefined && rawAnswers === undefined) {
+        return badRequest('peer_answer needs outcome for an approval ask or answers[] for a question ask')
+      }
+      if (outcome !== undefined && outcome !== 'allowed-once' && outcome !== 'rejected') {
+        return badRequest('peer_answer outcome must be allowed-once or rejected (allowed-always is not grantable from a peer)')
       }
       const { pairing, document } = resolveEntry(pairingsPath, alias)
       const client = makeClient(pairing, config, document.device, deps)
+      let answer: { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' } | { readonly kind: 'question'; readonly answer: PeerQuestionAnswer }
+      if (outcome !== undefined) {
+        answer = { kind: 'approval', outcome }
+      } else {
+        const parsed = parseQuestionSelections(rawAnswers ?? [])
+        if (!parsed.ok) return badRequest(parsed.message)
+        let pending: PeerPendingAsk | undefined
+        try {
+          const value = await client.state(targetOf(pairing))
+          pending = value.state.pendingAsks.find(candidate => candidate.askId === askId)
+        } catch (error) {
+          return failureFrom(error, pairing.endpoint)
+        }
+        if (pending === undefined) {
+          return badRequest(`no pending ask ${askId} on ${alias} — it may have settled or the session changed; re-run peer_asks`)
+        }
+        if (pending.kind !== 'question') {
+          return badRequest(`ask ${askId} is an approval ask; answer it with outcome allowed-once or rejected`)
+        }
+        const normalized = normalizeQuestionSelections(pending.questions ?? [], parsed.selections)
+        if (!normalized.ok) return badRequest(normalized.message)
+        answer = { kind: 'question', answer: normalized.answer }
+      }
       try {
         await client.answer({
           target: targetOf(pairing),
           participant: participantOf(config, document),
           askId,
-          answer: { kind: 'approval', outcome: request.outcome },
+          answer,
         })
-        return { ok: true, alias, askId, settled: true, note: 'ask settled; the first answer won' }
+        return {
+          ok: true,
+          alias,
+          askId,
+          settled: true,
+          note: answer.kind === 'question'
+            ? 'question settled; the first answer won'
+            : 'ask settled; the first answer won',
+        }
       } catch (error) {
         const conflict = error instanceof PeerBridgeError && error.code === 'peer/conflict'
         return {
@@ -715,7 +800,7 @@ async function surfacePending(
     asks.set(ask.askId, record)
 
     if (ask.kind === 'question') {
-      recordAskNotice(noticesPath, pairing.alias, sessionLabel, ask, 'question ask recorded; it is not surfaceable through the local approval card and this bridge does not relay structured question answers')
+      await surfaceQuestion(ctx, client, noticesPath, pairing, participant, target, ask, record, signal, agent)
       continue
     }
     const approval = ctx.get('approval')
@@ -766,6 +851,67 @@ async function surfacePending(
   }
 }
 
+async function surfaceQuestion(
+  ctx: Context,
+  client: PeerClient,
+  noticesPath: string,
+  pairing: DialablePairing,
+  participant: PeerParticipant,
+  target: ReturnType<typeof targetOf>,
+  ask: PeerPendingAsk,
+  record: AskBridgeRecord,
+  signal: AbortSignal,
+  agent: Agent | undefined,
+): Promise<void> {
+  const sessionLabel = target.kind === 'session' ? target.sessionId : pairing.remoteSessionId ?? pairing.alias
+  const questions = ask.kind === 'question' ? ask.questions ?? [] : []
+  const userQuestions = ctx.get('userQuestions')
+  if (userQuestions === undefined || questions.length === 0) {
+    record.decision = 'unsurfaced'
+    record.note = 'local user-questions service unavailable; question ask recorded with its options and answerable via peer_answer'
+    recordAskNotice(noticesPath, pairing.alias, sessionLabel, ask, record.note)
+    return
+  }
+  let answer: PeerQuestionAnswer
+  try {
+    // Mirror the approval path: surface the remote question through the local
+    // answerer (the following turn's agent when one exists, so a UI scoped to
+    // that agent can render it). No answerer or an abort → durable notice.
+    answer = await userQuestions.ask({
+      questions: questions.map(question => ({
+        id: question.id,
+        question: question.question,
+        ...(question.detail === undefined ? {} : { detail: question.detail }),
+        ...(question.header === undefined ? {} : { header: question.header }),
+        ...(question.options === undefined
+          ? {}
+          : { options: question.options.map(option => ({ label: option.label, ...(option.description === undefined ? {} : { description: option.description }) })) }),
+        ...(question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect }),
+      })),
+      ...(agent === undefined ? {} : { agent }),
+      signal,
+    })
+    record.surfaced = 'question'
+    record.selected = answer.answers.flatMap(item => item.selected)
+  } catch (error) {
+    record.decision = 'unsurfaced'
+    record.note = `local question answerer declined (${errorText(error)}); question ask recorded with its options and answerable via peer_answer`
+    recordAskNotice(noticesPath, pairing.alias, sessionLabel, ask, record.note)
+    return
+  }
+  try {
+    await client.answer({ target, participant, askId: ask.askId, answer: { kind: 'question', answer } })
+    record.relay = 'settled'
+    record.note = 'local question answered → relayed'
+  } catch (error) {
+    const code = error instanceof PeerBridgeError ? error.code : 'unknown'
+    record.relay = code === 'peer/conflict' ? 'conflict' : code === 'peer/not-found' ? 'not-found' : 'failed'
+    record.note = code === 'peer/conflict'
+      ? 'another participant answered first (peer/conflict) — not retried'
+      : `relay failed: ${errorText(error)}`
+  }
+}
+
 function recordAskNotice(path: string, alias: string, sessionId: string, ask: PeerPendingAsk, note: string): void {
   const notice: AskNotice = {
     at: Date.now(),
@@ -812,6 +958,37 @@ function makeClient(pairing: DialablePairing, config: Config, device?: string, d
 
 function narrow(args: unknown): Record<string, unknown> {
   return typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
+}
+
+function badRequest(message: string): ToolFailure {
+  return { ok: false, error: { code: 'gateway/bad-request', message } }
+}
+
+/**
+ * Validate the raw `answers[]` tool argument into selections.
+ * @param raw - array of `{id, selected, custom?}` entries.
+ * @returns the selections, or the reason the argument is malformed.
+ */
+function parseQuestionSelections(raw: readonly unknown[]): { readonly ok: true; readonly selections: readonly QuestionSelection[] } | { readonly ok: false; readonly message: string } {
+  if (raw.length === 0) return { ok: false, message: 'answers[] is empty; name at least one question id with its selected labels' }
+  const selections: QuestionSelection[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) return { ok: false, message: 'every answers[] entry must be an object {id, selected[]}' }
+    const item = entry as Record<string, unknown>
+    if (typeof item.id !== 'string' || item.id === '') return { ok: false, message: 'every answers[] entry needs a string question id' }
+    if (!Array.isArray(item.selected) || !item.selected.every(label => typeof label === 'string')) {
+      return { ok: false, message: `answers[] entry ${JSON.stringify(item.id)} needs selected[] as an array of option labels` }
+    }
+    if (item.custom !== undefined && typeof item.custom !== 'string') {
+      return { ok: false, message: `answers[] entry ${JSON.stringify(item.id)} has a non-string custom value` }
+    }
+    selections.push({
+      id: item.id,
+      selected: [...item.selected] as string[],
+      ...(typeof item.custom === 'string' ? { custom: item.custom } : {}),
+    })
+  }
+  return { ok: true, selections }
 }
 
 function requireAlias(value: unknown): string {
@@ -871,6 +1048,7 @@ function askLines(asks: Map<string, AskBridgeRecord>): string[] {
   return [...asks.values()].map(record => {
     const parts = [record.summary]
     if (record.decision !== undefined) parts.push(`decision=${record.decision}`)
+    if (record.selected !== undefined && record.selected.length > 0) parts.push(`selected=${record.selected.join(',')}`)
     if (record.relay !== undefined) parts.push(`relay=${record.relay}`)
     if (record.note !== undefined && record.note !== '') parts.push(record.note)
     return parts.join(' — ')
@@ -929,7 +1107,19 @@ function renderAsks(value: unknown): string {
   if (asks.length === 0) return `no pending asks on ${String(record.alias)} (latch ${String(record.latch)})`
   return [
     `${String(asks.length)} pending ask(s) on ${String(record.alias)}:`,
-    ...asks.map(ask => `• ${String(ask.askId)} ${String(ask.kind)} ${String(ask.toolName ?? '')} ${String(ask.reason ?? '')}`.trim()),
+    ...asks.map(ask => {
+      if (String(ask.kind) === 'question') {
+        const questions = Array.isArray(ask.questions) ? ask.questions as Record<string, unknown>[] : []
+        const rendered = questions.map(question => renderQuestion({
+          id: String(question.id),
+          question: String(question.question),
+          options: Array.isArray(question.options) ? (question.options as string[]).map(label => ({ label })) : [],
+          multiSelect: question.multiSelect === true,
+        })).join('; ')
+        return `• ${String(ask.askId)} question ${rendered} — answer with peer_answer answers[]`
+      }
+      return `• ${String(ask.askId)} ${String(ask.kind)} ${String(ask.toolName ?? '')} ${String(ask.reason ?? '')}`.trim()
+    }),
   ].join('\n')
 }
 

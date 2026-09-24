@@ -64,8 +64,14 @@
   --dsw-static-neutral-550: #446289;
   --dsw-static-neutral-600: #52709a;
   --dsw-static-neutral-700: #6885ad;
-  --dsw-static-neutral-800: #849dbf;
-  --dsw-static-neutral-850: #97adca;
+  /* Upstream consumes 800/850 as dark-mode FILLS (changed-files, delivered-file
+     and plan cards), not as steps of a text ramp. This skin's ramp runs dark
+     (00) to light (1000), so the old light-blue values turned every such card
+     into a pale slab with grey copy. Pin the two fill tokens to upstream's own
+     dark-mode values (design-platform.css); the blue-tinted ramp stays for the
+     steps upstream uses as ink (e.g. 700 in the right-panel guide). */
+  --dsw-static-neutral-800: #292929;
+  --dsw-static-neutral-850: #212123;
   --dsw-static-neutral-900: #adbfd6;
   --dsw-static-neutral-bluish-00: #071321;
   --dsw-static-neutral-bluish-1000: #F8F3F5;

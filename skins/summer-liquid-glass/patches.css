@@ -176,11 +176,63 @@ a {
   --dsw-specific-sidebar-nav-item-active-accent: #7FE3EC;
 }
 
-/* enpoi: mobile fullscreen surfaces need an opaque ground. The glass token
-   --dsw-alias-bg-base is translucent by design, so a pushed file/tree panel on
-   a phone let the chat text bleed through (mobile-1-08/09). Near-opaque ground
-   per the phone blur policy — real blur stays reserved for small overlays. */
+/* enpoi: fullscreen right-column surfaces need an opaque ground. The glass
+   token --dsw-alias-bg-base is translucent by design, so a pushed file/tree
+   panel on a phone let the chat text bleed through (mobile-1-08/09), and the
+   narrow desktop frame's automatic (or the operator's manual) fullscreen has
+   the same presentation without the mobile marker. Near-opaque ground per the
+   phone blur policy — real blur stays reserved for small overlays. */
 :root { --dsh-mobile-surface-bg: #121927; }
-[data-mobile-frame] [data-sidebar-right-panel='fullscreen'] {
+[data-mobile-frame] [data-sidebar-right-panel='fullscreen'],
+[data-sidebar-right-panel='fullscreen'] {
   background-color: var(--dsh-mobile-surface-bg);
+}
+
+/* ── enpoi: upstream file cards on the chat glass ─────────────────────────
+   The card FILL is upstream's own now: --dsw-static-neutral-850/800 carry
+   upstream's dark-mode values (see skin.css), so the changed-files,
+   delivered-file and plan cards are dark tiles wherever upstream paints
+   them. The earlier per-surface repaint is gone with the light-blue token;
+   what remains is only what a token cannot express — this skin's translucent
+   ground, the shared input-card blur, and the house 8px radius/gutter for the
+   two cards that sit inside the transcript. The modules' own label tokens are
+   legible on the glass ground, so no ink overrides are kept. */
+
+[data-changed-files] {
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.14));
+  border-radius: 8px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.55));
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+}
+
+/* The upstream header paints the opaque fill itself; on the glass ground it
+   must not re-cover the rounded card. */
+[data-changed-files] > button:first-child {
+  padding: 12px;
+  background: transparent;
+}
+
+[data-changed-files] > button:first-child:hover:not(:disabled),
+[data-changed-files] > button:first-child:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* House density for the file rows and the fold control. */
+[data-changed-files] > ul > li > button,
+[data-changed-files] > ul + button {
+  padding: 12px;
+}
+
+[data-presented-file] {
+  height: auto;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.14));
+  border-radius: 8px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.55));
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+}
+
+[data-presented-files-row] [data-presented-file]:hover {
+  background: var(--dsw-alias-bg-layer-2);
 }

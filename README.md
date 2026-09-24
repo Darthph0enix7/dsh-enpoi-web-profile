@@ -117,3 +117,15 @@ toggle/squeeze/drag with right panel open/closed).
 6. Configure your own providers in Settings → Models, then `ds sync` to create your device patch.
 
 **Personal bits never shared**: `settings.yaml` (providers/personas), `device-patches/`, `fresh-settings.yaml` is the only settings file meant for public use.
+
+## Fallback links after `pnpm`
+
+Running `pnpm install` (or any `pnpm <script>`) inside this profile rebuilds `node_modules` and can prune the dsh-managed **fallback links**, so plugin rows log `<id>: failed to import` on the next reload and some UI surfaces look broken or stale until repaired.
+
+`dsh` now guards both moments: before rows mount it verifies every bundle and reports one line — `profile bundles: N resolvable, M repaired, K missing` — and an import that fails with a module-resolution error repairs the fallback once per package and retries the import once (`profile-heal: repaired N links; retrying <package>`). Any other failure is rethrown untouched.
+
+Manual check (read-only-safe, prints the same report):
+
+```bash
+cd ~/deepseek-harness && node --import tsx/esm --input-type=module -e "const {checkProfileBundleResolution}=await import('./packages/boot/app-boot/src/index.ts'); const home=process.env.DSH_HOME||process.env.HOME+'/.dsh'; console.log(JSON.stringify(await checkProfileBundleResolution({installAnchor:process.cwd()+'/apps/cli/package.json',profileDir:home+'/profiles/web',home}),null,2))"
+```

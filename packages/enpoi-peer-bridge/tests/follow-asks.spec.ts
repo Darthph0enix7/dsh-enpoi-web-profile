@@ -8,6 +8,7 @@ import {
   askSummary,
   defaultNoticesPath,
   localDecisionToPeerAnswer,
+  normalizeQuestionSelections,
 } from '../src/asks.ts'
 import { contentText, recordAssistantText, recordRpcId, recordTerminal, recordTurn } from '../src/follow.ts'
 
@@ -52,7 +53,50 @@ describe('ask surfacing helpers', () => {
     const approval = { kind: 'approval' as const, askId: 'a', toolName: 'bash', reason: 'rm needs approval', since: 1 }
     expect(askLabel('scratch', 'sess-1', approval)).toBe('remote ask on scratch (sess-1): approval for tool "bash" — rm needs approval')
     expect(askSummary(approval)).toBe('approval a tool=bash (rm needs approval)')
-    expect(askSummary({ kind: 'question', askId: 'q', questions: [{}, {}], since: 1 })).toBe('question q (2 items)')
+    const question = {
+      kind: 'question' as const,
+      askId: 'q',
+      since: 1,
+      questions: [
+        { id: 'colour', question: 'Pick a colour', options: [{ label: 'red' }, { label: 'blue' }] },
+        { id: 'scope', question: 'Which scope?', multiSelect: true, options: [{ label: 'one' }, { label: 'all' }] },
+      ],
+    }
+    expect(askSummary(question)).toBe('question q (2 items): "Pick a colour" (id=colour; options: red, blue); "Which scope?" (id=scope multi; options: one, all)')
+    expect(askLabel('scratch', 'sess-1', question)).toBe('remote ask on scratch (sess-1): a user question ("Pick a colour")')
+  })
+
+  it('validates question selections against the ask before sending', () => {
+    const questions = [
+      { id: 'colour', question: 'Pick a colour', options: [{ label: 'red' }, { label: 'blue' }] },
+      { id: 'scope', question: 'Which scope?', multiSelect: true, options: [{ label: 'one' }, { label: 'all' }] },
+    ]
+    const answered = normalizeQuestionSelections(questions, [
+      { id: 'colour', selected: ['blue'] },
+      { id: 'scope', selected: ['one', 'all'] },
+    ])
+    expect(answered).toEqual({ ok: true, answer: { answers: [{ id: 'colour', selected: ['blue'] }, { id: 'scope', selected: ['one', 'all'] }] } })
+
+    const wrongLabel = normalizeQuestionSelections(questions, [
+      { id: 'colour', selected: ['green'] },
+      { id: 'scope', selected: ['one'] },
+    ])
+    expect(wrongLabel).toEqual({ ok: false, message: '"green" is not an option of question "colour" (options: red, blue)' })
+
+    const unknownId = normalizeQuestionSelections(questions, [{ id: 'nope', selected: ['x'] }])
+    expect(unknownId.ok).toBe(false)
+    if (!unknownId.ok) expect(unknownId.message).toContain('unknown question id "nope"')
+
+    const multiOnSingle = normalizeQuestionSelections(questions, [
+      { id: 'colour', selected: ['red', 'blue'] },
+      { id: 'scope', selected: ['one'] },
+    ])
+    expect(multiOnSingle.ok).toBe(false)
+
+    const partial = normalizeQuestionSelections(questions, [{ id: 'colour', selected: ['red'] }])
+    expect(partial).toEqual({ ok: false, message: 'question "scope" not answered' })
+
+    expect(normalizeQuestionSelections(questions, []).ok).toBe(false)
   })
 
   it('appends durable notices and swallows write failures', () => {

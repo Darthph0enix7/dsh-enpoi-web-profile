@@ -69,6 +69,46 @@ export interface PeerClientOptions {
   readonly pageSize?: number
 }
 
+/** One selectable option on a remote question. */
+export interface PeerQuestionOption {
+  /** User-facing label; the value `peer.answer` echoes back. */
+  readonly label: string
+  /** Optional extra context rendered by capable UIs. */
+  readonly description?: string
+}
+
+/**
+ * One question on a remote question ask. Mirrors the host's
+ * `AskUserQuestionItem` wire fields; presentation-only fields the caller
+ * cannot act on are not modelled.
+ */
+export interface PeerQuestionItem {
+  /** Stable question id, echoed in the answer. */
+  readonly id: string
+  /** The question to display. */
+  readonly question: string
+  /** Optional supporting detail. */
+  readonly detail?: string
+  /** Optional short heading. */
+  readonly header?: string
+  /** Choices the caller can select; absent means a free-form answer. */
+  readonly options?: readonly PeerQuestionOption[]
+  /** Whether more than one option may be selected. Defaults to single-select. */
+  readonly multiSelect?: boolean
+}
+
+/** One answered question; the host validates `selected` against its options. */
+export interface PeerQuestionAnswerItem {
+  readonly id: string
+  readonly selected: readonly string[]
+  readonly custom?: string
+}
+
+/** The structured answer `peer.answer` carries for `kind:'question'`. */
+export interface PeerQuestionAnswer {
+  readonly answers: readonly PeerQuestionAnswerItem[]
+}
+
 /** One pending ask as the host reports it. */
 export interface PeerPendingAsk {
   readonly kind: 'approval' | 'question'
@@ -76,7 +116,7 @@ export interface PeerPendingAsk {
   readonly toolName?: string
   readonly callId?: string
   readonly reason?: string
-  readonly questions?: readonly unknown[]
+  readonly questions?: readonly PeerQuestionItem[]
   readonly since: number
 }
 
@@ -234,7 +274,7 @@ export class PeerClient {
     readonly target: PeerTarget
     readonly participant: PeerParticipant
     readonly askId: string
-    readonly answer: { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' } | { readonly kind: 'question'; readonly answer: unknown }
+    readonly answer: { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' } | { readonly kind: 'question'; readonly answer: PeerQuestionAnswer }
   }): Promise<{ readonly accepted: boolean; readonly settled: boolean }> {
     return this.rpc('answer', request)
   }

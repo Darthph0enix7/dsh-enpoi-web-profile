@@ -29,6 +29,12 @@ interface HostOptions {
   readonly holdApproval?: boolean
   /** Stop the scripted follow after the prompt event, leaving the stream open. */
   readonly holdFollow?: boolean
+  /** Local user-questions answerer; absent from the context when `withQuestions: false`. */
+  readonly withQuestions?: boolean
+  /** Make the local question answerer refuse, mirroring an unattended/closed UI. */
+  readonly questionRefusal?: boolean
+  /** Answer the local user-questions request resolves with. */
+  readonly questionAnswer?: { readonly answers: readonly { readonly id: string; readonly selected: readonly string[] }[] }
 }
 
 interface RegisteredTool {
@@ -62,7 +68,7 @@ function createHarness(options: HostOptions = {}) {
           target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
           state: {
             latch: 'idle', since: 0, source: 'host-latch', activeDescendants: 0, descendantsExact: true,
-            pendingAsks: [],
+            pendingAsks: options.ask === undefined || options.ask === null ? [] : [options.ask],
             model: { provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
             lastTurnEnd: { turn: 0, reason: 'completed', at: 0 },
           },
@@ -128,6 +134,14 @@ function createHarness(options: HostOptions = {}) {
       })
     },
   }
+  const questionCalls: Array<Record<string, unknown>> = []
+  const userQuestions = {
+    ask: (request: Record<string, unknown>): Promise<unknown> => {
+      questionCalls.push(request)
+      if (options.questionRefusal === true) return Promise.reject(new Error('no user-questions answerer accepted the request'))
+      return Promise.resolve(options.questionAnswer ?? { answers: [{ id: 'colour', selected: ['blue'] }] })
+    },
+  }
   const ctx = {
     tools: {
       register: (definition: RegisteredTool) => {
@@ -135,7 +149,11 @@ function createHarness(options: HostOptions = {}) {
         return () => {}
       },
     },
-    get: (name: string) => name === 'approval' && options.withApproval !== false ? approval : undefined,
+    get: (name: string) => {
+      if (name === 'approval' && options.withApproval !== false) return approval
+      if (name === 'userQuestions' && options.withQuestions !== false) return userQuestions
+      return undefined
+    },
     logger: { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
   } as unknown as Context
 
@@ -145,6 +163,7 @@ function createHarness(options: HostOptions = {}) {
     tools,
     calls,
     approvalCalls,
+    questionCalls,
     noticesPath,
     dir,
     setApprovalDecision: (value: string) => { approvalDecision = value },
@@ -168,6 +187,17 @@ const APPROVAL_ASK: PeerPendingAsk = {
   toolName: 'bash',
   reason: 'bash rule "rm" requires approval',
   since: 1,
+}
+
+const QUESTION_ASK: PeerPendingAsk = {
+  kind: 'question',
+  askId: 'ask-q1',
+  since: 2,
+  questions: [{
+    id: 'colour',
+    question: 'Pick a colour',
+    options: [{ label: 'red' }, { label: 'blue' }],
+  }],
 }
 
 describe('enpoi-peer-bridge tools', () => {
@@ -306,6 +336,75 @@ describe('enpoi-peer-bridge tools', () => {
     const harness = createHarness()
     const result = await harness.tools.get('peer_asks')!.execute({ alias: 'scratch' }, harness.exec)
     expect(result).toMatchObject({ ok: true, alias: 'scratch', latch: 'idle', asks: [] })
+  })
+
+  it('surfaces a remote question locally, relays the selected label, and reports it', async () => {
+    const harness = createHarness({ ask: QUESTION_ASK })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ask me something' }, harness.exec)
+    expect(result.ok).toBe(true)
+    expect(harness.questionCalls).toHaveLength(1)
+    const request = harness.questionCalls[0] as { questions: Array<Record<string, unknown>> }
+    expect(request.questions[0]).toMatchObject({ id: 'colour', question: 'Pick a colour', options: [{ label: 'red' }, { label: 'blue' }] })
+    const answerCall = harness.calls.find(call => call.method === 'answer')
+    expect(answerCall!.args).toMatchObject({
+      askId: 'ask-q1',
+      answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['blue'] }] } },
+    })
+    const askLine = (result.asks as string[])[0]!
+    expect(askLine).toContain('selected=blue')
+    expect(askLine).toContain('relay=settled')
+  })
+
+  it('records a durable notice with the options and never auto-answers when no local answerer accepts', async () => {
+    const harness = createHarness({ ask: QUESTION_ASK, questionRefusal: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ask me something' }, harness.exec)
+    expect(harness.questionCalls).toHaveLength(1)
+    expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
+    const askLine = (result.asks as string[])[0]!
+    expect(askLine).toContain('decision=unsurfaced')
+    expect(askLine).toContain('options: red, blue')
+    const notice = readFileSync(harness.noticesPath, 'utf8')
+    expect(notice).toContain('"askId":"ask-q1"')
+    expect(notice).toContain('"question":"Pick a colour"')
+    expect(notice).toContain('local question answerer declined')
+  })
+
+  it('peer_answer rejects a malformed question selection with the reason and sends nothing', async () => {
+    const harness = createHarness({ ask: QUESTION_ASK })
+    const result = await harness.tools.get('peer_answer')!.execute({
+      alias: 'scratch',
+      askId: 'ask-q1',
+      answers: [{ id: 'colour', selected: ['green'] }],
+    }, harness.exec)
+    expect(result.ok).toBe(false)
+    const error = result.error as Record<string, unknown>
+    expect(error.code).toBe('gateway/bad-request')
+    expect(String(error.message)).toContain('"green" is not an option of question "colour"')
+    expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
+  })
+
+  it('peer_answer answers a question ask with validated labels', async () => {
+    const harness = createHarness({ ask: QUESTION_ASK })
+    const result = await harness.tools.get('peer_answer')!.execute({
+      alias: 'scratch',
+      askId: 'ask-q1',
+      answers: [{ id: 'colour', selected: ['red'] }],
+    }, harness.exec)
+    expect(result).toMatchObject({ ok: true, settled: true, note: 'question settled; the first answer won' })
+    expect(harness.calls.find(call => call.method === 'answer')!.args).toMatchObject({
+      answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['red'] }] } },
+    })
+  })
+
+  it('peer_asks exposes question ids and option labels', async () => {
+    const harness = createHarness({ ask: QUESTION_ASK })
+    const result = await harness.tools.get('peer_asks')!.execute({ alias: 'scratch' }, harness.exec)
+    expect(result).toMatchObject({
+      ok: true,
+      asks: [{ askId: 'ask-q1', kind: 'question', questions: [{ id: 'colour', question: 'Pick a colour', options: ['red', 'blue'] }] }],
+    })
+    const rendered = harness.tools.get('peer_asks')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('options: red, blue')
   })
 
   it('fails loud on an unknown alias', async () => {

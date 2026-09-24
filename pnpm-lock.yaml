@@ -83,6 +83,9 @@ importers:
       dsh-enpoi-ui-state:
         specifier: workspace:*
         version: link:packages/enpoi-ui-state
+      dsh-enpoi-verify-gate:
+        specifier: workspace:*
+        version: link:packages/enpoi-verify-gate
       dsh-enpoi-whiteboard:
         specifier: workspace:*
         version: link:packages/enpoi-whiteboard
@@ -180,6 +183,8 @@ importers:
   packages/enpoi-runtime-probe: {}
 
   packages/enpoi-ui-state: {}
+
+  packages/enpoi-verify-gate: {}
 
   packages/enpoi-whiteboard:
     dependencies:
