@@ -380,10 +380,29 @@ var init_policy = __esm({
       job_kill: "ask",
       skill: "allow",
       ask_user_question: "allow",
+      // Read-only introspection: an unattended peer/driver run must be able to look
+      // at its own session, diagnostics, and history without parking on an ask
+      // nobody is there to answer (observed live: session_debug parked a turn).
+      // Mutations keep their policy — registering a council, writing the board, or
+      // any execution still asks.
+      session_debug: "allow",
+      diagnostics_report: "allow",
+      fast_report: "allow",
+      session_search: "allow",
+      session_trace: "allow",
+      session_event_search: "allow",
+      session_event_read: "allow",
+      session_event_trace: "allow",
+      council_list: "allow",
+      whiteboard_read: "allow",
       edit: "allow",
       write: "allow",
       bash: "ask",
-      str_replace_editor: "ask"
+      str_replace_editor: "ask",
+      // Delivery only declares deliverables; no filesystem or network effect. An
+      // unattended run must not park on the unknown-tools ask for it. Availability
+      // (per-role tools.available / restrict) still gates which agents hold it.
+      present: "allow"
     };
     SHIPPED_BASH_PATTERNS = [
       { pattern: "git *", policy: "allow" },

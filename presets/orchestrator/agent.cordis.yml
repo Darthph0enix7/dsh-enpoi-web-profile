@@ -234,6 +234,13 @@
     - id: enpoi-oracle
       name: 'dsh-enpoi-oracle'
 
+    # Agent-facing debug/transparency read surface (doc 69 §9.1): the
+    # read-only `session_debug` tool (digest/snapshot/incidents). Mounted in
+    # this agent-plane scope on purpose — as a host-plane bundle it would
+    # register globally and be visible to every preset.
+    - id: enpoi-debug
+      name: 'dsh-enpoi-debug'
+
 
 # ── compaction ──────────────────────────────────────────────────────────────
 

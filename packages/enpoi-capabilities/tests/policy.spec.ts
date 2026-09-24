@@ -95,17 +95,29 @@ describe('resolution order (Oracle-amended)', () => {
   })
 
   it('an allowed-always tool grant absorbs the unknown-tool ask (the whiteboard flow)', () => {
-    // Live flow (session 297eded4): whiteboard_read asked from `defaults`,
+    // Live flow (session 297eded4): whiteboard_write asked from `defaults`,
     // the host wrote the standing grant on `allowed-always`, and the next
     // call in the same session resolved allow — no second approval/asked.
-    const ask = resolvePolicy({ toolName: 'whiteboard_read', agent: 'orchestrator', config: { defaults: { unknownTools: 'ask' } } })
+    // (`whiteboard_read` no longer serves as the example: read-only
+    // introspection ships allowed so unattended runs cannot park on it.)
+    const ask = resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: { defaults: { unknownTools: 'ask' } } })
     expect(ask.kind).toBe('ask')
     const granted = resolvePolicy({
-      toolName: 'whiteboard_read',
+      toolName: 'whiteboard_write',
       agent: 'orchestrator',
-      config: { defaults: { unknownTools: 'ask' }, grants: { g: { id: 'g', tool: 'whiteboard_read' } } },
+      config: { defaults: { unknownTools: 'ask' }, grants: { g: { id: 'g', tool: 'whiteboard_write' } } },
     })
     expect(granted).toMatchObject({ kind: 'allow', source: 'grant:tool' })
+  })
+
+  it('read-only introspection ships allowed, mutations still ask', () => {
+    const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }
+    for (const toolName of ['session_debug', 'diagnostics_report', 'fast_report', 'session_search', 'whiteboard_read']) {
+      expect(resolvePolicy({ toolName, agent: 'orchestrator', config })).toMatchObject({ kind: 'allow' })
+    }
+    for (const toolName of ['whiteboard_write', 'whiteboard_pin', 'some_unknown_tool']) {
+      expect(resolvePolicy({ toolName, agent: 'orchestrator', config }).kind).toBe('ask')
+    }
   })
 
   it('agent-scoped grants only apply to that agent', () => {
