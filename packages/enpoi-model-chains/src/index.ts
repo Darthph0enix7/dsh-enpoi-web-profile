@@ -36,6 +36,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 
 export const name = 'enpoi-model-chains'
 
@@ -163,8 +164,7 @@ export function parseChainEntry(
  */
 export function readRawChains(ctx: Context): Record<string, unknown> {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => unknown } | undefined
-    const doc = settings?.get?.(ORCH_NS)
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     if (!isRecord(doc)) return {}
     const chains = doc.chains
     if (chains === undefined) return {}

@@ -229,3 +229,59 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     livingBrief: LivingBriefView
   }
 }
+
+// ── Shared orchestration document reader (doc 74 P1.2) ──────────────────────
+
+/** Profile entry id that owns the shared orchestration document after the settings→Config migration. */
+export const ORCHESTRATION_NAMESPACE = 'enpoi-orchestration'
+
+/**
+ * Structural face of the settings service used to read the shared document.
+ * The 0.1.7+ form service exposes `describe()` keyed by profile entry id; the
+ * pre-0.1.7 service exposed `get(ns)` for registered namespaces. The pre-0.1.7
+ * descriptor also carried the resolved `value`, so `describe()` alone serves
+ * both engines.
+ */
+export interface SettingsDocumentReader {
+  /** Pre-0.1.7 seam: one registered namespace's resolved value. */
+  get?: (ns: string) => unknown
+  /** 0.1.7+ seam: one descriptor per configurable entry, carrying the resolved projected value. */
+  describe?: () => ReadonlyArray<{ ns: string; value?: unknown }>
+}
+
+/**
+ * Read one settings document from whichever settings surface the engine
+ * exposes: `get(ns)` when a pre-0.1.7 service still offers it, otherwise the
+ * `describe()` value of the entry with the same id. Both engines answer the
+ * live document, so callers keep their fail-open defaults.
+ * @param settings - the `settings` service from `ctx.get('settings')`.
+ * @param ns - profile entry id (0.1.7+) / registered namespace (pre-0.1.7).
+ * @returns the document, or undefined when no surface answers.
+ */
+export function readSettingsDocument(
+  settings: SettingsDocumentReader | undefined,
+  ns: string,
+): Record<string, unknown> | undefined {
+  try {
+    const direct = settings?.get?.(ns)
+    if (direct !== undefined) {
+      return direct !== null && typeof direct === 'object' ? direct as Record<string, unknown> : undefined
+    }
+    const value = settings?.describe?.().find(entry => entry.ns === ns)?.value
+    return value !== null && typeof value === 'object' ? value as Record<string, unknown> : undefined
+  } catch {
+    // A settings read is best-effort: callers fail open onto code defaults.
+    return undefined
+  }
+}
+
+/**
+ * Read the shared `enpoi-orchestration` document.
+ * @param settings - the `settings` service from `ctx.get('settings')`.
+ * @returns the document, or undefined when no surface answers.
+ */
+export function readOrchestrationDocument(
+  settings: SettingsDocumentReader | undefined,
+): Record<string, unknown> | undefined {
+  return readSettingsDocument(settings, ORCHESTRATION_NAMESPACE)
+}

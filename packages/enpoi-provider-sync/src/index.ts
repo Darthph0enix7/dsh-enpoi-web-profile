@@ -19,9 +19,10 @@
  */
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs'
-import type { Context } from '@deepseek-ai/cordis'
-import Schema from 'schemastery'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
+import { readSettingsDocument } from 'dsh-enpoi-contracts'
 import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
 
@@ -30,25 +31,43 @@ export const name = 'enpoi-provider-sync'
 /** Optional-only seam reads: every capability is probed via `ctx.get`. */
 export const inject: string[] = []
 
+/** Mark a schema subtree live-editable; the pre-0.1.7 vendored schemastery build predates `.volatile()`. */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
+}
+
+/** Read one effective Config field (Volatile ref on 0.1.7+, plain value before it). */
+function value<T>(field: T | Volatile<T>): T {
+  return typeof (field as Volatile<T> | undefined)?.get === 'function'
+    ? (field as Volatile<T>).get()
+    : field as T
+}
+
 export interface RouteCapacity {
   prefixes?: Record<string, { contextWindow?: number; maxTokens?: number }>
   default?: { contextWindow?: number; maxTokens?: number }
 }
 
+/** Live-editable sync schedule and enrichment configuration. */
 export interface Config {
-  intervalMs?: number
-  syncOnStart?: boolean
-  syncDelayMs?: number
-  endpoints?: Record<string, string>
-  capacityDefaults?: Record<string, RouteCapacity>
+  /** Refresh cadence in milliseconds. */
+  intervalMs: Volatile<number>
+  /** Run one pass shortly after boot. */
+  syncOnStart: Volatile<boolean>
+  /** Delay before the boot pass. */
+  syncDelayMs: Volatile<number>
+  /** Known endpoints for routes whose profile leaves baseURL to the catalog default. */
+  endpoints: Volatile<Record<string, string>>
+  /** Capacity fallbacks for models the live endpoint does not describe. */
+  capacityDefaults: Volatile<Record<string, RouteCapacity>>
 }
 
 export const Config = Schema.object({
-  intervalMs: Schema.number().default(3_600_000),
-  syncOnStart: Schema.boolean().default(true),
-  syncDelayMs: Schema.number().default(2000),
-  endpoints: Schema.dict(String).default({}),
-  capacityDefaults: Schema.any().default({}),
+  intervalMs: live(Schema.number().default(3_600_000)),
+  syncOnStart: live(Schema.boolean().default(true)),
+  syncDelayMs: live(Schema.number().default(2000)),
+  endpoints: live(Schema.dict(String).default({})),
+  capacityDefaults: live(Schema.any().default({})),
 })
 
 /** One entry from a provider's OpenAI-style `GET /models` listing. */
@@ -66,8 +85,10 @@ interface CredentialsSeam {
 }
 
 interface SettingsSeam {
-  get(ns: SettingsNamespace): unknown
-  describe(): Array<{ ns: SettingsNamespace; revision: number }>
+  /** Pre-0.1.7 seam: one registered namespace's resolved value. */
+  get?: (ns: string) => unknown
+  /** 0.1.7+ seam: one descriptor per configurable entry, carrying the projected value. */
+  describe(): Array<{ ns: SettingsNamespace; revision: number; value?: unknown }>
   mutate(ns: SettingsNamespace, ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>
 }
 
@@ -82,7 +103,7 @@ interface ProviderProfile {
 }
 
 function sectionOf(settings: SettingsSeam): { providers?: Record<string, ProviderProfile> } | undefined {
-  const section = settings.get(LLM_NS) as { providers?: Record<string, ProviderProfile> } | null | undefined
+  const section = readSettingsDocument(settings, LLM_NS) as { providers?: Record<string, ProviderProfile> } | undefined
   if (section === null || typeof section !== 'object') return undefined
   return section
 }
@@ -530,8 +551,8 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
 
 export function apply(ctx: Context, config: Config): void {
   const logger = ctx.logger('enpoi-provider-sync')
-  const endpoints = config.endpoints ?? {}
-  const capacities = (config.capacityDefaults ?? {}) as Record<string, RouteCapacity>
+  const endpoints = value(config.endpoints) ?? {}
+  const capacities = (value(config.capacityDefaults) ?? {}) as Record<string, RouteCapacity>
 
   // Load models.dev database on startup and refresh online in background
   loadModelsDev()
@@ -602,14 +623,14 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  const delay = config.syncDelayMs ?? 2000
-  const interval = config.intervalMs ?? 3_600_000
+  const delay = value(config.syncDelayMs) ?? 2000
+  const interval = value(config.intervalMs) ?? 3_600_000
 
   ctx.effect(() => {
     let timer: NodeJS.Timeout | undefined
     let intervalTimer: NodeJS.Timeout | undefined
 
-    if (config.syncOnStart !== false) {
+    if (value(config.syncOnStart) !== false) {
       timer = setTimeout(() => { void syncOnce() }, delay)
     }
     intervalTimer = setInterval(() => { void syncOnce() }, interval)

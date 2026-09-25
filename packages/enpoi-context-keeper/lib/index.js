@@ -2,13 +2,13 @@ var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbo
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
-var __using = (stack, value, async) => {
-  if (value != null) {
-    if (typeof value !== "object" && typeof value !== "function") __typeError("Object expected");
+var __using = (stack, value2, async) => {
+  if (value2 != null) {
+    if (typeof value2 !== "object" && typeof value2 !== "function") __typeError("Object expected");
     var dispose, inner;
-    if (async) dispose = value[__knownSymbol("asyncDispose")];
+    if (async) dispose = value2[__knownSymbol("asyncDispose")];
     if (dispose === void 0) {
-      dispose = value[__knownSymbol("dispose")];
+      dispose = value2[__knownSymbol("dispose")];
       if (async) inner = dispose;
     }
     if (typeof dispose !== "function") __typeError("Object not disposable");
@@ -19,11 +19,11 @@ var __using = (stack, value, async) => {
         return Promise.reject(e);
       }
     };
-    stack.push([async, dispose, value]);
+    stack.push([async, dispose, value2]);
   } else if (async) {
     stack.push([async]);
   }
-  return value;
+  return value2;
 };
 var __callDispose = (stack, error, hasError) => {
   var E = typeof SuppressedError === "function" ? SuppressedError : function(e, s, m, _) {
@@ -51,9 +51,21 @@ import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { openMemoryDb } from "dsh-enpoi-memory";
 import { makePipeline } from "dsh-enpoi-memory";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 import { join } from "node:path";
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
 var name = "enpoi-context-keeper";
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function value(field) {
+  return typeof field?.get === "function" ? field.get() : field;
+}
+function plainConfig(config) {
+  const out = {};
+  for (const [key, field] of Object.entries(config)) out[key] = value(field);
+  return out;
+}
 var inject = ["llm"];
 function diag(line) {
   try {
@@ -67,28 +79,28 @@ function diag(line) {
 }
 function keeperEnabled(ctx) {
   try {
-    const settings = ctx.get("settings");
-    const tools = settings?.get?.("enpoi-orchestration")?.capabilities?.tools;
+    const doc = readOrchestrationDocument(ctx.get("settings"));
+    const tools = doc?.capabilities?.tools;
     return tools?.["keeper"] !== false;
   } catch {
     return true;
   }
 }
 var Config = Schema.object({
-  provider: Schema.string().default("freellmapi"),
-  model: Schema.string().default("auto"),
-  fallbackProvider: Schema.string().default("antigravity"),
-  fallbackModel: Schema.string().default("gemini-3.7-flash-tiered"),
-  leaseMs: Schema.number().default(45e3),
-  maxInputEvents: Schema.number().default(80),
-  maxOutputTokens: Schema.number().default(2048),
-  structuralDistanceK: Schema.number().default(24),
-  minRefreshMs: Schema.number().default(6e4),
-  negativeCacheMs: Schema.number().default(12e4),
-  claimsBatchSize: Schema.number().default(8),
-  claimsBatchMinutes: Schema.number().default(5),
-  checkpointStaleEvents: Schema.number().default(12),
-  checkpointStaleHours: Schema.number().default(24)
+  provider: live(Schema.string().default("freellmapi")),
+  model: live(Schema.string().default("auto")),
+  fallbackProvider: live(Schema.string().default("antigravity")),
+  fallbackModel: live(Schema.string().default("gemini-3.7-flash-tiered")),
+  leaseMs: live(Schema.number().default(45e3)),
+  maxInputEvents: live(Schema.number().default(80)),
+  maxOutputTokens: live(Schema.number().default(2048)),
+  structuralDistanceK: live(Schema.number().default(24)),
+  minRefreshMs: live(Schema.number().default(6e4)),
+  negativeCacheMs: live(Schema.number().default(12e4)),
+  claimsBatchSize: live(Schema.number().default(8)),
+  claimsBatchMinutes: live(Schema.number().default(5)),
+  checkpointStaleEvents: live(Schema.number().default(12)),
+  checkpointStaleHours: live(Schema.number().default(24))
 });
 var PROSE_PROMPT = [
   "You are the Enpoi Harness context keeper \u2014 the master background summarizer and architectural keeper for this coding session.",
@@ -185,9 +197,10 @@ function resolveChainSnapshot(ctx, id) {
   }
 }
 function resolveKeeperParams(ctx, config) {
+  config = plainConfig(config);
   try {
-    const settings = ctx.get("settings");
-    const p = settings?.get?.("enpoi-orchestration")?.parameters?.keeper;
+    const doc = readOrchestrationDocument(ctx.get("settings"));
+    const p = doc?.parameters?.keeper;
     if (p === void 0 || typeof p !== "object") return config;
     const clamp = (v, fallback, min, max) => typeof v === "number" && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback;
     return {
@@ -208,11 +221,12 @@ function resolveKeeperParams(ctx, config) {
   }
 }
 function resolveKeeperRoute(ctx, config) {
+  config = plainConfig(config);
   const fallbackProvider = config.fallbackProvider ?? "antigravity";
   const fallbackModel = config.fallbackModel ?? "gemini-3.7-flash-tiered";
   try {
-    const settings = ctx.get("settings");
-    const entry = settings?.get?.("enpoi-orchestration")?.personas?.["keeper"];
+    const doc = readOrchestrationDocument(ctx.get("settings"));
+    const entry = doc?.personas?.["keeper"];
     const chain = resolveChainSnapshot(ctx, entry?.chain);
     if (chain !== void 0) {
       const active = entry !== void 0 && entry.provider && entry.model ? {
@@ -288,16 +302,16 @@ var BoundedSessionCache = class extends Map {
   }
   cap;
   get(key) {
-    const value = super.get(key);
-    if (value !== void 0) {
+    const value2 = super.get(key);
+    if (value2 !== void 0) {
       super.delete(key);
-      super.set(key, value);
+      super.set(key, value2);
     }
-    return value;
+    return value2;
   }
-  set(key, value) {
+  set(key, value2) {
     super.delete(key);
-    super.set(key, value);
+    super.set(key, value2);
     if (super.size > this.cap) {
       const oldest = super.keys().next().value;
       if (oldest !== void 0) {
@@ -490,10 +504,10 @@ function createBriefService(ctx, config) {
 }
 var CHECKPOINT_SOURCE = { kind: "plugin", plugin: "enpoi-context-keeper" };
 function checkpointTelemetry(session, meta) {
-  const day = (value) => {
-    if (value === void 0 || !Number.isFinite(value)) return "unknown";
+  const day = (value2) => {
+    if (value2 === void 0 || !Number.isFinite(value2)) return "unknown";
     try {
-      return new Date(value).toISOString().slice(0, 10);
+      return new Date(value2).toISOString().slice(0, 10);
     } catch {
       return "unknown";
     }
@@ -825,6 +839,7 @@ function getKeeperBookkeeping() {
   return bookkeeping;
 }
 function apply(ctx, config) {
+  config = plainConfig(config);
   const ownedService = createBriefService(ctx, config);
   briefService = ownedService;
   globalThis[BRIEF_SERVICE_ANCHOR] = ownedService;
@@ -1009,10 +1024,10 @@ async function runClaimsPass(ctx, config, session, running) {
   }
 }
 var PROSE_REJECT_MARKERS = ["<dots_function_call", "<function_call", "tool_call", "<tool_use"];
-function isToolEnvelopeValue(value, depth = 0) {
-  if (depth > 4 || value === null || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some((item) => isToolEnvelopeValue(item, depth + 1));
-  const record = value;
+function isToolEnvelopeValue(value2, depth = 0) {
+  if (depth > 4 || value2 === null || typeof value2 !== "object") return false;
+  if (Array.isArray(value2)) return value2.some((item) => isToolEnvelopeValue(item, depth + 1));
+  const record = value2;
   if (typeof record.name === "string" && (typeof record.arguments === "string" || record.arguments !== null && typeof record.arguments === "object")) {
     return true;
   }

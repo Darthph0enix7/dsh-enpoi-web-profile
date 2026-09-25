@@ -19,6 +19,7 @@
  * reserved arbiter ids and never seat ids.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import { councilDiag } from './core/fiber.ts'
 import {
   validateSpec,
@@ -140,8 +141,7 @@ export function councilSettingsEntry(decl: DeclarativeCouncilSpec): Record<strin
  */
 export function readCouncilSettings(ctx: Context): { councils: Record<string, unknown>; problem?: string } {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => unknown } | undefined
-    const doc = settings?.get?.(ORCH_NAMESPACE) as { councils?: unknown } | undefined
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const councils = doc?.councils
     if (councils === undefined) return { councils: {} }
     if (!isPlainObject(councils)) {

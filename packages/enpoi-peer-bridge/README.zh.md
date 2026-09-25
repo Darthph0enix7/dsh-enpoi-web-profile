@@ -35,8 +35,11 @@ pairings:
 ```
 
 主机角色字段（`sessionId`、`exposure`）被调用方忽略；条目需要 `alias`、
-`peer`、`endpoint` 才可拨号。插件配置的 `pairingsPath`（CLI 的
-`--pairings`）可指向其他文档，测试因此不会碰操作者真实的配对文件。
+`peer`、`endpoint` 才可拨号。插件 Config 字段（`pairingsPath`、`noticesPath`、
+`device`、`participantName`、`waitMs`、`maxReconnects`）均声明为
+`.volatile()`，合并后的 settings 服务会将其暴露为实时表单并持久化到 profile
+patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他文档，测试因此
+不会碰操作者真实的配对文件。
 
 ## 远端询问
 

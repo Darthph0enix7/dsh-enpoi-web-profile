@@ -39,17 +39,37 @@
  * @module dsh-enpoi-context-keeper
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { SessionLogOffset, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { BlockAssembler, createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { deadline } from '@deepseek-ai/dsh-timeout'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { openMemoryDb } from 'dsh-enpoi-memory'
 import { makePipeline } from 'dsh-enpoi-memory'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import { join } from 'node:path'
-import Schema from 'schemastery'
+import Schema from '@deepseek-ai/schemastery'
 
 export const name = 'enpoi-context-keeper'
+
+/** Mark a schema subtree live-editable; the pre-0.1.7 vendored schemastery build predates `.volatile()`. */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
+}
+
+/** Unwrap one effective Config field (Volatile ref on 0.1.7+, plain value before it). */
+function value<T>(field: T | Volatile<T>): T {
+  return typeof (field as Volatile<T> | undefined)?.get === 'function'
+    ? (field as Volatile<T>).get()
+    : field as T
+}
+
+/** Detach every Config field into plain values (idempotent on pre-0.1.7 plain configs). */
+function plainConfig<T extends object>(config: T): T {
+  const out: Record<string, unknown> = {}
+  for (const [key, field] of Object.entries(config)) out[key] = value(field as unknown as Volatile<unknown>)
+  return out as T
+}
 
 /** The llm service is required — the keeper is a model-backed worker. */
 export const inject = ['llm']
@@ -73,53 +93,54 @@ function diag(line: string): void {
  */
 function keeperEnabled(ctx: Context): boolean {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { capabilities?: { tools?: Record<string, boolean> } } } | undefined
-    const tools = settings?.get?.('enpoi-orchestration')?.capabilities?.tools
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const tools = (doc?.capabilities as { tools?: Record<string, boolean> } | undefined)?.tools
     return tools?.['keeper'] !== false
   } catch {
     return true
   }
 }
 
+/** Keeper primary/fallback route plus its per-wake budgets (doc 38; live-editable). */
 export interface Config {
-  provider?: string
-  model?: string
-  fallbackProvider?: string
-  fallbackModel?: string
-  leaseMs?: number
-  maxInputEvents?: number
-  maxOutputTokens?: number
+  provider?: Volatile<string>
+  model?: Volatile<string>
+  fallbackProvider?: Volatile<string>
+  fallbackModel?: Volatile<string>
+  leaseMs?: Volatile<number>
+  maxInputEvents?: Volatile<number>
+  maxOutputTokens?: Volatile<number>
   /** Structural-event distance that triggers a re-distillation. */
-  structuralDistanceK?: number
+  structuralDistanceK?: Volatile<number>
   /** Anti-thrash floor: reuse a distillation younger than this. */
-  minRefreshMs?: number
+  minRefreshMs?: Volatile<number>
   /** Failure negative-cache window. */
-  negativeCacheMs?: number
+  negativeCacheMs?: Volatile<number>
   /** Claims batch: one pass per N non-aborted turn/ends… */
-  claimsBatchSize?: number
+  claimsBatchSize?: Volatile<number>
   /** …or T minutes, whichever first. */
-  claimsBatchMinutes?: number
+  claimsBatchMinutes?: Volatile<number>
   /** Staleness floor: structural events since the last state checkpoint. */
-  checkpointStaleEvents?: number
+  checkpointStaleEvents?: Volatile<number>
   /** Staleness floor: hours since the last state checkpoint. */
-  checkpointStaleHours?: number
+  checkpointStaleHours?: Volatile<number>
 }
 
 export const Config = Schema.object({
-  provider: Schema.string().default('freellmapi'),
-  model: Schema.string().default('auto'),
-  fallbackProvider: Schema.string().default('antigravity'),
-  fallbackModel: Schema.string().default('gemini-3.7-flash-tiered'),
-  leaseMs: Schema.number().default(45_000),
-  maxInputEvents: Schema.number().default(80),
-  maxOutputTokens: Schema.number().default(2048),
-  structuralDistanceK: Schema.number().default(24),
-  minRefreshMs: Schema.number().default(60_000),
-  negativeCacheMs: Schema.number().default(120_000),
-  claimsBatchSize: Schema.number().default(8),
-  claimsBatchMinutes: Schema.number().default(5),
-  checkpointStaleEvents: Schema.number().default(12),
-  checkpointStaleHours: Schema.number().default(24),
+  provider: live(Schema.string().default('freellmapi')),
+  model: live(Schema.string().default('auto')),
+  fallbackProvider: live(Schema.string().default('antigravity')),
+  fallbackModel: live(Schema.string().default('gemini-3.7-flash-tiered')),
+  leaseMs: live(Schema.number().default(45_000)),
+  maxInputEvents: live(Schema.number().default(80)),
+  maxOutputTokens: live(Schema.number().default(2048)),
+  structuralDistanceK: live(Schema.number().default(24)),
+  minRefreshMs: live(Schema.number().default(60_000)),
+  negativeCacheMs: live(Schema.number().default(120_000)),
+  claimsBatchSize: live(Schema.number().default(8)),
+  claimsBatchMinutes: live(Schema.number().default(5)),
+  checkpointStaleEvents: live(Schema.number().default(12)),
+  checkpointStaleHours: live(Schema.number().default(24)),
 })
 
 /** Secrets-exclusion instruction (doc 35 §1.1) — summarization never credentials. */
@@ -284,9 +305,10 @@ function resolveChainSnapshot(ctx: Context, id: unknown): ChainSnapshot | undefi
  * doc-38 ranges.
  */
 export function resolveKeeperParams(ctx: Context, config: Config): Config {
+  config = plainConfig(config)
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { keeper?: Partial<Config> } } } | undefined
-    const p = settings?.get?.('enpoi-orchestration')?.parameters?.keeper
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const p = (doc?.parameters as { keeper?: Partial<Config> } | undefined)?.keeper
     if (p === undefined || typeof p !== 'object') return config
     const clamp = (v: unknown, fallback: number, min: number, max: number): number =>
       typeof v === 'number' && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback
@@ -316,11 +338,12 @@ export function resolveKeeperParams(ctx: Context, config: Config): Config {
  * in both branches. Partial entries (missing provider or model) are ignored.
  */
 export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute {
+  config = plainConfig(config)
   const fallbackProvider = config.fallbackProvider ?? 'antigravity'
   const fallbackModel = config.fallbackModel ?? 'gemini-3.7-flash-tiered'
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }> } } | undefined
-    const entry = settings?.get?.('enpoi-orchestration')?.personas?.['keeper']
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const entry = (doc?.personas as Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string } | null> | undefined)?.['keeper']
     // Model chain (doc 60): `personas.keeper.chain` names a chain whose links
     // replace the primary → fallback pair for this run. The persona's
     // provider/model (when present) is the ACTIVE link; the chain's remaining
@@ -1214,6 +1237,9 @@ export function getKeeperBookkeeping(): KeeperBookkeeping | null {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  // Detach the effective values once; the live override surface for this
+  // plugin is `enpoi-orchestration.parameters.keeper`, read per wake.
+  config = plainConfig(config)
   const ownedService = createBriefService(ctx, config)
   briefService = ownedService
   ;(globalThis as unknown as Record<symbol, unknown>)[BRIEF_SERVICE_ANCHOR] = ownedService

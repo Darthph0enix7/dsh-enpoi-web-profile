@@ -1,5 +1,5 @@
 // src/index.ts
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
 import { homedir } from "node:os";
 import { join as join4 } from "node:path";
 import { randomUUID as randomUUID2, createHash as createHash2 } from "node:crypto";
@@ -38,10 +38,10 @@ var BlobStore = class {
    * @param liveShas — every SHA referenced by live records anywhere
    */
   async gc(liveShas, ttlMs, now = Date.now()) {
-    const live = new Set(liveShas);
+    const live2 = new Set(liveShas);
     const entries = await readdir(this.rootDir);
     for (const name2 of entries) {
-      if (live.has(name2)) continue;
+      if (live2.has(name2)) continue;
       const path = join(this.rootDir, name2);
       try {
         const st = await stat(path);
@@ -674,16 +674,27 @@ function diag2(msg) {
   } catch {
   }
 }
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function plainConfig(config) {
+  const out = {};
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof field?.get === "function" ? field.get() : field;
+  }
+  return out;
+}
 var Config = Schema.object({
   /** Maximum snapshot size in bytes; larger files degrade to the unavailable-prompt path. */
-  maxSnapshotBytes: Schema.number().default(10 * 1024 * 1024),
+  maxSnapshotBytes: live(Schema.number().default(10 * 1024 * 1024)),
   /** Interval for the reachability GC sweep (ms). */
-  gcIntervalMs: Schema.number().default(6 * 60 * 60 * 1e3),
+  gcIntervalMs: live(Schema.number().default(6 * 60 * 60 * 1e3)),
   /** Age threshold for unreferenced blobs (ms). */
-  gcTtlMs: Schema.number().default(30 * 24 * 60 * 60 * 1e3)
+  gcTtlMs: live(Schema.number().default(30 * 24 * 60 * 60 * 1e3))
 });
 function apply(ctx, config) {
-  diag2(`apply: mounted (maxSnapshotBytes=${config.maxSnapshotBytes}, gcIntervalMs=${config.gcIntervalMs})`);
+  const resolved = plainConfig(config);
+  diag2(`apply: mounted (maxSnapshotBytes=${resolved.maxSnapshotBytes}, gcIntervalMs=${resolved.gcIntervalMs})`);
   const blobStore = new BlobStore(join4(FILE_HISTORY_ROOT, "blobs"));
   void blobStore.init();
   const pendingCaptures = /* @__PURE__ */ new Map();
@@ -731,7 +742,7 @@ function apply(ctx, config) {
   ctx.on("tools/pre-execute", async (exec, next) => {
     if (exec.name === "edit" || exec.name === "write") {
       try {
-        await capturePre(ctx, exec, pendingCaptures, config.maxSnapshotBytes);
+        await capturePre(ctx, exec, pendingCaptures, resolved.maxSnapshotBytes);
       } catch (err) {
         diag2(`pre-capture failed for ${exec.name}: ${String(err)}`);
       }
@@ -798,10 +809,10 @@ function apply(ctx, config) {
   const timer = ctx.get("timer");
   if (timer?.setInterval !== void 0) {
     timer.setInterval(() => {
-      void runGc(manifests, executors, blobStore, config.gcTtlMs).catch((err) => {
+      void runGc(manifests, executors, blobStore, resolved.gcTtlMs).catch((err) => {
         diag2(`GC sweep failed: ${String(err)}`);
       });
-    }, config.gcIntervalMs);
+    }, resolved.gcIntervalMs);
   }
   onAny("dispose", () => {
     pendingCaptures.clear();
@@ -1076,7 +1087,7 @@ async function recoverUnsealedIntents(ctx, executorFor, manifestFor) {
   }
 }
 async function runGc(manifests, executors, blobStore, ttlMs) {
-  const live = /* @__PURE__ */ new Set();
+  const live2 = /* @__PURE__ */ new Set();
   const { readdir: readdir2, readFile: readFile5 } = await import("node:fs/promises");
   const sessions = await readdir2(FILE_HISTORY_ROOT, { withFileTypes: true });
   for (const entry of sessions) {
@@ -1087,16 +1098,16 @@ async function runGc(manifests, executors, blobStore, ttlMs) {
         if (line.length === 0) continue;
         try {
           const rec = JSON.parse(line);
-          if (rec.preBlobSha) live.add(rec.preBlobSha);
-          if (rec.postBlobSha) live.add(rec.postBlobSha);
+          if (rec.preBlobSha) live2.add(rec.preBlobSha);
+          if (rec.postBlobSha) live2.add(rec.postBlobSha);
         } catch {
         }
       }
     } catch {
     }
   }
-  for (const e of executors.values()) for (const sha of e.liveShas()) live.add(sha);
-  await blobStore.gc(live, ttlMs);
+  for (const e of executors.values()) for (const sha of e.liveShas()) live2.add(sha);
+  await blobStore.gc(live2, ttlMs);
 }
 async function findActiveChildren(ctx, parentId) {
   const sessions = ctx.get("sessions");

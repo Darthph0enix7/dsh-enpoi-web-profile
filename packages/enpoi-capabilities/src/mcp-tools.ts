@@ -42,10 +42,14 @@ export interface SettingsPathOp {
   value?: unknown
 }
 
-/** The settings-service slice catalog removal fences against. */
+/**
+ * The settings-service slice catalog removal fences against. The descriptor
+ * `value` is the resolved document on both the pre-0.1.7 storage service and
+ * the merged form service (which projects the owning entry's volatile fields),
+ * so one read path serves both engines.
+ */
 export interface McpCatalogSettings {
-  get?: (ns: unknown) => { mcpServers?: Record<string, { serverName?: string }>; permissions?: PermissionPolicyConfig } | undefined
-  describe?: () => Array<{ ns: string; revision?: number }>
+  describe?: () => Array<{ ns: string; revision?: number; value?: unknown }>
   mutate?: (ns: string, ops: SettingsPathOp[], expectedRevision?: number) => Promise<unknown>
 }
 
@@ -97,7 +101,8 @@ export async function removeMcpServerFenced(
 ): Promise<{ removed: boolean; rows: number }> {
   if (!canFenceMcpWrites(settings)) return { removed: false, rows: 0 }
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
-    const value = settings.get?.(ns)
+    const descriptor = settings.describe?.().find(entry => entry.ns === ns)
+    const value = descriptor?.value as { mcpServers?: Record<string, { serverName?: string }>; permissions?: PermissionPolicyConfig } | undefined
     const def = (value?.mcpServers ?? {})[id]
     if (def === undefined) return { removed: false, rows: 0 }
     const server = mcpServerNameOf(id, def)
@@ -105,7 +110,7 @@ export async function removeMcpServerFenced(
       { op: 'unset', path: ['mcpServers', id] },
       ...mcpPolicyRemovalOps(server, value?.permissions),
     ]
-    const revision = settings.describe?.().find((entry: { ns: string; revision?: number }) => entry.ns === ns)?.revision
+    const revision = descriptor?.revision
     try {
       await settings.mutate(ns, ops, revision)
       return { removed: true, rows: ops.length - 1 }

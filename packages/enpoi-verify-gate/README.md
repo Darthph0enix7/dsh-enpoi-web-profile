@@ -55,8 +55,11 @@ failure is consumed at the boundary).
 
 ## Behaviour switch (default = record-only)
 
-`enpoi-orchestration.parameters.verifyGate`, read hot at every turn end through
-the settings service (like the context keeper's `parameters`):
+`enpoi-orchestration.parameters.verifyGate`, read hot at every turn end from the
+shared document — after the 0.1.7 settings→Config migration that document is the
+`enpoi-orchestration` profile entry's `.volatile()` Config, read through the
+settings service's `describe()` value (with the pre-0.1.7 `get()` fallback; see
+`dsh-enpoi-contracts:readOrchestrationDocument`):
 
 ```yaml
 parameters:
@@ -72,8 +75,9 @@ parameters:
   unverified ending is recorded, not re-prompted. A verified (or aborted/error)
   turn resets the streak; `promptOnce: true` caps prompts to one per session.
 
-The plugin's own `cordis.patch.yml` config (`mode`/`promptOnce`) is only the
-fallback for a deployment without settings.
+The plugin's own `cordis.patch.yml` config (`mode`/`promptOnce`, `.volatile()`)
+is only the fallback for a deployment without settings; being volatile, the
+fields are also editable live through the profile's config-editor document.
 
 ## Debug visibility
 

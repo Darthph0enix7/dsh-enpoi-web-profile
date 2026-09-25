@@ -25,6 +25,7 @@ import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { getBriefService } from 'dsh-enpoi-context-keeper'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 
 export const name = 'enpoi-oracle'
 
@@ -236,8 +237,8 @@ async function ensureBriefWithin(parent: Agent, signal: AbortSignal): Promise<vo
 
 export function resolveOracleTimeoutMs(ctx: Context): number {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { oracle?: { timeoutMs?: number } } } } | undefined
-    const v = settings?.get?.('enpoi-orchestration')?.parameters?.oracle?.timeoutMs
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const v = (doc?.parameters as { oracle?: { timeoutMs?: number } } | undefined)?.oracle?.timeoutMs
     if (typeof v === 'number' && !Number.isNaN(v)) return Math.min(300_000, Math.max(30_000, v))
   } catch {
     // settings unavailable — default
@@ -247,10 +248,9 @@ export function resolveOracleTimeoutMs(ctx: Context): number {
 
 export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }> } } | undefined
-    const doc = settings?.get?.('enpoi-orchestration')
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
-    const entry = doc?.personas?.[key]
+    const entry = (doc?.personas as Record<string, { provider?: string; model?: string; reasoningEffort?: string } | null> | undefined)?.[key]
     if (entry && entry.provider && entry.model) {
       return {
         provider: entry.provider,
@@ -335,12 +335,12 @@ export function resolveOracleChainAttempts(
   persona: string,
 ): { chainId?: string; carryId: boolean; attempts: OracleAttemptModel[] } {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }> } } | undefined
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
-    const entry = settings?.get?.('enpoi-orchestration')?.personas?.[key]
+    const entry = (doc?.personas as Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string } | null> | undefined)?.[key]
     const snapshot = resolveChainSnapshot(ctx, entry?.chain)
     if (snapshot !== undefined) {
-      const active: OracleChainSnapshotLink = entry !== undefined && entry.provider && entry.model
+      const active: OracleChainSnapshotLink = entry != null && entry.provider && entry.model
         ? { provider: entry.provider, model: entry.model }
         : { ...snapshot.links[0]! }
       const links = [

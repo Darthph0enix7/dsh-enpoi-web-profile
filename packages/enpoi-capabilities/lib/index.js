@@ -447,7 +447,8 @@ function mcpToolNames(names) {
 async function removeMcpServerFenced(settings, id, ns = ORCHESTRATION_NS) {
   if (!canFenceMcpWrites(settings)) return { removed: false, rows: 0 };
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
-    const value = settings.get?.(ns);
+    const descriptor = settings.describe?.().find((entry) => entry.ns === ns);
+    const value = descriptor?.value;
     const def = (value?.mcpServers ?? {})[id];
     if (def === void 0) return { removed: false, rows: 0 };
     const server = mcpServerNameOf(id, def);
@@ -455,7 +456,7 @@ async function removeMcpServerFenced(settings, id, ns = ORCHESTRATION_NS) {
       { op: "unset", path: ["mcpServers", id] },
       ...mcpPolicyRemovalOps(server, value?.permissions)
     ];
-    const revision = settings.describe?.().find((entry) => entry.ns === ns)?.revision;
+    const revision = descriptor?.revision;
     try {
       await settings.mutate(ns, ops, revision);
       return { removed: true, rows: ops.length - 1 };
@@ -522,7 +523,8 @@ var init_rpc = __esm({
 });
 
 // src/index.ts
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 
 // src/types.ts
 var PROTECTED_CAPABILITIES = /* @__PURE__ */ new Set([
@@ -695,43 +697,42 @@ var publishedCatalog = /* @__PURE__ */ new Map();
 var name = "enpoi-capabilities";
 var inject = ["tools", "systemPrompt", "settings", "timer"];
 var ORCH_NS = "enpoi-orchestration";
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
 var CapabilitiesSchema = Schema.object({
   tools: Schema.dict(Schema.boolean()).default({}),
   skills: Schema.dict(Schema.boolean()).default({}),
   mcp: Schema.dict(Schema.boolean()).default({})
 });
 var OrchestrationSettingsSchema = Schema.object({
-  capabilities: CapabilitiesSchema,
-  mcpServers: Schema.dict(Schema.any()).default({}),
-  mcpStatus: Schema.dict(Schema.any()).default({}),
-  personas: Schema.dict(Schema.any()).default({}),
+  capabilities: live(CapabilitiesSchema.default({})),
+  mcpServers: live(Schema.dict(Schema.any()).default({})),
+  mcpStatus: live(Schema.dict(Schema.any()).default({})),
+  personas: live(Schema.dict(Schema.any()).default({})),
   // Operator-defined specialist roles and councils (doc 59): declared here so
   // the namespace contract is explicit rather than relying on unknown-key
   // survival — both remain opaque plugin-owned vocabularies.
-  roles: Schema.dict(Schema.any()).default({}),
-  councils: Schema.dict(Schema.any()).default({}),
+  roles: live(Schema.dict(Schema.any()).default({})),
+  councils: live(Schema.dict(Schema.any()).default({})),
   // Operator-defined model failover chains (doc 60): id → { label?, links,
   // attempts?, onCut?, disabled? }. Owned by enpoi-model-chains, declared here
   // so the namespace contract admits the key rather than relying on
   // unknown-key survival.
-  chains: Schema.dict(Schema.any()).default({}),
-  parameters: Schema.any(),
+  chains: live(Schema.dict(Schema.any()).default({})),
+  parameters: live(Schema.dict(Schema.any()).default({})),
   // UI preferences (favorites, hidden models, model assignments, …) shared by
-  // every client through `settings/document-updated`. `hiddenSurfaces` is
-  // declared here so the namespace contract admits the duplicate-surface
-  // preference — rail page kinds and conversation view ids the client must not
-  // render (`{ sidebarRight: string[], views: string[] }`) — rather than
-  // relying on unknown-key survival; sibling keys stay opaque.
-  uiPreferences: Schema.object({
-    hiddenSurfaces: Schema.any()
-  }),
-  permissions: Schema.any(),
+  // every client through `settings/document-updated`. The whole record stays
+  // opaque so sibling keys survive the form projection.
+  uiPreferences: live(Schema.dict(Schema.any()).default({})),
+  permissions: live(Schema.dict(Schema.any()).default({})),
   // Pinned whiteboard (doc 66 §3c / doc 67 §B): orchestrator-authored
   // core-context board, owned by enpoi-whiteboard and rendered into every
   // runtime-context snapshot. Declared so the namespace contract admits the
   // key rather than relying on unknown-key survival.
-  whiteboard: Schema.any()
+  whiteboard: live(Schema.dict(Schema.any()).default({}))
 });
+var Config = OrchestrationSettingsSchema;
 async function pruneRemovedMcpPolicyRows(settings, servers, readConfig) {
   if (!canFenceMcpWrites(settings) || servers.length === 0) return 0;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -749,7 +750,7 @@ async function pruneRemovedMcpPolicyRows(settings, servers, readConfig) {
   }
   return 0;
 }
-function apply(ctx) {
+function apply(ctx, config = {}) {
   try {
     const settingsApi = ctx.get("settings");
     settingsApi?.register?.(ORCH_NS, OrchestrationSettingsSchema, { base: { capabilities: {} } });
@@ -757,10 +758,21 @@ function apply(ctx) {
     process.stderr.write(`[enpoi-capabilities] namespace registration failed: ${String(error)}
 `);
   }
+  ctx.inject(["settings"], (child) => {
+    child.effect(() => {
+      const settings = child.get("settings");
+      return settings?.configure?.({ auto: false }, ctx.fiber);
+    });
+  });
+  function documentValue(field, key) {
+    const ref = field;
+    if (typeof ref?.get === "function") return ref.get();
+    const document = readOrchestrationDocument(ctx.get("settings"));
+    return document?.[key];
+  }
   function getGlobalDefaults() {
     try {
-      const settings = ctx.get("settings");
-      return settings?.get?.(ORCH_NS)?.capabilities;
+      return documentValue(config.capabilities, "capabilities");
     } catch {
       return void 0;
     }
@@ -802,8 +814,7 @@ function apply(ctx) {
     const publishedMountErrors = /* @__PURE__ */ new Map();
     function getServerCatalog() {
       try {
-        const settings = ctx.get("settings");
-        return settings?.get?.(ORCH_NS)?.mcpServers ?? {};
+        return documentValue(config.mcpServers, "mcpServers") ?? {};
       } catch {
         return {};
       }
@@ -886,13 +897,15 @@ function apply(ctx) {
     void syncMcpMounts();
     ctx.setTimeout(() => void syncMcpMounts(), 3e3);
     let lastSyncedToggleMap;
-    ctx.on("settings/updated", ((ns) => {
+    const onTogglesUpdated = ((ns) => {
       if (String(ns) !== "enpoi-orchestration") return;
       const toggleMap = JSON.stringify(initialCapabilitiesState(getGlobalDefaults()).mcp);
       if (toggleMap === lastSyncedToggleMap) return;
       lastSyncedToggleMap = toggleMap;
       void syncMcpMounts();
-    }));
+    });
+    ctx.on("settings/updated", onTogglesUpdated);
+    ctx.on("settings/document-updated", onTogglesUpdated);
     let lastWrittenJson = "";
     async function probeServer(id, def) {
       if (!def.url) return { state: "down" };
@@ -969,18 +982,14 @@ function apply(ctx) {
   const pendingGrants = /* @__PURE__ */ new Map();
   function readPermissionConfig() {
     try {
-      const settings = ctx.get("settings");
-      return settings?.get?.(ORCH_NS)?.permissions ?? {};
+      return documentValue(config.permissions, "permissions") ?? {};
     } catch {
       return {};
     }
   }
   function readMcpCatalogDefs() {
     try {
-      const settings = ctx.get("settings");
-      const value = settings?.get?.(ORCH_NS);
-      if (value === void 0) return void 0;
-      const catalog = value.mcpServers;
+      const catalog = documentValue(config.mcpServers, "mcpServers");
       if (catalog === void 0 || catalog === null || typeof catalog !== "object" || Array.isArray(catalog)) return void 0;
       return catalog;
     } catch {
@@ -1023,13 +1032,13 @@ function apply(ctx) {
     if (!capabilityDecision.allowed) {
       return { kind: "deny", reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` };
     }
-    const config = readPermissionConfig();
+    const config2 = readPermissionConfig();
     const isBash = exec.name === "bash";
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
       agent: askingAgentOf(exec),
-      config,
+      config: config2,
       sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? []
     });
@@ -1068,7 +1077,7 @@ function apply(ctx) {
     }
   }
   let lastMcpServerNames = readMcpServerNames();
-  const disposeMcpPolicyCleanup = ctx.on("settings/updated", ((ns) => {
+  const onCatalogUpdated = ((ns) => {
     if (String(ns) !== ORCH_NS) return;
     const names = readMcpServerNames();
     if (names === void 0) return;
@@ -1086,8 +1095,15 @@ function apply(ctx) {
       process.stderr.write(`[enpoi-capabilities] removed MCP policy cleanup failed: ${String(error)}
 `);
     });
-  }));
-  ctx.effect(() => disposeMcpPolicyCleanup, "enpoi-capabilities: removed-MCP policy cleanup");
+  });
+  ctx.effect(() => {
+    const disposeUpdated = ctx.on("settings/updated", onCatalogUpdated);
+    const disposeDocumentUpdated = ctx.on("settings/document-updated", onCatalogUpdated);
+    return () => {
+      disposeUpdated();
+      disposeDocumentUpdated();
+    };
+  }, "enpoi-capabilities: removed-MCP policy cleanup");
   const disposeGrantWatch = ctx.on("session/event", ((session, event) => {
     if (event?.type !== "approval/decided") return void 0;
     const outcome = event.data?.outcome;
@@ -1121,6 +1137,7 @@ function apply(ctx) {
 }
 export {
   CapabilitiesSchema,
+  Config,
   KNOWN_CAPABILITIES,
   OrchestrationSettingsSchema,
   PROTECTED_CAPABILITIES,

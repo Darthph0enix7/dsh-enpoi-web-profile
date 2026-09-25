@@ -50,8 +50,10 @@
 
 ## 行为开关（默认 = 仅记录）
 
-`enpoi-orchestration.parameters.verifyGate`，每次回合结束时经 settings 服务热读取
-（与 context keeper 的 `parameters` 同款）：
+`enpoi-orchestration.parameters.verifyGate`，每次回合结束时从共享文档热读取——
+0.1.7 settings→Config 迁移后，该文档即 `enpoi-orchestration` profile 条目的
+`.volatile()` Config，经 settings 服务的 `describe()` 值读取（带 pre-0.1.7 的
+`get()` 回退；见 `dsh-enpoi-contracts:readOrchestrationDocument`）：
 
 ```yaml
 parameters:
@@ -67,7 +69,9 @@ parameters:
   已验证（或中止/出错）的回合会重置连续计数；`promptOnce: true` 限制整个会话最多
   一次提示。
 
-插件自身 `cordis.patch.yml` 的 `mode`/`promptOnce` 仅作为无 settings 时的回退。
+插件自身 `cordis.patch.yml` 的 `mode`/`promptOnce`（`.volatile()`）仅作为无
+settings 时的回退；由于是 volatile 字段，也可经 profile 的 config-editor 文档
+实时编辑。
 
 ## 调试可见性
 

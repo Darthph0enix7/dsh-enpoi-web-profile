@@ -1,5 +1,5 @@
 // src/index.ts
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
 import { homedir } from "node:os";
 import { join, dirname, basename, resolve, isAbsolute, relative } from "node:path";
 import { mkdir, rename, stat, writeFile, rm, open, readFile } from "node:fs/promises";

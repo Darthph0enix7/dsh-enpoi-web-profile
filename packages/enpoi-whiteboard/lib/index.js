@@ -1,5 +1,6 @@
 // src/index.ts
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
@@ -23,17 +24,17 @@ var EMPTY_BOARD = Object.freeze({
 });
 var KINDS = ["path", "rule", "fact", "task"];
 var SCOPES = ["session", "project", "global"];
-function isWhiteboardScope(value) {
-  return typeof value === "string" && SCOPES.includes(value);
+function isWhiteboardScope(value2) {
+  return typeof value2 === "string" && SCOPES.includes(value2);
 }
-function isWhiteboardEntryKind(value) {
-  return typeof value === "string" && KINDS.includes(value);
+function isWhiteboardEntryKind(value2) {
+  return typeof value2 === "string" && KINDS.includes(value2);
 }
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isRecord(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
-function finiteVersion(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+function finiteVersion(value2) {
+  return typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? Math.floor(value2) : 0;
 }
 function normalizeEntry(raw) {
   if (!isRecord(raw)) return void 0;
@@ -98,9 +99,9 @@ function normalizeStore(raw) {
     store.version = finiteVersion(raw.version);
     if (isRecord(raw.docs.global)) store.docs.global = normalizeBoard(raw.docs.global);
     for (const bucket of ["projects", "sessions"]) {
-      const value = raw.docs[bucket];
-      if (!isRecord(value)) continue;
-      for (const [key, board] of Object.entries(value)) {
+      const value2 = raw.docs[bucket];
+      if (!isRecord(value2)) continue;
+      for (const [key, board] of Object.entries(value2)) {
         if (key.length === 0 || !isRecord(board)) continue;
         store.docs[bucket][key] = normalizeBoard(board);
       }
@@ -322,9 +323,15 @@ function versionLine(doc) {
 // src/index.ts
 var name = "enpoi-whiteboard";
 var inject = ["tools"];
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function value(field) {
+  return typeof field?.get === "function" ? field.get() : field;
+}
 var Config = Schema.object({
-  budgetTokens: Schema.number().default(DEFAULT_BUDGET_TOKENS),
-  maxSessionBoards: Schema.number().default(DEFAULT_MAX_SESSION_BOARDS)
+  budgetTokens: live(Schema.number().default(DEFAULT_BUDGET_TOKENS)),
+  maxSessionBoards: live(Schema.number().default(DEFAULT_MAX_SESSION_BOARDS))
 });
 var ORCH_NS = "enpoi-orchestration";
 function settingsOf(ctx) {
@@ -337,7 +344,8 @@ function settingsOf(ctx) {
 var legacyReadLogged = false;
 function readWhiteboardStore(ctx) {
   try {
-    const migration = migrateLegacyStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard);
+    const doc = readOrchestrationDocument(settingsOf(ctx));
+    const migration = migrateLegacyStore(doc?.whiteboard);
     if (migration.migrated && !legacyReadLogged) {
       legacyReadLogged = true;
       const destination = migration.attributedTo === void 0 ? "global" : `session ${migration.attributedTo}`;
@@ -532,7 +540,7 @@ function registerTools(ctx, config) {
         },
         required: ["ok", "version", "scope", "tokens", "budget", "entries", "stale", "rendered", "versionLine"]
       },
-      render: (_args, value) => [{ type: "text", text: renderWhiteboardResult(value) }]
+      render: (_args, value2) => [{ type: "text", text: renderWhiteboardResult(value2) }]
     },
     isConcurrencySafe: () => true,
     async execute(_args, exec) {
@@ -580,7 +588,7 @@ function registerTools(ctx, config) {
         properties: { ...BOARD_RESULT_PROPERTIES },
         required: ["ok"]
       },
-      render: (_args, value) => [{ type: "text", text: renderWriteResult(value) }]
+      render: (_args, value2) => [{ type: "text", text: renderWriteResult(value2) }]
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -642,7 +650,7 @@ function registerTools(ctx, config) {
         properties: { ...BOARD_RESULT_PROPERTIES },
         required: ["ok"]
       },
-      render: (_args, value) => [{ type: "text", text: renderWriteResult(value) }]
+      render: (_args, value2) => [{ type: "text", text: renderWriteResult(value2) }]
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -673,7 +681,7 @@ function registerTools(ctx, config) {
         properties: { ...BOARD_RESULT_PROPERTIES },
         required: ["ok"]
       },
-      render: (_args, value) => [{ type: "text", text: renderWriteResult(value) }]
+      render: (_args, value2) => [{ type: "text", text: renderWriteResult(value2) }]
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -719,7 +727,7 @@ function registerTools(ctx, config) {
         },
         required: ["ok"]
       },
-      render: (_args, value) => [{ type: "text", text: renderForgetResult(value) }]
+      render: (_args, value2) => [{ type: "text", text: renderForgetResult(value2) }]
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -748,26 +756,26 @@ function registerTools(ctx, config) {
     }
   });
 }
-function renderWhiteboardResult(value) {
-  const entries = Array.isArray(value.entries) ? value.entries : [];
-  if (entries.length === 0) return `Whiteboard v${String(value.version)} resolves to no entries for this session (0/${String(value.budget)} tokens).`;
+function renderWhiteboardResult(value2) {
+  const entries = Array.isArray(value2.entries) ? value2.entries : [];
+  if (entries.length === 0) return `Whiteboard v${String(value2.version)} resolves to no entries for this session (0/${String(value2.budget)} tokens).`;
   const lines = entries.map((entry) => `\u2022 ${entry.pinned === true ? "\u{1F4CC} " : ""}[${String(entry.kind)}] ${String(entry.text)}${entry.stale === true ? " (stale)" : ""} \u2014 ${String(entry.id)} v${String(entry.version)} \xB7 ${String(entry.scope)}`);
-  return [...lines, `\u2014 v${String(value.version)} \xB7 ${String(value.scope)} \xB7 ${String(value.tokens)}/${String(value.budget)} tokens`].join("\n");
+  return [...lines, `\u2014 v${String(value2.version)} \xB7 ${String(value2.scope)} \xB7 ${String(value2.tokens)}/${String(value2.budget)} tokens`].join("\n");
 }
-function renderWriteResult(value) {
-  if (value.ok !== true) return String(value.message ?? "Whiteboard write refused.");
-  const stale = Array.isArray(value.stale) ? value.stale : [];
-  const head = `Whiteboard v${String(value.version)} (${String(value.scope)}) \u2014 ${stale.length} stale path flag(s).`;
-  const rendered = typeof value.rendered === "string" && value.rendered.length > 0 ? value.rendered : "(empty)";
+function renderWriteResult(value2) {
+  if (value2.ok !== true) return String(value2.message ?? "Whiteboard write refused.");
+  const stale = Array.isArray(value2.stale) ? value2.stale : [];
+  const head = `Whiteboard v${String(value2.version)} (${String(value2.scope)}) \u2014 ${stale.length} stale path flag(s).`;
+  const rendered = typeof value2.rendered === "string" && value2.rendered.length > 0 ? value2.rendered : "(empty)";
   return `${head}
 ${rendered}`;
 }
-function renderForgetResult(value) {
-  if (value.ok !== true) return String(value.message ?? "Whiteboard forget refused.");
-  const raw = value.removed;
+function renderForgetResult(value2) {
+  if (value2.ok !== true) return String(value2.message ?? "Whiteboard forget refused.");
+  const raw = value2.removed;
   const removed = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : void 0;
   const head = removed === void 0 ? "Whiteboard entry forgotten." : `Forgot [${String(removed.kind)}] ${String(removed.text)} \u2014 ${String(removed.id)} (${String(removed.scope)}).`;
-  const rendered = typeof value.rendered === "string" && value.rendered.length > 0 ? value.rendered : "(empty)";
+  const rendered = typeof value2.rendered === "string" && value2.rendered.length > 0 ? value2.rendered : "(empty)";
   return `${head}
 ${rendered}`;
 }
@@ -824,9 +832,11 @@ function installInjection(ctx) {
   ctx.effect(() => dispose, "enpoi-whiteboard: runtime-context injection");
 }
 function apply(ctx, config = {}) {
+  const budgetTokens = value(config.budgetTokens);
+  const maxSessionBoards = value(config.maxSessionBoards);
   const resolved = {
-    budgetTokens: typeof config.budgetTokens === "number" && Number.isFinite(config.budgetTokens) && config.budgetTokens > 0 ? Math.floor(config.budgetTokens) : DEFAULT_BUDGET_TOKENS,
-    maxSessionBoards: typeof config.maxSessionBoards === "number" && Number.isFinite(config.maxSessionBoards) && config.maxSessionBoards >= 1 ? Math.floor(config.maxSessionBoards) : DEFAULT_MAX_SESSION_BOARDS
+    budgetTokens: typeof budgetTokens === "number" && Number.isFinite(budgetTokens) && budgetTokens > 0 ? Math.floor(budgetTokens) : DEFAULT_BUDGET_TOKENS,
+    maxSessionBoards: typeof maxSessionBoards === "number" && Number.isFinite(maxSessionBoards) && maxSessionBoards >= 1 ? Math.floor(maxSessionBoards) : DEFAULT_MAX_SESSION_BOARDS
   };
   registerTools(ctx, resolved);
   installInjection(ctx);

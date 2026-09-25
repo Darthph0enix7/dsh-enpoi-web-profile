@@ -4144,13 +4144,32 @@ var livingBriefViewSchema = external_exports.object({
   asOfSeq: external_exports.number().int().nonnegative(),
   freshness: external_exports.union([external_exports.literal("live"), external_exports.literal("cooling"), external_exports.literal("stale")])
 }).strict();
+var ORCHESTRATION_NAMESPACE = "enpoi-orchestration";
+function readSettingsDocument(settings, ns) {
+  try {
+    const direct = settings?.get?.(ns);
+    if (direct !== void 0) {
+      return direct !== null && typeof direct === "object" ? direct : void 0;
+    }
+    const value = settings?.describe?.().find((entry) => entry.ns === ns)?.value;
+    return value !== null && typeof value === "object" ? value : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function readOrchestrationDocument(settings) {
+  return readSettingsDocument(settings, ORCHESTRATION_NAMESPACE);
+}
 export {
+  ORCHESTRATION_NAMESPACE,
   blockerSchema,
   briefEntrySchema,
   briefProseUpdatedSchema,
   livingBriefStateSchema,
   livingBriefViewSchema,
   provenanceSchema,
+  readOrchestrationDocument,
+  readSettingsDocument,
   subagentReturnSchema,
   traceContextSchema
 };

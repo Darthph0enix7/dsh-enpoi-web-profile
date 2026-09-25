@@ -1,4 +1,5 @@
 // src/index.ts
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 var name = "enpoi-model-chains";
 var inject = ["settings"];
 var ORCH_NS = "enpoi-orchestration";
@@ -63,8 +64,7 @@ function parseChainEntry(id, raw, warn) {
 }
 function readRawChains(ctx) {
   try {
-    const settings = ctx.get("settings");
-    const doc = settings?.get?.(ORCH_NS);
+    const doc = readOrchestrationDocument(ctx.get("settings"));
     if (!isRecord(doc)) return {};
     const chains = doc.chains;
     if (chains === void 0) return {};

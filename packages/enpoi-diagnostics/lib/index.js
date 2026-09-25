@@ -49,7 +49,7 @@ var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "acce
 
 // src/index.ts
 import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
 
 // src/fingerprint.ts
 import { createHash } from "node:crypto";
@@ -1360,16 +1360,26 @@ function errorText2(error) {
 // src/index.ts
 var name = "enpoi-diagnostics";
 var inject = [];
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function plainConfig(config) {
+  const out = {};
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof field?.get === "function" ? field.get() : field;
+  }
+  return out;
+}
 var Config = Schema.object({
-  dbPath: Schema.string(),
-  maxIncidents: Schema.number().default(5e3),
-  maxPatterns: Schema.number().default(2e3),
-  cooldownMs: Schema.number().default(3e5),
-  flushMs: Schema.number().default(250),
-  captureLogs: Schema.boolean().default(true),
-  captureSessionEvents: Schema.boolean().default(true),
-  capturePluginLifecycle: Schema.boolean().default(true),
-  minSeverity: Schema.union(["debug", "info", "warn", "error", "fatal"]).default("debug")
+  dbPath: live(Schema.string()),
+  maxIncidents: live(Schema.number().default(5e3)),
+  maxPatterns: live(Schema.number().default(2e3)),
+  cooldownMs: live(Schema.number().default(3e5)),
+  flushMs: live(Schema.number().default(250)),
+  captureLogs: live(Schema.boolean().default(true)),
+  captureSessionEvents: live(Schema.boolean().default(true)),
+  capturePluginLifecycle: live(Schema.boolean().default(true)),
+  minSeverity: live(Schema.union(["debug", "info", "warn", "error", "fatal"]).default("debug"))
 });
 function clamp(value, min, max, fallback) {
   const numeric = Number(value);
@@ -1381,6 +1391,7 @@ function errorText3(error) {
   return String(error);
 }
 function apply(ctx, config = {}) {
+  config = plainConfig(config);
   try {
     const homeResolver = ctx.get("dshHomePath");
     const resolveHome = typeof homeResolver === "function" ? homeResolver : dshHomePath;

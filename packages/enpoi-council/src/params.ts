@@ -6,6 +6,7 @@
  * invocation — no restart). Old keys stay accepted for compatibility.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import type { CouncilParams } from './core/spec.ts'
 
 export interface CouncilRuntimeParams extends CouncilParams {
@@ -40,8 +41,8 @@ export const COUNCIL_PARAM_DEFAULTS: CouncilRuntimeParams = {
 export function getCouncilParams(ctx: Context): CouncilRuntimeParams {
   const d = COUNCIL_PARAM_DEFAULTS
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { parameters?: { council?: Record<string, unknown> } } } | undefined
-    const p = settings?.get?.('enpoi-orchestration')?.parameters?.council
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const p = (doc?.parameters as { council?: Record<string, unknown> } | undefined)?.council
     if (p === undefined || typeof p !== 'object') return d
     return {
       maxDebateTokens: num(p.maxDebateTokens, d.maxDebateTokens, 20_000, 500_000),

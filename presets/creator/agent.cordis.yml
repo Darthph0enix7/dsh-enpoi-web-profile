@@ -79,6 +79,8 @@
 
 # ── self-modification ───────────────────────────────────────────────────────
 
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
 - id: tool-cordis
   name: '@deepseek-ai/dsh-tool-cordis'
 

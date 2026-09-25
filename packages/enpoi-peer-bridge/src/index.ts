@@ -20,7 +20,8 @@
  * @module dsh-enpoi-peer-bridge
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 // Type-only: load the `tools`, `approval`, and `userQuestions` Context augmentations.
 import type {} from '@deepseek-ai/dsh-tools'
@@ -50,19 +51,55 @@ export const name = 'enpoi-peer-bridge'
 /** The tools service is required; the approval service is optional. */
 export const inject = ['tools']
 
-/** Plugin configuration. */
+/** Mark a schema subtree live-editable; the pre-0.1.7 vendored schemastery build predates `.volatile()`. */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
+}
+
+/** Detach every Config field into plain values (idempotent on pre-0.1.7 plain configs). */
+function plainConfig<T extends object>(config: T): T {
+  const out: Record<string, unknown> = {}
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof (field as { get?: () => unknown } | undefined)?.get === 'function'
+      ? (field as { get: () => unknown }).get()
+      : field
+  }
+  return out as T
+}
+
+/** Live-editable plugin configuration. */
 export interface Config {
   /** Pairing document path; defaults to `$DSH_HOME/pairings.yaml`. */
-  pairingsPath?: string
+  pairingsPath?: Volatile<string>
   /** Durable ask-notice file; defaults to `<pairing dir>/peer-bridge/asks.jsonl`. */
-  noticesPath?: string
+  noticesPath?: Volatile<string>
   /** Caller identity reported on the handshake and stamped on prompts. */
-  device?: string
+  device?: Volatile<string>
   /** Participant name stamped on peer-originated records; defaults to the pairing document's device. */
-  participantName?: string
+  participantName?: Volatile<string>
   /** Default `peer_ask` wait in milliseconds (default 300000). */
-  waitMs?: number
+  waitMs?: Volatile<number>
   /** Maximum consecutive follow reconnects before `peer/target-unreachable`. */
+  maxReconnects?: Volatile<number>
+}
+
+/** Schemastery validator for {@link Config}; volatile so the merged settings service derives a live form. */
+export const Config = Schema.object({
+  pairingsPath: live(Schema.string()),
+  noticesPath: live(Schema.string()),
+  device: live(Schema.string()),
+  participantName: live(Schema.string()),
+  waitMs: live(Schema.number()),
+  maxReconnects: live(Schema.number()),
+})
+
+/** Defaulted plain values the bridge closes over. */
+export interface ResolvedConfig {
+  pairingsPath?: string
+  noticesPath?: string
+  device?: string
+  participantName?: string
+  waitMs?: number
   maxReconnects?: number
 }
 
@@ -100,8 +137,9 @@ interface AskBridgeRecord extends AskRecord {
  * @param config - optional plugin configuration.
  */
 export function apply(ctx: Context, config: Config = {}): void {
+  const resolved = plainConfig(config) as ResolvedConfig
   try {
-    registerTools(ctx, config)
+    registerTools(ctx, resolved)
   } catch (error) {
     // A bridge failure must never take the loader down; the reason stays visible.
     ctx.logger?.error(`enpoi-peer-bridge: tools not registered: ${errorText(error)}`)
@@ -114,7 +152,7 @@ export function apply(ctx: Context, config: Config = {}): void {
  * @param config - plugin configuration.
  * @param deps - carrier replacements for tests.
  */
-export function registerTools(ctx: Context, config: Config, deps: BridgeDeps = {}): void {
+export function registerTools(ctx: Context, config: ResolvedConfig, deps: BridgeDeps = {}): void {
   const pairingsPath = config.pairingsPath ?? defaultPairingsPath()
   const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname(pairingsPath))
   const waitMs = config.waitMs ?? DEFAULT_WAIT_MS
@@ -565,7 +603,7 @@ interface AskRunOptions {
   readonly pairingsPath: string
   readonly noticesPath: string
   readonly waitMs: number
-  readonly config: Config
+  readonly config: ResolvedConfig
   readonly signal: AbortSignal
   readonly agent?: Agent
   readonly alias: string
@@ -939,12 +977,12 @@ function targetOf(pairing: DialablePairing): { readonly kind: 'alias'; readonly 
     : { kind: 'session', sessionId: pairing.remoteSessionId }
 }
 
-function participantOf(config: Config, document: PairingDocument): PeerParticipant {
+function participantOf(config: ResolvedConfig, document: PairingDocument): PeerParticipant {
   const device = config.device ?? document.device
   return { kind: 'peer', name: config.participantName ?? device, device }
 }
 
-function makeClient(pairing: DialablePairing, config: Config, device?: string, deps: BridgeDeps = {}): PeerClient {
+function makeClient(pairing: DialablePairing, config: ResolvedConfig, device?: string, deps: BridgeDeps = {}): PeerClient {
   const headers: Record<string, string> = pairing.token === undefined ? {} : { authorization: `Bearer ${pairing.token}` }
   return new PeerClient({
     endpoint: pairing.endpoint,

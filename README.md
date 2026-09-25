@@ -16,6 +16,46 @@ device. Companion to the fork repo `Darthph0enix7/deepseek-harness`
 | `rebuild-sidebar.sh` | Restores the patched sidebar sources + rebuilds the client bundle + restarts dsh-web. **Run after ANY `dsh plugin`/pnpm reinstall of this profile.** Restores only when the installed src lacks the `MIN_CENTER_COLUMN` marker (never clobbers newer local edits). |
 | `sidebar-patch/` | Our patch overlay for dsh-better-sidebar: `src/client/{Sidebar.tsx,split-pane.tsx,layout.css}` + `build-client.{mjs,cjs}` |
 
+## Settings & plugin Config (0.1.7 settings→Config migration)
+
+The merged engine (0.1.7) derives every settings form from the owning plugin's
+Cordis `Config`: live fields are declared with `.volatile()`, forms are keyed by
+**profile entry id**, and edits persist into this profile's `cordis.patch.yml`
+through the config editor. The old `settings-file` service and the
+`settings.get(ns)` / `installSection` seams are gone.
+
+- **Shared document owner:** the `enpoi-capabilities` bundle is mounted as entry
+  **`enpoi-orchestration`** (see `packages/enpoi-capabilities/cordis.patch.yml`)
+  and declares the whole shared document as its `.volatile()` Config
+  (`capabilities`, `mcpServers`, `mcpStatus`, `personas`, `roles`, `councils`,
+  `chains`, `parameters`, `uiPreferences`, `permissions`, `whiteboard`). The
+  legacy `settings.yaml` section of the same id imports into this entry — entry
+  ids must match section names or the import is logged and kept only in the
+  renamed `settings.yaml.imported`.
+- **Readers:** every other enpoi plugin reads the document through
+  `dsh-enpoi-contracts`' `readOrchestrationDocument()` / `readSettingsDocument()`
+  (the settings service's `describe()` value, with the pre-0.1.7 `get()`
+  fallback so the profile boots on both engines during the sync window).
+  Writers keep the revision-fenced `settings.mutate(ns, ops, revision)` path.
+- **Hot-swap events:** the merged service emits `settings/document-updated`;
+  the pre-0.1.7 service emitted `settings/updated`. Plugins that react to
+  document changes subscribe to both.
+- **Provider entries:** the base bundle mounts entry id `llm-deepseek` naming
+  `@deepseek-ai/dsh-llm-deepseek-api-key`. The new Messages adapter throws on a
+  stored `protocol:` field and the pi-ai adapter refuses `provider` /
+  `maxRetries` / `maxRetryDelayMs` inside a route profile — keep those out of
+  `settings.yaml` (verified absent). Pool/route data lives under `llm-pi-ai`.
+- **Default model:** `agent-default-model {provider, model, chain}` now lives as
+  a composition row in **`cordis.patch.yml`** (the config-editor document). The
+  one-shot `settings.yaml` import lands the same row here; the row is what keeps
+  the default model-group chain alive.
+
+Operator checklist at the switch: the first 0.1.7 boot renames
+`~/.dsh/settings.yaml` to `settings.yaml.imported` and imports each section into
+the entry of the same id (sections with no entry stay only in the renamed file,
+reported as `settings: section ... was not imported`). Keep the `.imported` file
+until every section is confirmed.
+
 ## dsh-better-sidebar modification ledger
 
 The npm-published 0.14.0 is broken against dsh rc.2 in three ways; all are

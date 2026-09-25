@@ -30,8 +30,9 @@
  * @module dsh-enpoi-whiteboard
  */
 
-import type { Context } from '@deepseek-ai/cordis'
-import Schema from 'schemastery'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import {
@@ -69,25 +70,43 @@ export const name = 'enpoi-whiteboard'
 /** The board's storage namespace is a shared service; tools are the write path. */
 export const inject = ['tools']
 
+/** Mark a schema subtree live-editable; the pre-0.1.7 vendored schemastery build predates `.volatile()`. */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
+}
+
+/** Read one effective Config field (Volatile ref on 0.1.7+, plain value before it). */
+function value<T>(field: T | Volatile<T> | undefined): T | undefined {
+  return typeof (field as Volatile<T> | undefined)?.get === 'function'
+    ? (field as Volatile<T>).get()
+    : field as T | undefined
+}
+
+/** Live-editable whiteboard bounds. */
 export interface Config {
   /** Hard rendered-token budget (doc 67 §B); writes over it are refused. */
-  budgetTokens?: number
+  budgetTokens?: Volatile<number>
   /** Bounded GC: how many session boards to keep across activations. */
-  maxSessionBoards?: number
+  maxSessionBoards?: Volatile<number>
 }
 
 export const Config = Schema.object({
-  budgetTokens: Schema.number().default(DEFAULT_BUDGET_TOKENS),
-  maxSessionBoards: Schema.number().default(DEFAULT_MAX_SESSION_BOARDS),
+  budgetTokens: live(Schema.number().default(DEFAULT_BUDGET_TOKENS)),
+  maxSessionBoards: live(Schema.number().default(DEFAULT_MAX_SESSION_BOARDS)),
 })
+
+/** Defaulted plain config handed to the tool/GC closures. */
+export interface ResolvedWhiteboardConfig {
+  budgetTokens: number
+  maxSessionBoards: number
+}
 
 /** Shared settings namespace (owned by enpoi-capabilities). */
 const ORCH_NS = 'enpoi-orchestration'
 
 /** The structural slice of the settings service this plugin uses. */
-interface SettingsLike {
-  get?: (ns: string) => { whiteboard?: unknown } | undefined
-  describe?: () => Array<{ ns: string; revision?: number }>
+interface SettingsLike extends SettingsDocumentReader {
+  describe?: () => Array<{ ns: string; revision?: number; value?: unknown }>
   mutate?: (
     ns: string,
     ops: Array<{ op: 'set'; path: string[]; value: unknown }>,
@@ -137,7 +156,8 @@ let legacyReadLogged = false
  */
 export function readWhiteboardStore(ctx: Context): WhiteboardStore {
   try {
-    const migration = migrateLegacyStore(settingsOf(ctx)?.get?.(ORCH_NS)?.whiteboard)
+    const doc = readOrchestrationDocument(settingsOf(ctx))
+    const migration = migrateLegacyStore(doc?.whiteboard)
     if (migration.migrated && !legacyReadLogged) {
       legacyReadLogged = true
       const destination = migration.attributedTo === undefined ? 'global' : `session ${migration.attributedTo}`
@@ -219,7 +239,7 @@ type CommitResult =
  */
 async function commitStore(
   ctx: Context,
-  config: Required<Config>,
+  config: ResolvedWhiteboardConfig,
   checkFacts: BoardScopeFacts,
   build: (store: WhiteboardStore, now: number) => { ok: true; store: WhiteboardStore } | { ok: false; message: string },
 ): Promise<CommitResult> {
@@ -383,7 +403,7 @@ function planWriteTargets(
 }
 
 /** The five board tools (doc 67 §B). */
-function registerTools(ctx: Context, config: Required<Config>): void {
+function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
   const tools = (ctx as unknown as { tools?: { register?: (definition: unknown) => void } }).tools
   if (tools?.register === undefined) {
     process.stderr.write('[enpoi-whiteboard] no tools service — board tools not mounted\n')
@@ -682,7 +702,7 @@ const SESSION_SWEEP_DELAY_MS = 2_000
  * @param ctx - owning plugin context.
  * @param config - resolved plugin config.
  */
-async function sweepSessionBoardsNow(ctx: Context, config: Required<Config>): Promise<void> {
+async function sweepSessionBoardsNow(ctx: Context, config: ResolvedWhiteboardConfig): Promise<void> {
   const pending = sweepSessionBoards(readWhiteboardStore(ctx), config.maxSessionBoards)
   if (pending.dropped.length === 0) return
   let dropped: string[] = []
@@ -705,7 +725,7 @@ async function sweepSessionBoardsNow(ctx: Context, config: Required<Config>): Pr
  * @param ctx - owning plugin context.
  * @param config - resolved plugin config.
  */
-function scheduleSessionSweep(ctx: Context, config: Required<Config>): void {
+function scheduleSessionSweep(ctx: Context, config: ResolvedWhiteboardConfig): void {
   const timer = setTimeout(() => {
     void sweepSessionBoardsNow(ctx, config).catch((error: unknown) => {
       process.stderr.write(`[enpoi-whiteboard] session-board GC failed: ${String(error)}\n`)
@@ -743,12 +763,14 @@ function installInjection(ctx: Context): void {
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
-  const resolved: Required<Config> = {
-    budgetTokens: typeof config.budgetTokens === 'number' && Number.isFinite(config.budgetTokens) && config.budgetTokens > 0
-      ? Math.floor(config.budgetTokens)
+  const budgetTokens = value(config.budgetTokens)
+  const maxSessionBoards = value(config.maxSessionBoards)
+  const resolved: ResolvedWhiteboardConfig = {
+    budgetTokens: typeof budgetTokens === 'number' && Number.isFinite(budgetTokens) && budgetTokens > 0
+      ? Math.floor(budgetTokens)
       : DEFAULT_BUDGET_TOKENS,
-    maxSessionBoards: typeof config.maxSessionBoards === 'number' && Number.isFinite(config.maxSessionBoards) && config.maxSessionBoards >= 1
-      ? Math.floor(config.maxSessionBoards)
+    maxSessionBoards: typeof maxSessionBoards === 'number' && Number.isFinite(maxSessionBoards) && maxSessionBoards >= 1
+      ? Math.floor(maxSessionBoards)
       : DEFAULT_MAX_SESSION_BOARDS,
   }
   registerTools(ctx, resolved)

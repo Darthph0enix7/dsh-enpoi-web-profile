@@ -164,27 +164,47 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
 
-  packages/enpoi-memory: {}
+  packages/enpoi-memory:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
-  packages/enpoi-model-chains: {}
+  packages/enpoi-model-chains:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
-  packages/enpoi-oracle: {}
+  packages/enpoi-oracle:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
   packages/enpoi-peer-bridge: {}
 
   packages/enpoi-provider-sync:
     dependencies:
-      schemastery:
-        specifier: ^3.18.0
-        version: 3.18.0
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
-  packages/enpoi-role-registry: {}
+  packages/enpoi-role-registry:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
   packages/enpoi-runtime-probe: {}
 
   packages/enpoi-ui-state: {}
 
-  packages/enpoi-verify-gate: {}
+  packages/enpoi-verify-gate:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
   packages/enpoi-whiteboard:
     dependencies:

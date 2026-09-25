@@ -11,11 +11,12 @@
     }
   },
   "dependencies": {
-    "schemastery": "^3.18.0"
+    "dsh-enpoi-contracts": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "workspace:*"
+    "@deepseek-ai/dsh-settings": "workspace:*",
+    "@deepseek-ai/schemastery": "workspace:~"
   },
   "dsh": {
     "bundle": {

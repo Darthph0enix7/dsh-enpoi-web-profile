@@ -1,6 +1,7 @@
 // src/index.ts
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import Schema from "schemastery";
+import Schema from "@deepseek-ai/schemastery";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 
 // src/verify.ts
 var VERIFY_UNMET_EVENT = "verify/unmet";
@@ -164,9 +165,19 @@ var VerifyGateTracker = class {
 // src/index.ts
 var name = "enpoi-verify-gate";
 var inject = [];
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function plainConfig(config) {
+  const out = {};
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof field?.get === "function" ? field.get() : field;
+  }
+  return out;
+}
 var Config = Schema.object({
-  mode: Schema.union(["record", "prompt"]).default("record"),
-  promptOnce: Schema.boolean().default(false)
+  mode: live(Schema.union(["record", "prompt"]).default("record")),
+  promptOnce: live(Schema.boolean().default(false))
 });
 var GATE_SETTINGS_NAMESPACE = "enpoi-orchestration";
 var MAX_REMEMBERED_CALLS = 500;
@@ -178,13 +189,14 @@ function asRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
 }
 function resolveGateConfig(ctx, config = {}) {
+  config = plainConfig(config);
   const fallback = {
     mode: config.mode === "prompt" ? "prompt" : "record",
     promptOnce: config.promptOnce === true
   };
   try {
-    const settings = ctx.get("settings");
-    const gate = settings?.get?.(GATE_SETTINGS_NAMESPACE)?.parameters?.verifyGate;
+    const doc = readOrchestrationDocument(ctx.get("settings"));
+    const gate = doc?.parameters?.verifyGate;
     if (gate === null || typeof gate !== "object") return fallback;
     return {
       mode: gate.mode === "prompt" ? "prompt" : gate.mode === "record" ? "record" : fallback.mode,
@@ -296,6 +308,7 @@ function deliver(ctx, session, record, prompt) {
   }
 }
 function apply(ctx, config = {}, options = {}) {
+  config = plainConfig(config);
   try {
     const tracker = new VerifyGateTracker();
     const calls = /* @__PURE__ */ new Map();

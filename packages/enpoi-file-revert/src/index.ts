@@ -13,8 +13,8 @@
  * - FR5 Idempotent Crash Recovery: intent/result WAL pair, replay on load.
  */
 
-import type { Context } from '@deepseek-ai/cordis'
-import Schema from 'schemastery'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
@@ -41,19 +41,44 @@ function diag(msg: string): void {
   } catch { /* best-effort */ }
 }
 
+/** Mark a schema subtree live-editable; the pre-0.1.7 vendored schemastery build predates `.volatile()`. */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
+}
+
+/** Detach every Config field into plain values (idempotent on pre-0.1.7 plain configs). */
+function plainConfig<T extends object>(config: T): T {
+  const out: Record<string, unknown> = {}
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof (field as { get?: () => unknown } | undefined)?.get === 'function'
+      ? (field as { get: () => unknown }).get()
+      : field
+  }
+  return out as T
+}
+
+/** Loader-resolved live configuration (`.volatile()` fields). */
 export const Config = Schema.object({
   /** Maximum snapshot size in bytes; larger files degrade to the unavailable-prompt path. */
-  maxSnapshotBytes: Schema.number().default(10 * 1024 * 1024),
+  maxSnapshotBytes: live(Schema.number().default(10 * 1024 * 1024)),
   /** Interval for the reachability GC sweep (ms). */
-  gcIntervalMs: Schema.number().default(6 * 60 * 60 * 1000),
+  gcIntervalMs: live(Schema.number().default(6 * 60 * 60 * 1000)),
   /** Age threshold for unreferenced blobs (ms). */
-  gcTtlMs: Schema.number().default(30 * 24 * 60 * 60 * 1000),
+  gcTtlMs: live(Schema.number().default(30 * 24 * 60 * 60 * 1000)),
 })
 
+/** Defaulted plain values used by the capture and GC closures. */
 export interface FileRevertConfig {
   maxSnapshotBytes: number
   gcIntervalMs: number
   gcTtlMs: number
+}
+
+/** Config values as the loader hands them over: Volatile refs on 0.1.7+, plain before it. */
+export interface FileRevertLoaderConfig {
+  maxSnapshotBytes?: Volatile<number> | number
+  gcIntervalMs?: Volatile<number> | number
+  gcTtlMs?: Volatile<number> | number
 }
 
 interface SessionRevertState {
@@ -65,8 +90,9 @@ interface SessionRevertState {
   flight: Promise<void>
 }
 
-export function apply(ctx: Context, config: FileRevertConfig): void {
-  diag(`apply: mounted (maxSnapshotBytes=${config.maxSnapshotBytes}, gcIntervalMs=${config.gcIntervalMs})`)
+export function apply(ctx: Context, config: FileRevertLoaderConfig | FileRevertConfig): void {
+  const resolved = plainConfig(config) as FileRevertConfig
+  diag(`apply: mounted (maxSnapshotBytes=${resolved.maxSnapshotBytes}, gcIntervalMs=${resolved.gcIntervalMs})`)
   const blobStore = new BlobStore(join(FILE_HISTORY_ROOT, 'blobs'))
   void blobStore.init()
   const pendingCaptures = new Map<string, PendingCapture>()
@@ -121,7 +147,7 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
   ctx.on('tools/pre-execute', async (exec: ToolExecution, next) => {
     if (exec.name === 'edit' || exec.name === 'write') {
       try {
-        await capturePre(ctx, exec, pendingCaptures, config.maxSnapshotBytes)
+        await capturePre(ctx, exec, pendingCaptures, resolved.maxSnapshotBytes)
       } catch (err) {
         diag(`pre-capture failed for ${exec.name}: ${String(err)}`)
       }
@@ -210,10 +236,10 @@ export function apply(ctx: Context, config: FileRevertConfig): void {
   const timer = ctx.get('timer') as { setInterval?: (fn: () => void, ms: number) => unknown } | undefined
   if (timer?.setInterval !== undefined) {
     timer.setInterval(() => {
-      void runGc(manifests, executors, blobStore, config.gcTtlMs).catch((err) => {
+      void runGc(manifests, executors, blobStore, resolved.gcTtlMs).catch((err) => {
         diag(`GC sweep failed: ${String(err)}`)
       })
-    }, config.gcIntervalMs)
+    }, resolved.gcIntervalMs)
   }
 
   onAny('dispose', () => {

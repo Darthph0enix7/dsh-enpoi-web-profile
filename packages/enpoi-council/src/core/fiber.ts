@@ -18,6 +18,7 @@ import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { getBriefService } from 'dsh-enpoi-context-keeper'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -229,14 +230,9 @@ export interface PersonaChainConfig {
  */
 export function resolvePersonaChain(ctx: Context, persona: string): PersonaChainConfig | undefined {
   try {
-    const settings = ctx.get('settings') as {
-      get?: (ns: string) => {
-        personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string }>
-      } | undefined
-    } | undefined
-    const doc = settings?.get?.('enpoi-orchestration')
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
-    const entry = doc?.personas?.[key]
+    const entry = (doc?.personas as Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string } | null> | undefined)?.[key]
     const snapshot = resolveChainSnapshot(ctx, entry?.chain)
     if (snapshot === undefined) return undefined
     const toModel = (link: ChainSnapshotLink): PersonaModelConfig => ({
@@ -270,10 +266,9 @@ export function resolvePersonaChain(ctx: Context, persona: string): PersonaChain
 
 export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
   try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string; reasoningEffort?: string }> } } | undefined
-    const doc = settings?.get?.('enpoi-orchestration')
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const key = persona.toLowerCase().replace(/^the\s+/, '').trim()
-    const entry = doc?.personas?.[key]
+    const entry = (doc?.personas as Record<string, { provider?: string; model?: string; reasoningEffort?: string } | null> | undefined)?.[key]
     if (entry && entry.provider && entry.model) {
       return {
         provider: entry.provider,

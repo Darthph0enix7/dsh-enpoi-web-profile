@@ -1,4 +1,5 @@
 // src/index.ts
+import Schema from "@deepseek-ai/schemastery";
 import { randomUUID } from "node:crypto";
 import { dirname as dirname2 } from "node:path";
 
@@ -730,12 +731,31 @@ function isRecord(value) {
 // src/index.ts
 var name = "enpoi-peer-bridge";
 var inject = ["tools"];
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function plainConfig(config) {
+  const out = {};
+  for (const [key, field2] of Object.entries(config)) {
+    out[key] = typeof field2?.get === "function" ? field2.get() : field2;
+  }
+  return out;
+}
+var Config = Schema.object({
+  pairingsPath: live(Schema.string()),
+  noticesPath: live(Schema.string()),
+  device: live(Schema.string()),
+  participantName: live(Schema.string()),
+  waitMs: live(Schema.number()),
+  maxReconnects: live(Schema.number())
+});
 var DEFAULT_WAIT_MS = 3e5;
 var MAX_MESSAGE_CHARS = 1e5;
 var MAX_SURFACE_TASKS = 4;
 function apply(ctx, config = {}) {
+  const resolved = plainConfig(config);
   try {
-    registerTools(ctx, config);
+    registerTools(ctx, resolved);
   } catch (error) {
     ctx.logger?.error(`enpoi-peer-bridge: tools not registered: ${errorText(error)}`);
   }
@@ -1656,6 +1676,7 @@ function renderAnswer(value) {
   return `peer_answer failed [${String(error.code ?? "unknown")}] ${String(record.askId ?? "")}: ${detail}`;
 }
 export {
+  Config,
   apply,
   inject,
   name,

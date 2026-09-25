@@ -48,6 +48,7 @@ var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "acce
 
 // src/roles-remote.ts
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 
 // src/roles-view.ts
 import { listRoleRegistry } from "@deepseek-ai/dsh-tool-subagent";
@@ -78,7 +79,10 @@ var EnpoiRolesService = class extends (_a = TypertRemoteService, _list_dec = [Re
   }
   async list() {
     const settings = this.ctx.get("settings");
-    return effectiveRoleRows(settings);
+    const handle = {
+      get: () => readOrchestrationDocument(settings)
+    };
+    return effectiveRoleRows(handle);
   }
 };
 _init = __decoratorStart(_a);

@@ -20,5 +20,8 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dependencies": {
+    "dsh-enpoi-contracts": "workspace:*"
   }
 }

@@ -15,8 +15,9 @@
  * settings namespace `enpoi-orchestration.capabilities`.
  */
 
-import type { Context } from '@deepseek-ai/cordis'
-import Schema from 'schemastery'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import type { CapabilitiesState } from './types'
 import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 import { initialCapabilitiesState } from './state'
@@ -37,51 +38,97 @@ export const inject = ['tools', 'systemPrompt', 'settings', 'timer']
 
 const ORCH_NS = 'enpoi-orchestration'
 
+/**
+ * Mark a schema subtree live-editable. The merged engine's vendored
+ * schemastery carries `.volatile()`; the pre-0.1.7 build of the same module
+ * predates it, and the profile must boot on both during the sync window.
+ */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
+}
+
 export const CapabilitiesSchema = Schema.object({
   tools: Schema.dict(Schema.boolean()).default({}),
   skills: Schema.dict(Schema.boolean()).default({}),
   mcp: Schema.dict(Schema.boolean()).default({}),
 })
 
+/** One MCP server catalog entry (`enpoi-orchestration.mcpServers.<id>`). */
+export interface OrchestrationMcpServer {
+  serverName?: string
+  transport?: string
+  url?: string
+  headers?: Record<string, string>
+  toolCallTimeoutMs?: number
+  apiKeyEnv?: string
+}
+
 /**
- * Namespace owner schema for `enpoi-orchestration` — the shared state surface
+ * Namespace owner Config for `enpoi-orchestration` — the shared state surface
  * every enpoi plugin reads (capabilities, MCP catalog + status, fleet
- * personas, orchestration parameters, UI preferences). Nested records are
- * plugin-owned vocabularies carried as opaque values so round-trips stay
- * byte-faithful.
+ * personas, orchestration parameters, UI preferences). Under the merged
+ * settings model the owner entry's Config IS the document: `settings.yaml` is
+ * imported into the entry of the same id, the settings service projects these
+ * `.volatile()` fields as a live form, and every other plugin reads the
+ * document through the settings service (see `dsh-enpoi-contracts`
+ * `readOrchestrationDocument`). Nested records stay opaque plugin-owned
+ * vocabularies so round-trips are byte-faithful.
  */
+export interface OrchestrationConfig {
+  /** Global capability toggles (tools/skills/mcp). */
+  capabilities: Volatile<Partial<CapabilitiesState>>
+  /** Declarative MCP server catalog; a mount requires `capabilities.mcp[id] === true`. */
+  mcpServers: Volatile<Record<string, OrchestrationMcpServer>>
+  /** Runtime reachability heartbeat written by this plugin (green/blue/grey dots). */
+  mcpStatus: Volatile<Record<string, unknown>>
+  /** Fleet model assignments per persona/seat id. */
+  personas: Volatile<Record<string, unknown>>
+  /** Operator-defined specialist roles (doc 59). */
+  roles: Volatile<Record<string, unknown>>
+  /** Operator-defined councils (doc 59). */
+  councils: Volatile<Record<string, unknown>>
+  /** Operator-defined model failover chains (doc 60). */
+  chains: Volatile<Record<string, unknown>>
+  /** Orchestration parameters (council/keeper/oracle/memory/verifyGate). */
+  parameters: Volatile<Record<string, unknown>>
+  /** UI preferences (favorites, hidden models, hidden surfaces, provider order). */
+  uiPreferences: Volatile<Record<string, unknown>>
+  /** Permission policy document (defaults/tools/grants/agents) — doc 55. */
+  permissions: Volatile<PermissionPolicyConfig>
+  /** Pinned whiteboard store (doc 66 §3c / doc 67 §B). */
+  whiteboard: Volatile<Record<string, unknown>>
+}
+
 export const OrchestrationSettingsSchema = Schema.object({
-  capabilities: CapabilitiesSchema,
-  mcpServers: Schema.dict(Schema.any()).default({}),
-  mcpStatus: Schema.dict(Schema.any()).default({}),
-  personas: Schema.dict(Schema.any()).default({}),
+  capabilities: live(CapabilitiesSchema.default({})),
+  mcpServers: live(Schema.dict(Schema.any()).default({})),
+  mcpStatus: live(Schema.dict(Schema.any()).default({})),
+  personas: live(Schema.dict(Schema.any()).default({})),
   // Operator-defined specialist roles and councils (doc 59): declared here so
   // the namespace contract is explicit rather than relying on unknown-key
   // survival — both remain opaque plugin-owned vocabularies.
-  roles: Schema.dict(Schema.any()).default({}),
-  councils: Schema.dict(Schema.any()).default({}),
+  roles: live(Schema.dict(Schema.any()).default({})),
+  councils: live(Schema.dict(Schema.any()).default({})),
   // Operator-defined model failover chains (doc 60): id → { label?, links,
   // attempts?, onCut?, disabled? }. Owned by enpoi-model-chains, declared here
   // so the namespace contract admits the key rather than relying on
   // unknown-key survival.
-  chains: Schema.dict(Schema.any()).default({}),
-  parameters: Schema.any(),
+  chains: live(Schema.dict(Schema.any()).default({})),
+  parameters: live(Schema.dict(Schema.any()).default({})),
   // UI preferences (favorites, hidden models, model assignments, …) shared by
-  // every client through `settings/document-updated`. `hiddenSurfaces` is
-  // declared here so the namespace contract admits the duplicate-surface
-  // preference — rail page kinds and conversation view ids the client must not
-  // render (`{ sidebarRight: string[], views: string[] }`) — rather than
-  // relying on unknown-key survival; sibling keys stay opaque.
-  uiPreferences: Schema.object({
-    hiddenSurfaces: Schema.any(),
-  }),
-  permissions: Schema.any(),
+  // every client through `settings/document-updated`. The whole record stays
+  // opaque so sibling keys survive the form projection.
+  uiPreferences: live(Schema.dict(Schema.any()).default({})),
+  permissions: live(Schema.dict(Schema.any()).default({})),
   // Pinned whiteboard (doc 66 §3c / doc 67 §B): orchestrator-authored
   // core-context board, owned by enpoi-whiteboard and rendered into every
   // runtime-context snapshot. Declared so the namespace contract admits the
   // key rather than relying on unknown-key survival.
-  whiteboard: Schema.any(),
+  whiteboard: live(Schema.dict(Schema.any()).default({})),
 })
+
+/** Function-plugin Config export: the owning entry's schema IS the shared document. */
+export const Config = OrchestrationSettingsSchema
 
 /**
  * Revision-fenced removal of every policy row belonging to servers that left
@@ -118,11 +165,12 @@ export async function pruneRemovedMcpPolicyRows(
   return 0
 }
 
-export function apply(ctx: Context): void {
-  // 0. Namespace ownership: without a registering owner,
-  //    `settings.get('enpoi-orchestration')` returns undefined and every
-  //    enpoi reader silently falls back to its built-in defaults (fleet
-  //    routing assignments, MCP catalog, orchestration parameters).
+export function apply(ctx: Context, config: OrchestrationConfig = {} as OrchestrationConfig): void {
+  // 0. Ownership: the merged settings model derives the form from THIS entry's
+  //    Config (`enpoi-orchestration` is the entry id), so no namespace
+  //    registration is needed. Pre-0.1.7 engines still build their document
+  //    from a registered namespace schema — the optional call is a no-op on
+  //    the merged engine and keeps the sync-window profile bootable on both.
   try {
     const settingsApi = ctx.get('settings') as {
       register?: (ns: string, schema: unknown, opts?: { base?: unknown }) => unknown
@@ -132,10 +180,32 @@ export function apply(ctx: Context): void {
     process.stderr.write(`[enpoi-capabilities] namespace registration failed: ${String(error)}\n`)
   }
 
+  // 0a. This plugin ships its own client page (the Capabilities & Tools drawer
+  //     in the sidebar patch), so suppress the auto-generated settings page.
+  ctx.inject(['settings'], (child) => {
+    child.effect(() => {
+      const settings = child.get('settings') as { configure?: (presentation: { auto?: boolean }, owner?: unknown) => () => void } | undefined
+      return settings?.configure?.({ auto: false }, ctx.fiber)
+    })
+  })
+
+  /**
+   * Read one shared-document field. The merged engine hands the owner entry's
+   * volatile Config fields to `apply` as references; a pre-0.1.7 engine has no
+   * Config-backed namespace, so the same field is read back from the registered
+   * settings namespace instead — one profile boots on both.
+   */
+  function documentValue<T>(field: Volatile<T> | T | undefined, key: string): T | undefined {
+    const ref = field as Volatile<T> | undefined
+    if (typeof ref?.get === 'function') return ref.get()
+    const document = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    return document?.[key] as T | undefined
+  }
+
+  /** The live capability toggles, read through the owning Config reference. */
   function getGlobalDefaults(): Partial<CapabilitiesState> | undefined {
     try {
-      const settings = ctx.get('settings') as { get?: (ns: unknown) => { capabilities?: Partial<CapabilitiesState> } } | undefined
-      return settings?.get?.(ORCH_NS)?.capabilities
+      return documentValue(config.capabilities, 'capabilities')
     } catch {
       return undefined
     }
@@ -201,10 +271,9 @@ export function apply(ctx: Context): void {
     /** Mount errors already pushed to `mcpStatus` (dedupe of the retry-triggering write). */
     const publishedMountErrors = new Map<string, string>()
 
-    function getServerCatalog(): Record<string, { serverName?: string; transport?: string; url?: string; headers?: Record<string, string>; toolCallTimeoutMs?: number; apiKeyEnv?: string }> {
+    function getServerCatalog(): Record<string, OrchestrationMcpServer> {
       try {
-        const settings = ctx.get('settings') as { get?: (ns: unknown) => { mcpServers?: Record<string, { serverName?: string; transport?: string; url?: string; headers?: Record<string, string>; toolCallTimeoutMs?: number; apiKeyEnv?: string }> } } | undefined
-        return settings?.get?.(ORCH_NS)?.mcpServers ?? {}
+        return documentValue(config.mcpServers, 'mcpServers') ?? {}
       } catch {
         return {}
       }
@@ -306,13 +375,17 @@ export function apply(ctx: Context): void {
     // Only a change to the toggle map warrants a re-sync: the heartbeat writes
     // mcpStatus into the same namespace, and reacting to that fed a loop.
     let lastSyncedToggleMap: string | undefined
-    ctx.on('settings/updated', ((ns: unknown) => {
+    const onTogglesUpdated = ((ns: unknown) => {
       if (String(ns) !== 'enpoi-orchestration') return
       const toggleMap = JSON.stringify(initialCapabilitiesState(getGlobalDefaults()).mcp)
       if (toggleMap === lastSyncedToggleMap) return
       lastSyncedToggleMap = toggleMap
       void syncMcpMounts()
-    }) as (...args: unknown[]) => unknown)
+    }) as (...args: unknown[]) => unknown
+    // The merged form service emits `settings/document-updated`; the pre-0.1.7
+    // storage service emitted `settings/updated`. Both engines stay wired.
+    ctx.on('settings/updated', onTogglesUpdated)
+    ctx.on('settings/document-updated', onTogglesUpdated)
 
     // 2b. Reachability heartbeat (Adam): liveness of each catalog server,
     //     INDEPENDENT of the enable toggle. green=mounted, blue=running but
@@ -425,8 +498,7 @@ export function apply(ctx: Context): void {
 
   function readPermissionConfig(): PermissionPolicyConfig {
     try {
-      const settings = ctx.get('settings') as { get?: (ns: unknown) => { permissions?: PermissionPolicyConfig } } | undefined
-      return settings?.get?.(ORCH_NS)?.permissions ?? {}
+      return documentValue(config.permissions, 'permissions') ?? {}
     } catch {
       return {}
     }
@@ -438,12 +510,9 @@ export function apply(ctx: Context): void {
    * capability-disabled check maps a tool-name server segment back to its
    * catalog id — the key `capabilities.mcp[...]` is written under.
    */
-  function readMcpCatalogDefs(): Record<string, { serverName?: string }> | undefined {
+  function readMcpCatalogDefs(): Record<string, OrchestrationMcpServer> | undefined {
     try {
-      const settings = ctx.get('settings') as { get?: (ns: unknown) => { mcpServers?: Record<string, { serverName?: string }> } } | undefined
-      const value = settings?.get?.(ORCH_NS)
-      if (value === undefined) return undefined
-      const catalog = value.mcpServers
+      const catalog = documentValue(config.mcpServers, 'mcpServers')
       // A namespace without a readable catalog (mid-reload / unregistered) is
       // NOT an empty catalog: treating it as one would prune every live row.
       if (catalog === undefined || catalog === null || typeof catalog !== 'object' || Array.isArray(catalog)) return undefined
@@ -565,7 +634,7 @@ export function apply(ctx: Context): void {
   // server already absent then is not treated as a removal (its rows may be
   // operator-prepared rules).
   let lastMcpServerNames = readMcpServerNames()
-  const disposeMcpPolicyCleanup = ctx.on('settings/updated', ((ns: unknown) => {
+  const onCatalogUpdated = ((ns: unknown) => {
     if (String(ns) !== ORCH_NS) return
     const names = readMcpServerNames()
     if (names === undefined) return
@@ -583,8 +652,15 @@ export function apply(ctx: Context): void {
       .catch((error: unknown) => {
         process.stderr.write(`[enpoi-capabilities] removed MCP policy cleanup failed: ${String(error)}\n`)
       })
-  }) as (...args: unknown[]) => unknown)
-  ctx.effect(() => disposeMcpPolicyCleanup, 'enpoi-capabilities: removed-MCP policy cleanup')
+  }) as (...args: unknown[]) => unknown
+  ctx.effect(() => {
+    const disposeUpdated = ctx.on('settings/updated', onCatalogUpdated)
+    const disposeDocumentUpdated = ctx.on('settings/document-updated', onCatalogUpdated)
+    return () => {
+      disposeUpdated()
+      disposeDocumentUpdated()
+    }
+  }, 'enpoi-capabilities: removed-MCP policy cleanup')
 
   const disposeGrantWatch = ctx.on('session/event', ((session: { id?: string; eventAt?: (seq: number) => { type: string; data?: Record<string, unknown>; seq?: number } | undefined; seq?: number }, event: { type: string; seq?: number; data?: Record<string, unknown> }) => {
     if (event?.type !== 'approval/decided') return undefined

@@ -6,6 +6,7 @@
  * A3.4: passive-reference framing header + origin-weighted ranking.
  */
 import type { DatabaseSync } from 'node:sqlite'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import type { ClaimRow, Trust } from './db'
 import type { Pipeline } from './pipeline'
 
@@ -27,8 +28,9 @@ export const MEMORY_PARAM_DEFAULTS: MemoryParams = {
 export function getMemoryParams(ctx: unknown): MemoryParams {
   const d = MEMORY_PARAM_DEFAULTS
   try {
-    const settings = (ctx as { get?: (ns: string) => { parameters?: { memory?: Partial<MemoryParams> } } } | undefined)?.get?.('settings')
-    const p = settings?.get?.('enpoi-orchestration')?.parameters?.memory
+    const settings = (ctx as { get?: (name: string) => unknown } | undefined)?.get?.('settings')
+    const doc = readOrchestrationDocument(settings as SettingsDocumentReader | undefined)
+    const p = (doc?.parameters as { memory?: Partial<MemoryParams> } | undefined)?.memory
     if (p === undefined || typeof p !== 'object') return d
     const clamp = (v: unknown, fallback: number, min: number, max: number): number =>
       typeof v === 'number' && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback

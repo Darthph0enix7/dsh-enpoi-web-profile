@@ -14,12 +14,14 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* --outfile=lib/index.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "dsh-enpoi-contracts": "workspace:*"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": "workspace:*",
     "@deepseek-ai/dsh-session": "workspace:*",
-    "schemastery": "*"
+    "@deepseek-ai/schemastery": "workspace:~"
   },
   "dsh": {
     "bundle": {

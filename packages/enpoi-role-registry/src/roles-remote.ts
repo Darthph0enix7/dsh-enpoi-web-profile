@@ -8,6 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { OrchestrationSettingsHandle } from '@deepseek-ai/dsh-tool-subagent'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import { effectiveRoleRows, type EffectiveRoleList } from './roles-view'
 
 /**
@@ -28,8 +29,14 @@ export class EnpoiRolesService extends TypertRemoteService {
    */
   @Remote
   async list(): Promise<EffectiveRoleList> {
-    const settings = this.ctx.get('settings') as OrchestrationSettingsHandle | undefined
-    return effectiveRoleRows(settings)
+    const settings = this.ctx.get('settings') as SettingsDocumentReader | undefined
+    // The engine's role registry reads the shared document through the
+    // pre-0.1.7 `get(ns)` handle; adapt the merged describe()-based document
+    // onto that handle so settings overrides keep reaching the panel.
+    const handle: OrchestrationSettingsHandle = {
+      get: () => readOrchestrationDocument(settings),
+    }
+    return effectiveRoleRows(handle)
   }
 }
 

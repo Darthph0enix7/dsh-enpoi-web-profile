@@ -31,9 +31,10 @@
  * @module dsh-enpoi-verify-gate
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import Schema from 'schemastery'
+import Schema from '@deepseek-ai/schemastery'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
   observeToolResult,
   VERIFY_UNMET_EVENT,
@@ -49,18 +50,34 @@ export const name = 'enpoi-verify-gate'
 /** Nothing is required at plugin scope: the gate attaches even on a bare tree. */
 export const inject: string[] = []
 
-/** Plugin configuration (schemastery-validated by the loader). */
-export interface Config {
-  /** Fallback mode when settings carry no `parameters.verifyGate` (default `record`). */
-  mode?: 'record' | 'prompt'
-  /** Fallback one-ever prompt cap when settings carry none (default false). */
-  promptOnce?: boolean
+/** Mark a schema subtree live-editable; the pre-0.1.7 vendored schemastery build predates `.volatile()`. */
+function live<T extends object>(schema: T): T {
+  return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
 }
 
-/** Schemastery validator for {@link Config}. */
+/** Detach every Config field into plain values (idempotent on pre-0.1.7 plain configs). */
+function plainConfig<T extends object>(config: T): T {
+  const out: Record<string, unknown> = {}
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof (field as { get?: () => unknown } | undefined)?.get === 'function'
+      ? (field as { get: () => unknown }).get()
+      : field
+  }
+  return out as T
+}
+
+/** Plugin configuration (schemastery-validated by the loader; live-editable). */
+export interface Config {
+  /** Fallback mode when settings carry no `parameters.verifyGate` (default `record`). */
+  mode?: Volatile<'record' | 'prompt'>
+  /** Fallback one-ever prompt cap when settings carry none (default false). */
+  promptOnce?: Volatile<boolean>
+}
+
+/** Schemastery validator for {@link Config}; volatile so the merged settings service derives a live form. */
 export const Config: Schema<Config> = Schema.object({
-  mode: Schema.union(['record', 'prompt'] as const).default('record'),
-  promptOnce: Schema.boolean().default(false),
+  mode: live(Schema.union(['record', 'prompt'] as const).default('record')),
+  promptOnce: live(Schema.boolean().default(false)),
 })
 
 /** Settings namespace + path owning the runtime switch. */
@@ -97,15 +114,14 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * @returns the resolved mode and prompt cap.
  */
 export function resolveGateConfig(ctx: Context, config: Config = {}): GateConfig {
+  config = plainConfig(config)
   const fallback: GateConfig = {
     mode: config.mode === 'prompt' ? 'prompt' : 'record',
     promptOnce: config.promptOnce === true,
   }
   try {
-    const settings = ctx.get('settings') as
-      | { get?: (ns: string) => { parameters?: { verifyGate?: { mode?: unknown; promptOnce?: unknown } } } | undefined }
-      | undefined
-    const gate = settings?.get?.(GATE_SETTINGS_NAMESPACE)?.parameters?.verifyGate
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const gate = (doc?.parameters as { verifyGate?: { mode?: unknown; promptOnce?: unknown } } | undefined)?.verifyGate
     if (gate === null || typeof gate !== 'object') return fallback
     return {
       mode: gate.mode === 'prompt' ? 'prompt' : gate.mode === 'record' ? 'record' : fallback.mode,
@@ -247,6 +263,7 @@ interface EventLike {
  * @param options - test seams (defer hook).
  */
 export function apply(ctx: Context, config: Config = {}, options: ApplyOptions = {}): void {
+  config = plainConfig(config)
   try {
     const tracker = new VerifyGateTracker()
     const calls = new Map<string, string>()

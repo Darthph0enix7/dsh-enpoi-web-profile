@@ -2,6 +2,7 @@
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { getBriefService } from "dsh-enpoi-context-keeper";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 var name = "enpoi-oracle";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
 var ORACLE_PERSONA = [
@@ -167,8 +168,8 @@ async function ensureBriefWithin(parent, signal) {
 }
 function resolveOracleTimeoutMs(ctx) {
   try {
-    const settings = ctx.get("settings");
-    const v = settings?.get?.("enpoi-orchestration")?.parameters?.oracle?.timeoutMs;
+    const doc = readOrchestrationDocument(ctx.get("settings"));
+    const v = doc?.parameters?.oracle?.timeoutMs;
     if (typeof v === "number" && !Number.isNaN(v)) return Math.min(3e5, Math.max(3e4, v));
   } catch {
   }
@@ -176,8 +177,7 @@ function resolveOracleTimeoutMs(ctx) {
 }
 function resolvePersonaModel(ctx, persona) {
   try {
-    const settings = ctx.get("settings");
-    const doc = settings?.get?.("enpoi-orchestration");
+    const doc = readOrchestrationDocument(ctx.get("settings"));
     const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
     const entry = doc?.personas?.[key];
     if (entry && entry.provider && entry.model) {
@@ -223,12 +223,12 @@ function resolveChainSnapshot(ctx, id) {
 }
 function resolveOracleChainAttempts(ctx, persona) {
   try {
-    const settings = ctx.get("settings");
+    const doc = readOrchestrationDocument(ctx.get("settings"));
     const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
-    const entry = settings?.get?.("enpoi-orchestration")?.personas?.[key];
+    const entry = doc?.personas?.[key];
     const snapshot = resolveChainSnapshot(ctx, entry?.chain);
     if (snapshot !== void 0) {
-      const active = entry !== void 0 && entry.provider && entry.model ? { provider: entry.provider, model: entry.model } : { ...snapshot.links[0] };
+      const active = entry != null && entry.provider && entry.model ? { provider: entry.provider, model: entry.model } : { ...snapshot.links[0] };
       const links = [
         active,
         ...snapshot.links.filter((link) => !(link.provider === active.provider && link.model === active.model))

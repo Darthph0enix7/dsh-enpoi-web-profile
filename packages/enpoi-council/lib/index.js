@@ -50,15 +50,16 @@ var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read fr
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
-// src/index.ts
-import Schema from "schemastery";
-
 // src/remote.ts
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+
+// src/registry.ts
+import { readOrchestrationDocument as readOrchestrationDocument2 } from "dsh-enpoi-contracts";
 
 // src/core/fiber.ts
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 import { getBriefService } from "dsh-enpoi-context-keeper";
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -200,8 +201,7 @@ function resolveChainSnapshot(ctx, id) {
 }
 function resolvePersonaChain(ctx, persona) {
   try {
-    const settings = ctx.get("settings");
-    const doc = settings?.get?.("enpoi-orchestration");
+    const doc = readOrchestrationDocument(ctx.get("settings"));
     const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
     const entry = doc?.personas?.[key];
     const snapshot = resolveChainSnapshot(ctx, entry?.chain);
@@ -234,8 +234,7 @@ function resolvePersonaChain(ctx, persona) {
 }
 function resolvePersonaModel(ctx, persona) {
   try {
-    const settings = ctx.get("settings");
-    const doc = settings?.get?.("enpoi-orchestration");
+    const doc = readOrchestrationDocument(ctx.get("settings"));
     const key = persona.toLowerCase().replace(/^the\s+/, "").trim();
     const entry = doc?.personas?.[key];
     if (entry && entry.provider && entry.model) {
@@ -20301,8 +20300,7 @@ function councilSettingsEntry(decl) {
 }
 function readCouncilSettings(ctx) {
   try {
-    const settings = ctx.get("settings");
-    const doc = settings?.get?.(ORCH_NAMESPACE);
+    const doc = readOrchestrationDocument2(ctx.get("settings"));
     const councils = doc?.councils;
     if (councils === void 0) return { councils: {} };
     if (!isPlainObject2(councils)) {
@@ -21600,6 +21598,7 @@ function computeQuality(ledger, spec) {
 }
 
 // src/params.ts
+import { readOrchestrationDocument as readOrchestrationDocument3 } from "dsh-enpoi-contracts";
 var COUNCIL_PARAM_DEFAULTS = {
   maxDebateTokens: 2e5,
   defaultMaxRounds: 6,
@@ -21620,8 +21619,8 @@ var COUNCIL_PARAM_DEFAULTS = {
 function getCouncilParams(ctx) {
   const d = COUNCIL_PARAM_DEFAULTS;
   try {
-    const settings = ctx.get("settings");
-    const p = settings?.get?.("enpoi-orchestration")?.parameters?.council;
+    const doc = readOrchestrationDocument3(ctx.get("settings"));
+    const p = doc?.parameters?.council;
     if (p === void 0 || typeof p !== "object") return d;
     return {
       maxDebateTokens: num(p.maxDebateTokens, d.maxDebateTokens, 2e4, 5e5),
@@ -22175,25 +22174,6 @@ async function persistCouncil(ctx, id, decl) {
 // src/index.ts
 var name = "enpoi-council";
 var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
-var PersonaModelSchema = Schema.object({
-  provider: Schema.string(),
-  model: Schema.string(),
-  reasoningEffort: Schema.string(),
-  /** Model failover chain id (doc 60) assigned to the seat. */
-  chain: Schema.string()
-});
-var OrchestrationSettingsSchema = Schema.object({
-  personas: Schema.dict(PersonaModelSchema).default({}),
-  councils: Schema.dict(Schema.any()).default({}),
-  /** Model failover chains (doc 60) consumed through the modelChains service. */
-  chains: Schema.dict(Schema.any()).default({}),
-  uiPreferences: Schema.object({
-    hiddenModels: Schema.any(),
-    favorites: Schema.any(),
-    providerOrder: Schema.any(),
-    defaultModel: Schema.any()
-  }).default({})
-});
 function apply(ctx) {
   mountEnpoiCouncilRemote(ctx);
   ctx.inject(["tools", "subagents", "sessionPersistence", "sessions", "agents"], (injected) => {

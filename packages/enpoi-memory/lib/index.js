@@ -195,6 +195,7 @@ function makePipeline(db) {
 }
 
 // src/retriever.ts
+import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 var MEMORY_PARAM_DEFAULTS = {
   retrieverTopK: 10,
   retrieverCharBudget: 1200
@@ -203,7 +204,8 @@ function getMemoryParams(ctx) {
   const d = MEMORY_PARAM_DEFAULTS;
   try {
     const settings = ctx?.get?.("settings");
-    const p = settings?.get?.("enpoi-orchestration")?.parameters?.memory;
+    const doc = readOrchestrationDocument(settings);
+    const p = doc?.parameters?.memory;
     if (p === void 0 || typeof p !== "object") return d;
     const clamp = (v, fallback, min, max) => typeof v === "number" && !Number.isNaN(v) ? Math.min(max, Math.max(min, v)) : fallback;
     return {

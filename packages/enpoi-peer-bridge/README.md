@@ -36,8 +36,11 @@ pairings:
 ```
 
 Host-role fields (`sessionId`, `exposure`) are ignored by the caller; an entry
-needs `alias`, `peer`, and `endpoint` to be dialable. `pairingsPath` in the
-plugin config (and `--pairings` on the CLI) points at another document so a
+needs `alias`, `peer`, and `endpoint` to be dialable. The plugin's Config
+fields (`pairingsPath`, `noticesPath`, `device`, `participantName`, `waitMs`,
+`maxReconnects`) are declared `.volatile()`, so the merged settings service
+exposes them as a live form persisted in the profile patch. `pairingsPath` in
+the plugin config (and `--pairings` on the CLI) points at another document so a
 test never touches the operator's real file.
 
 The shipped host-side bundle row is `peer-api` (`packages/api/peer`); a

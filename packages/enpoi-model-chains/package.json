@@ -7,7 +7,9 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* --outfile=lib/index.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "dsh-enpoi-contracts": "workspace:*"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
