@@ -263,8 +263,7 @@ function injectFollowup(ctx, sessionId, record) {
     const message = createUserMessage({
       content: [{ type: "text", text: `${FOLLOWUP_PREFIX}${exit}` }],
       source: {
-        kind: "plugin",
-        plugin: "enpoi-verify-gate",
+        kind: "enpoi-verify-gate",
         form: "notice",
         summary: `verification unmet (${record.tool})`
       }

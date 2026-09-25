@@ -422,27 +422,46 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       }
     }
 
+    /**
+     * The last heartbeat successfully published. `checkedAt` is carried over
+     * when every other field of an entry is unchanged, so an idle heartbeat
+     * serializes identically and the write (and the reconcile burst behind it)
+     * is suppressed.
+     */
+    let lastWritten: Record<string, McpStatusEntry> = {}
+
+    /** Whether one entry differs from its previous heartbeat in any field but `checkedAt`. */
+    function sameStatus(previous: McpStatusEntry | undefined, next: McpStatusEntry): boolean {
+      return previous !== undefined && previous.state === next.state && previous.mounted === next.mounted
+        && previous.authError === next.authError && previous.error === next.error
+    }
+
     async function probeAll(): Promise<void> {
       const catalog = getServerCatalog()
       const next: Record<string, McpStatusEntry> = {}
       for (const [id, def] of Object.entries(catalog)) {
         const isMounted = mounted.has(id) || mountedPending.has(id)
         if (isMounted) {
-          next[id] = { state: 'online', mounted: true, checkedAt: Date.now() }
+          const entry: McpStatusEntry = { state: 'online', mounted: true, checkedAt: Date.now() }
+          const previous = lastWritten[id]
+          next[id] = sameStatus(previous, entry) ? { ...entry, checkedAt: previous.checkedAt } : entry
           continue
         }
         const probe = await probeServer(id, def)
-        next[id] = {
+        const entry: McpStatusEntry = {
           state: probe.state,
           mounted: false,
           checkedAt: Date.now(),
           ...(probe.authError ? { authError: true } : {}),
           ...(mountErrors.has(id) ? { error: mountErrors.get(id) } : {}),
         }
+        const previous = lastWritten[id]
+        next[id] = sameStatus(previous, entry) ? { ...entry, checkedAt: previous.checkedAt } : entry
       }
       const json = JSON.stringify(next)
       if (json === lastWrittenJson) return
       lastWrittenJson = json
+      lastWritten = next
       try {
         const settingsApi = ctx.get('settings') as unknown as { mutate?: (ns: unknown, ops: { op: string; path: string[]; value?: unknown }[]) => Promise<unknown> | undefined }
         void settingsApi.mutate?.(ORCH_NS, [{ op: 'set', path: ['mcpStatus'], value: next }])

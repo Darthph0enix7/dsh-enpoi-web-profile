@@ -41,7 +41,13 @@
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { SessionLogOffset, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { BlockAssembler, createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createUserMessage, type ContextFormed, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Enpoi context keeper: state-checkpoint surface messages and keeper model requests. */
+    'enpoi-keeper': { kind: 'enpoi-keeper' } & ContextFormed
+  }
+}
 import { deadline } from '@deepseek-ai/dsh-timeout'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { openMemoryDb } from 'dsh-enpoi-memory'
@@ -751,8 +757,11 @@ export function createBriefService(ctx: Context, config: Config): BriefService {
 // token rendered budget (doc 67 §B) belongs to the whiteboard, not the
 // checkpoint.
 
+/** Producer-owned source kind of the keeper's own messages (V4 refuses the retired `plugin` kind). */
+export const KEEPER_MESSAGE_KIND = 'enpoi-keeper'
+
 /** Source marker that identifies the keeper's own surface checkpoint messages. */
-export const CHECKPOINT_SOURCE = { kind: 'plugin', plugin: 'enpoi-context-keeper' } as const
+export const CHECKPOINT_SOURCE = { kind: KEEPER_MESSAGE_KIND } as const
 
 /**
  * One state checkpoint as persisted on the `state/checkpoint` event (and as the
@@ -970,8 +979,8 @@ export function latestCheckpointMessageSeq(session: Session): number | null {
   try {
     for (const event of session.snapshotEvents()) {
       if (event.type !== 'user/message') continue
-      const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
-      if (source?.kind !== 'plugin' || source.plugin !== 'enpoi-context-keeper') continue
+      const source = (event.data as { source?: { kind?: string } }).source
+      if (source?.kind !== KEEPER_MESSAGE_KIND) continue
       if (surface.has(event.seq)) found = event.seq
     }
   } catch (error) {
@@ -1841,7 +1850,7 @@ export async function summarize(
 ): Promise<{ text: string; route: string }> {
   const messages = [createUserMessage({
     content: [{ type: 'text', text: input }],
-    source: { kind: 'plugin', plugin: 'enpoi-context-keeper' },
+    source: { kind: KEEPER_MESSAGE_KIND },
   })]
   const base: GenerateOptions = {
     messages,

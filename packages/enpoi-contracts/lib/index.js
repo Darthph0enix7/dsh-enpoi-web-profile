@@ -4151,6 +4151,11 @@ function readSettingsDocument(settings, ns) {
     if (direct !== void 0) {
       return direct !== null && typeof direct === "object" ? direct : void 0;
     }
+    const narrow = settings?.describeNamespace?.(ns);
+    if (narrow !== void 0) {
+      const value2 = narrow.value;
+      return value2 !== null && typeof value2 === "object" ? value2 : void 0;
+    }
     const value = settings?.describe?.().find((entry) => entry.ns === ns)?.value;
     return value !== null && typeof value === "object" ? value : void 0;
   } catch {

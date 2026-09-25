@@ -32,7 +32,13 @@
  */
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Enpoi verify gate: the bounded follow-up injected when a turn ends unverified. */
+    'enpoi-verify-gate': { kind: 'enpoi-verify-gate' } & ContextFormed
+  }
+}
 import Schema from '@deepseek-ai/schemastery'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
@@ -204,8 +210,7 @@ function injectFollowup(ctx: Context, sessionId: string, record: VerifyUnmetReco
     const message = createUserMessage({
       content: [{ type: 'text', text: `${FOLLOWUP_PREFIX}${exit}` }],
       source: {
-        kind: 'plugin',
-        plugin: 'enpoi-verify-gate',
+        kind: 'enpoi-verify-gate',
         form: 'notice',
         summary: `verification unmet (${record.tool})`,
       },

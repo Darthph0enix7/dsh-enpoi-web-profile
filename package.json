@@ -62,7 +62,6 @@
         "dsh-enpoi-role-registry",
         "dsh-enpoi-whiteboard",
         "dsh-fast",
-        "dsh-context-lens",
         "dsh-context"
       ]
     }

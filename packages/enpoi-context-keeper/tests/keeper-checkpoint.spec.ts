@@ -388,8 +388,8 @@ describe('enpoi-context-keeper triggers (apply listener)', () => {
     expect(renderCheckpointBlock(data)).toContain('### State checkpoint')
     // The checkpoint surface message is live on the real surface.
     const live = session.surface.nodes.filter((seq) => {
-      const event = session.eventAt(seq) as { data?: { source?: { plugin?: string } } } | undefined
-      return event?.data?.source?.plugin === 'enpoi-context-keeper'
+      const event = session.eventAt(seq) as { data?: { source?: { kind?: string } } } | undefined
+      return event?.data?.source?.kind === 'enpoi-keeper'
     })
     expect(live).toHaveLength(1)
   })
@@ -441,8 +441,8 @@ describe('enpoi-context-keeper surface replace (real Session)', () => {
 
     // Exactly one live checkpoint node on the surface.
     const live = session.surface.nodes.filter((seq) => {
-      const data = session.eventAt(seq)?.data as { source?: { plugin?: string } } | undefined
-      return data?.source?.plugin === 'enpoi-context-keeper'
+      const data = session.eventAt(seq)?.data as { source?: { kind?: string } } | undefined
+      return data?.source?.kind === 'enpoi-keeper'
     })
     expect(live).toEqual([secondSeq])
     expect(latestCheckpoint(session as never)!.version).toBe(2)

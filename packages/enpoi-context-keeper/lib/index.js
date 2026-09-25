@@ -502,7 +502,8 @@ function getBriefService() {
 function createBriefService(ctx, config) {
   return new BriefService(ctx, config);
 }
-var CHECKPOINT_SOURCE = { kind: "plugin", plugin: "enpoi-context-keeper" };
+var KEEPER_MESSAGE_KIND = "enpoi-keeper";
+var CHECKPOINT_SOURCE = { kind: KEEPER_MESSAGE_KIND };
 function checkpointTelemetry(session, meta) {
   const day = (value2) => {
     if (value2 === void 0 || !Number.isFinite(value2)) return "unknown";
@@ -634,7 +635,7 @@ function latestCheckpointMessageSeq(session) {
     for (const event of session.snapshotEvents()) {
       if (event.type !== "user/message") continue;
       const source = event.data.source;
-      if (source?.kind !== "plugin" || source.plugin !== "enpoi-context-keeper") continue;
+      if (source?.kind !== KEEPER_MESSAGE_KIND) continue;
       if (surface.has(event.seq)) found = event.seq;
     }
   } catch (error) {
@@ -1249,7 +1250,7 @@ function validateKeeperOutput(text, finishKind, expectClaims = false) {
 async function summarize(ctx, config, session, input, signal, route, systemPrompt, expectClaims) {
   const messages = [createUserMessage({
     content: [{ type: "text", text: input }],
-    source: { kind: "plugin", plugin: "enpoi-context-keeper" }
+    source: { kind: KEEPER_MESSAGE_KIND }
   })];
   const base = {
     messages,
@@ -1344,6 +1345,7 @@ export {
   CheckpointService,
   Config,
   KEEPER_CACHE_CAP,
+  KEEPER_MESSAGE_KIND,
   PREFETCH_DEBOUNCE_MS,
   apply,
   buildTemplateCheckpoint,

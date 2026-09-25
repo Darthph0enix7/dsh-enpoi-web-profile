@@ -23,7 +23,13 @@ import type { Session, SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Enpoi Oracle: the background verdict delivered into the parent session. */
+    'enpoi-oracle': { kind: 'enpoi-oracle' } & ContextFormed
+  }
+}
 import { getBriefService } from 'dsh-enpoi-context-keeper'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 
@@ -744,7 +750,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
                     type: 'text',
                     text: `📬 Oracle (background) finished — ${v.approved ? 'APPROVED' : 'CONCERNS'} (${v.concerns.length} concern(s)).\n\n${t}`,
                   }],
-                  source: { kind: 'plugin', plugin: 'enpoi-oracle' },
+                  source: { kind: 'enpoi-oracle' },
                 }))
               }
             } catch { /* aborted or failed: no delivery */ } finally {

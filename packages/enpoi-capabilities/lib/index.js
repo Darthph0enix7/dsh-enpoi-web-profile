@@ -932,27 +932,36 @@ function apply(ctx, config = {}) {
         clearTimeout(timer);
       }
     }
+    let lastWritten = {};
+    function sameStatus(previous, next) {
+      return previous !== void 0 && previous.state === next.state && previous.mounted === next.mounted && previous.authError === next.authError && previous.error === next.error;
+    }
     async function probeAll() {
       const catalog = getServerCatalog();
       const next = {};
       for (const [id, def] of Object.entries(catalog)) {
         const isMounted = mounted.has(id) || mountedPending.has(id);
         if (isMounted) {
-          next[id] = { state: "online", mounted: true, checkedAt: Date.now() };
+          const entry2 = { state: "online", mounted: true, checkedAt: Date.now() };
+          const previous2 = lastWritten[id];
+          next[id] = sameStatus(previous2, entry2) ? { ...entry2, checkedAt: previous2.checkedAt } : entry2;
           continue;
         }
         const probe = await probeServer(id, def);
-        next[id] = {
+        const entry = {
           state: probe.state,
           mounted: false,
           checkedAt: Date.now(),
           ...probe.authError ? { authError: true } : {},
           ...mountErrors.has(id) ? { error: mountErrors.get(id) } : {}
         };
+        const previous = lastWritten[id];
+        next[id] = sameStatus(previous, entry) ? { ...entry, checkedAt: previous.checkedAt } : entry;
       }
       const json = JSON.stringify(next);
       if (json === lastWrittenJson) return;
       lastWrittenJson = json;
+      lastWritten = next;
       try {
         const settingsApi = ctx.get("settings");
         void settingsApi.mutate?.(ORCH_NS, [{ op: "set", path: ["mcpStatus"], value: next }]);

@@ -351,10 +351,10 @@ describe('plugin wiring', () => {
     drive(h, 2, liveBashResult({ turn: 2 }))
     expect(h.appended).toHaveLength(2)
     expect(h.followups).toHaveLength(1)
-    const message = h.followups[0] as { role?: string; content?: Array<{ text?: string }>; source?: { plugin?: string } }
+    const message = h.followups[0] as { role?: string; content?: Array<{ text?: string }>; source?: { kind?: string } }
     expect(message.role).toBe('user')
     expect(message.content?.[0]?.text).toContain('Your last verification failed')
-    expect(message.source?.plugin).toBe('enpoi-verify-gate')
+    expect(message.source?.kind).toBe('enpoi-verify-gate')
   })
 
   it('defers delivery out of append publication', () => {

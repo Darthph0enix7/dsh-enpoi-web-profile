@@ -245,15 +245,21 @@ export const ORCHESTRATION_NAMESPACE = 'enpoi-orchestration'
 export interface SettingsDocumentReader {
   /** Pre-0.1.7 seam: one registered namespace's resolved value. */
   get?: (ns: string) => unknown
+  /** 0.1.7+ optional narrow seam: one namespace without projecting the full descriptor set. */
+  describeNamespace?: (ns: string) => { ns: string; value?: unknown } | undefined
   /** 0.1.7+ seam: one descriptor per configurable entry, carrying the resolved projected value. */
   describe?: () => ReadonlyArray<{ ns: string; value?: unknown }>
 }
 
 /**
  * Read one settings document from whichever settings surface the engine
- * exposes: `get(ns)` when a pre-0.1.7 service still offers it, otherwise the
- * `describe()` value of the entry with the same id. Both engines answer the
- * live document, so callers keep their fail-open defaults.
+ * exposes: `get(ns)` when a pre-0.1.7 service still offers it, a narrow
+ * `describeNamespace(ns)` when the service offers it, otherwise the
+ * `describe()` value of the entry with the same id. The 0.1.7+ service
+ * memoizes its full describe per settings generation, so the fallback shares
+ * one projection with every other reader instead of rebuilding it per call.
+ * Both engines answer the live document, so callers keep their fail-open
+ * defaults.
  * @param settings - the `settings` service from `ctx.get('settings')`.
  * @param ns - profile entry id (0.1.7+) / registered namespace (pre-0.1.7).
  * @returns the document, or undefined when no surface answers.
@@ -266,6 +272,11 @@ export function readSettingsDocument(
     const direct = settings?.get?.(ns)
     if (direct !== undefined) {
       return direct !== null && typeof direct === 'object' ? direct as Record<string, unknown> : undefined
+    }
+    const narrow = settings?.describeNamespace?.(ns)
+    if (narrow !== undefined) {
+      const value = narrow.value
+      return value !== null && typeof value === 'object' ? value as Record<string, unknown> : undefined
     }
     const value = settings?.describe?.().find(entry => entry.ns === ns)?.value
     return value !== null && typeof value === 'object' ? value as Record<string, unknown> : undefined

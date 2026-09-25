@@ -563,7 +563,7 @@ function registerOracleTools(ctx, root) {
 
 ${t}`
                   }],
-                  source: { kind: "plugin", plugin: "enpoi-oracle" }
+                  source: { kind: "enpoi-oracle" }
                 }));
               }
             } catch {
