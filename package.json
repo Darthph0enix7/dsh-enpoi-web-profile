@@ -26,6 +26,7 @@
     "dsh-enpoi-provider-sync": "workspace:*",
     "dsh-enpoi-role-registry": "workspace:*",
     "dsh-enpoi-runtime-probe": "workspace:*",
+    "dsh-enpoi-tool-groups": "workspace:*",
     "dsh-enpoi-ui-state": "workspace:*",
     "dsh-enpoi-verify-gate": "workspace:*",
     "dsh-enpoi-whiteboard": "workspace:*",

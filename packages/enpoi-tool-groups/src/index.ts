@@ -1,0 +1,422 @@
+/**
+ * dsh-enpoi-tool-groups — base tool surface + attachable on-demand families.
+ *
+ * The registry stays host-plane; this plugin shapes only what a session SEES:
+ * a per-agent `tools.restrict({ deny })` over the presented catalog (the
+ * shipped per-scope presentation seam), a prompt menu listing the on-demand
+ * families, and the `tool_groups` meta-tool that flips the attached set.
+ *
+ * Lifecycle: the plugin mounts on a preset's standing scope, so one instance
+ * covers every agent joined to that preset. `agent/created` installs the
+ * session's filter (base surface, or the projection-restored attached set),
+ * `session/event` `turn/end` rebuilds it after an attach/detach committed
+ * during the turn, and `agent/disposed` releases it. The durable
+ * `tool-groups/change` event keeps the set across resume; the presentation
+ * filter fails open whenever the catalog or the projection cannot answer.
+ *
+ * @module dsh-enpoi-tool-groups
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import type { Scope } from '@deepseek-ai/dsh-scope'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Session } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-system-prompt'
+import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
+import {
+  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups,
+  type ResolvedToolGroups,
+} from './catalog.js'
+import { toolGroupsProjection, type ToolGroupsProjectionState } from './projection.js'
+
+/** Cordis plugin name. */
+export const name = 'enpoi-tool-groups'
+
+/** The services this plugin registers through; the rest resolve optionally and fail open. */
+export const inject = ['tools', 'systemPrompt']
+
+/** Plugin config: the seat identity used for per-seat pre-attach. */
+export interface Config {
+  /** Seat id (preset identity) resolved against `toolGroups.seats.<seat>`. */
+  seat?: string
+}
+
+/** Runtime schema. */
+export const Config: Schema<Config> = Schema.object({
+  seat: Schema.string().default('default'),
+})
+
+/** The meta-tool name (never a member of any group). */
+export const TOOL_GROUPS_TOOL = 'tool_groups'
+
+/**
+ * Menu section order: after the last tool-guidance section (`TOOL_REPORT`
+ * 2900) and before `MCP_SERVERS` (3100). The harness has no named order for
+ * this row yet; a named `SECTION_ORDERS` entry is the follow-up.
+ */
+export const TOOL_GROUPS_MENU_ORDER = 2950
+
+/** Session-event name appended when the attached set changes. */
+const CHANGE_EVENT = 'tool-groups/change'
+
+/** Session-event name appended by the preset registry on a seat switch. */
+const PRESET_SELECTED_EVENT = 'agent-preset/selected'
+
+/** Narrow structural face of the projection registry this plugin reads. */
+export interface ProjectionReader {
+  stateOf(session: Session, key: 'toolGroups'): ToolGroupsProjectionState | undefined
+}
+
+/** One agent's restriction installer, owned by the plugin instance. */
+export interface RestrictionInstaller {
+  /**
+   * Install one deny restriction for an agent's presented catalog.
+   * @param agent - the agent whose session is filtered.
+   * @param deny - tool names removed from the inherited surface.
+   * @returns the exact disposer that lifts this restriction.
+   */
+  install(agent: Agent, deny: readonly string[]): () => void
+  /** Release every restriction owned for one agent. */
+  release(agent: Agent): void
+}
+
+/** Injectable seams (tests); production resolves every one from the context. */
+export interface ToolGroupsSeams {
+  readonly installer?: RestrictionInstaller
+  /** `null` forces the fail-open path where no projection registry exists. */
+  readonly projections?: ProjectionReader | null
+  readonly settings?: SettingsDocumentReader | undefined
+}
+
+/** The default installer: one plugin-owned scope per agent, restrictions keyed by the agent. */
+function scopeInstaller(ctx: Context): RestrictionInstaller {
+  const scopes = new WeakMap<Agent, Scope>()
+  return {
+    install(agent, deny) {
+      let scope = scopes.get(agent)
+      if (scope === undefined) {
+        // Tagged with the AGENT key: `tools.restrict` then lands on that
+        // agent's own layer, so the filter covers this session alone. The
+        // scope is owned by this plugin instance, so a preset switch disposes
+        // the old filter with the old mount instead of leaving it intersecting.
+        scope = createScope(ctx, agent)
+        scopes.set(agent, scope)
+      }
+      return scope.ctx.tools.restrict({ deny: [...deny] })
+    },
+    release(agent) {
+      const scope = scopes.get(agent)
+      if (scope === undefined) return
+      scopes.delete(agent)
+      void scope.dispose()
+    },
+  }
+}
+
+/** Per-agent applied state: what the current request's filter enforces. */
+interface AgentState {
+  readonly agent: Agent
+  /** Applied attached group ids, or `null` when the filter is failing open. */
+  applied: readonly string[] | null
+  /** The one live deny restriction, when installed. */
+  restriction: (() => void) | undefined
+}
+
+/** Read one scope key's agent identity defensively (the scope is the Agent object). */
+function agentIdOfScope(scope: unknown): string | undefined {
+  if (scope === null || typeof scope !== 'object') return undefined
+  const candidate = scope as { id?: unknown }
+  return typeof candidate.id === 'string' && candidate.id.length > 0 ? candidate.id : undefined
+}
+
+/** Parse the meta-tool arguments without trusting the model. */
+function parseAction(args: unknown): { action: 'list' | 'attach' | 'detach'; group?: string } | { error: string } {
+  const record = args !== null && typeof args === 'object' ? args as Record<string, unknown> : {}
+  const action = record['action']
+  if (action !== 'list' && action !== 'attach' && action !== 'detach') {
+    return { error: `action must be one of "list", "attach", "detach" (got ${JSON.stringify(action)})` }
+  }
+  const group = record['group']
+  if (group !== undefined && (typeof group !== 'string' || group.length === 0)) {
+    return { error: 'group must be a non-empty string when provided' }
+  }
+  return group === undefined ? { action } : { action, group }
+}
+
+/** One group row in the meta-tool output. */
+interface GroupRow {
+  readonly id: string
+  readonly label: string
+  readonly purpose: string
+  readonly mode: string
+  readonly enabled: boolean
+  readonly attached: boolean
+  readonly members: readonly string[]
+}
+
+/** The meta-tool value. */
+interface ToolGroupsValue {
+  readonly ok: boolean
+  readonly action: string
+  readonly group: string
+  readonly attached: readonly string[]
+  readonly groups: readonly GroupRow[]
+  readonly reason: string
+}
+
+/** Output schema of the `tool_groups` tool. */
+const OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' },
+    action: { type: 'string' },
+    group: { type: 'string', description: 'The group the action named; empty for list.' },
+    attached: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'The complete attached group-id set after the action (durable; applied at the next turn boundary).',
+    },
+    groups: {
+      type: 'array',
+      description: 'Every enabled on-demand group with its purpose, members, and current attach state.',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          purpose: { type: 'string' },
+          mode: { type: 'string' },
+          enabled: { type: 'boolean' },
+          attached: { type: 'boolean' },
+          members: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['id', 'label', 'purpose', 'mode', 'enabled', 'attached', 'members'],
+      },
+    },
+    reason: { type: 'string', description: 'Refusal reason; empty on success.' },
+  },
+  required: ['ok', 'action', 'group', 'attached', 'groups', 'reason'],
+} as const
+
+/** Render the meta-tool value as model-facing text. */
+function renderValue(value: ToolGroupsValue): string {
+  const lines: string[] = []
+  if (!value.ok) {
+    lines.push(`tool_groups ${value.action} refused: ${value.reason}`)
+  } else if (value.action === 'list') {
+    lines.push(`tool_groups: attached [${value.attached.join(', ')}]`)
+  } else {
+    lines.push(`tool_groups ${value.action} ${value.group}: queued — the attached set is now [${value.attached.join(', ')}]; the tool block updates at the next turn.`)
+  }
+  for (const group of value.groups) {
+    lines.push(`- ${group.id} (${group.mode}${group.enabled ? '' : ', disabled'}${group.attached ? ', attached' : ''}): ${group.purpose} — ${group.members.join(', ')}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Mount the plugin on one preset's standing scope.
+ * @param ctx - agent-plane mount context (the preset's standing scope).
+ * @param config - seat identity for per-seat pre-attach.
+ * @param seams - injectable test seams; production resolves from `ctx`.
+ */
+export function apply(ctx: Context, config: Config = {}, seams: ToolGroupsSeams = {}): void {
+  const seat = config.seat ?? 'default'
+  const installer = seams.installer ?? scopeInstaller(ctx)
+  let projections: ProjectionReader | null = seams.projections === undefined
+    ? (ctx.get('sessionProjections') as ProjectionReader | undefined) ?? null
+    : seams.projections
+  const settings = seams.settings ?? (ctx.get('settings') as SettingsDocumentReader | undefined)
+  const states = new Map<string, AgentState>()
+
+  /** Resolve the catalog hot: operator edits apply to the next ensure. */
+  const catalog = (): ResolvedToolGroups => resolveToolGroups(readOrchestrationDocument(settings))
+
+  /** The durable attached set (projection), or the seat default before any change. */
+  const plannedAttached = (agent: Agent, groups: ResolvedToolGroups): readonly string[] | null => {
+    if (projections === null) return null
+    try {
+      const state = projections.stateOf(agent.session, 'toolGroups')
+      return state?.attached ?? preAttachFor(groups, seat)
+    } catch {
+      return null
+    }
+  }
+
+  /** Swap the agent's restriction to the given effective set; empty = unrestricted. */
+  const applyEffective = (state: AgentState, groups: ResolvedToolGroups, effective: readonly string[] | null): void => {
+    if (state.restriction !== undefined) {
+      state.restriction()
+      state.restriction = undefined
+    }
+    if (effective === null) {
+      state.applied = null
+      return
+    }
+    const deny = denyNames(groups, new Set(effective))
+    if (deny.length === 0) {
+      state.applied = effective
+      return
+    }
+    try {
+      state.restriction = installer.install(state.agent, deny)
+      state.applied = effective
+    } catch (error: unknown) {
+      // Fail open: a filter that cannot be installed hides nothing.
+      state.applied = null
+      ctx.logger?.warn(`enpoi-tool-groups: restriction install failed for ${state.agent.session.id}: ${String(error)}`)
+    }
+  }
+
+  /** Ensure one agent has a filter matching the durable state. */
+  const ensure = (agent: Agent): AgentState | undefined => {
+    const id = agent.session?.id
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    let state = states.get(id)
+    if (state === undefined) {
+      state = { agent, applied: null, restriction: undefined }
+      states.set(id, state)
+    }
+    const groups = catalog()
+    applyEffective(state, groups, plannedAttached(agent, groups))
+    return state
+  }
+
+  /** Ensure without letting a filter failure break agent creation or a turn. */
+  const safeEnsure = (agent: Agent): void => {
+    try {
+      ensure(agent)
+    } catch (error: unknown) {
+      ctx.logger?.warn(`enpoi-tool-groups: ensure failed for ${String(agent.session?.id)}: ${String(error)}`)
+    }
+  }
+
+  // The durable attached set (projection) drives replay across resume. A
+  // registration failure fails open: no projection means no filtering.
+  if (projections !== null) {
+    try {
+      ctx.get('sessionProjections')?.register(toolGroupsProjection)
+    } catch (error: unknown) {
+      ctx.logger?.warn(`enpoi-tool-groups: projection registration failed; tool groups fail open: ${String(error)}`)
+      projections = null
+    }
+  }
+
+  // The menu: on-demand families as ids + purposes + attach state.
+  ctx.systemPrompt.section({
+    name: 'tool-groups:menu',
+    order: TOOL_GROUPS_MENU_ORDER,
+    text: (context) => {
+      const id = agentIdOfScope(context.scope)
+      if (id === undefined) return ''
+      let state = states.get(id)
+      if (state === undefined) {
+        // Self-heal for an agent the creation listener never saw: the filter
+        // installs now (too late for this assembly's tool block, in time for
+        // the next), and the menu still renders the current applied set.
+        safeEnsure(context.scope as Agent)
+        state = states.get(id)
+      }
+      const groups = catalog()
+      const appliedSet = new Set(state?.applied ?? [])
+      // A change committed during the current turn is durable but not yet in
+      // this request's tool block; the menu names it as pending so the model
+      // never has to reconcile the tool result with the catalog.
+      const durable = state === undefined ? null : plannedAttached(state.agent, groups)
+      const pending = durable?.filter(groupId => !appliedSet.has(groupId)) ?? []
+      return renderMenuText(groups, appliedSet, pending)
+    },
+  })
+
+  // The meta-tool: visible to every agent of this preset, never group-filtered.
+  ctx.tools.register({
+    name: TOOL_GROUPS_TOOL,
+    description: 'List, attach, or detach on-demand tool groups. On-demand groups (peer interconnect, debug/observability) stay out of the tool list until attached; attaching one makes its tools available from the next turn. Static groups are always on and cannot be attached or detached.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'attach', 'detach'], description: 'list shows every group and its state; attach adds an on-demand group; detach removes it.' },
+        group: { type: 'string', description: 'Group id; required for attach and detach, ignored for list.' },
+      },
+      required: ['action'],
+    },
+    output: {
+      schema: OUTPUT_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: renderValue(value) }],
+    },
+    // Mutates the session's attached set: never overlap with sibling calls.
+    isConcurrencySafe: () => false,
+    async execute(args: unknown, exec?: ToolRunContext): Promise<ToolGroupsValue> {
+      const parsed = parseAction(args)
+      const agent = exec?.agent
+      const empty = (action: string, group: string, reason: string): ToolGroupsValue =>
+        ({ ok: false, action, group, attached: [], groups: [], reason })
+      if ('error' in parsed) return empty('invalid', '', parsed.error)
+      const { action } = parsed
+      const groupId = parsed.group ?? ''
+      if (agent === undefined) return empty(action, groupId, 'tool_groups requires a live session scope')
+      const state = states.get(agent.session.id) ?? ensure(agent)
+      if (state === undefined) return empty(action, groupId, 'tool_groups requires a live session scope')
+      const groups = catalog()
+      const applied = state.applied ?? []
+      // Planning reads the DURABLE set (the projection updates synchronously on
+      // append), so two attaches in one turn compose instead of overwriting.
+      const durable = plannedAttached(agent, groups)
+      const attached = durable ?? applied
+      const rows: GroupRow[] = groups.groups
+        .filter(group => group.mode === 'on-demand' && group.enabled)
+        .map(group => ({
+          id: group.id,
+          label: group.label,
+          purpose: group.purpose,
+          mode: group.mode,
+          enabled: group.enabled,
+          attached: attached.includes(group.id),
+          members: [...group.members],
+        }))
+      if (action === 'list') {
+        return { ok: true, action, group: '', attached: [...attached], groups: rows, reason: '' }
+      }
+      if (groupId.length === 0) return empty(action, groupId, `action "${action}" requires a group id`)
+      if (durable === null) {
+        return empty(action, groupId, 'tool groups are unavailable in this session (the presentation filter is failing open)')
+      }
+      const planned = planGroupAction(groups, new Set(durable), action, groupId)
+      if (!planned.ok) return empty(action, groupId, planned.reason)
+      agent.session.append(CHANGE_EVENT, { attached: [...planned.attached] }, { ignorable: true })
+      return { ok: true, action, group: groupId, attached: [...planned.attached], groups: rows, reason: '' }
+    },
+  })
+
+  // Lifecycle: base surface at creation, turn-boundary commit, release on disposal.
+  ctx.on('agent/created', ({ agent }) => { safeEnsure(agent) })
+  ctx.on('agent/disposed', ({ agent }) => {
+    const state = states.get(agent.session.id)
+    if (state === undefined) return
+    state.restriction?.()
+    state.restriction = undefined
+    installer.release(agent)
+    states.delete(agent.session.id)
+  })
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (event.type === 'turn/end') {
+      const state = states.get(session.id)
+      if (state !== undefined) safeEnsure(state.agent)
+      return
+    }
+    // A preset switch mounts a fresh plugin instance; re-ensure through it.
+    if ((event.type as string) === PRESET_SELECTED_EVENT) {
+      const state = states.get(session.id)
+      if (state !== undefined) safeEnsure(state.agent)
+    }
+  })
+}
+
+export { resolveToolGroups, denyNames, planGroupAction, preAttachFor, renderMenuText, SHIPPED_TOOL_GROUPS } from './catalog.js'
+export { toolGroupsProjection, applyToolGroupsProjection } from './projection.js'
+export type { ResolvedToolGroups, ToolGroupDefinition, ToolGroupMode } from './catalog.js'

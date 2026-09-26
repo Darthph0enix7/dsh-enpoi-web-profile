@@ -80,6 +80,9 @@ importers:
       dsh-enpoi-runtime-probe:
         specifier: workspace:*
         version: link:packages/enpoi-runtime-probe
+      dsh-enpoi-tool-groups:
+        specifier: workspace:*
+        version: link:packages/enpoi-tool-groups
       dsh-enpoi-ui-state:
         specifier: workspace:*
         version: link:packages/enpoi-ui-state
@@ -197,6 +200,12 @@ importers:
         version: link:../enpoi-contracts
 
   packages/enpoi-runtime-probe: {}
+
+  packages/enpoi-tool-groups:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
   packages/enpoi-ui-state: {}
 

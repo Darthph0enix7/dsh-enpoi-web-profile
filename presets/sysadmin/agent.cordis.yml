@@ -163,6 +163,15 @@
     - id: enpoi-debug
       name: 'dsh-enpoi-debug'
 
+    # Base tool surface + attachable on-demand families (doc 80). The plugin
+    # owns only presentation: a per-session filter over the presented catalog,
+    # the tool-groups menu, and the `tool_groups` meta-tool. The registry,
+    # every tool registration, and every grant stay exactly as they were.
+    - id: enpoi-tool-groups
+      name: 'dsh-enpoi-tool-groups'
+      config:
+        seat: sysadmin
+
 
 # ── compaction ──────────────────────────────────────────────────────────────
 
