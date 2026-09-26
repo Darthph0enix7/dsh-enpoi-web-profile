@@ -6,8 +6,11 @@ import {
   apply as applyKeeper,
   getBriefService,
   PREFETCH_DEBOUNCE_MS,
+  resetKeeperRouteHealth,
   type Config,
 } from '../src/index'
+
+beforeEach(() => { resetKeeperRouteHealth() })
 
 /**
  * Session mock that honours `snapshotEvents(from)` the way the real Session

@@ -49,6 +49,7 @@ import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { openMemoryDb } from "dsh-enpoi-memory";
 import { makePipeline } from "dsh-enpoi-memory";
 import { readOrchestrationDocument } from "dsh-enpoi-contracts";
@@ -69,7 +70,7 @@ function plainConfig(config) {
 var inject = ["llm"];
 function diag(line) {
   try {
-    const home = process.env.DSH_HOME ?? process.env.HOME ?? "/tmp";
+    const home = process.env.DSH_HOME ?? (process.env.VITEST === "true" ? join(tmpdir(), "dsh-keeper-vitest") : process.env.HOME ?? "/tmp");
     const dir = join(home.endsWith(".dsh") ? home : join(home, ".dsh"), "logs");
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, "enpoi-keeper.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
@@ -1091,9 +1092,9 @@ function splitClaims(text) {
   if (idx === -1) return [];
   const jsonPart = text.slice(idx + "CLAIMS:".length).trim();
   try {
-    const m = jsonPart.match(/\[[\s\S]*?\]/);
-    if (m === null) return [];
-    const arr = JSON.parse(m[0]);
+    const json = extractClaimsJsonArray(jsonPart);
+    if (json === null) return [];
+    const arr = JSON.parse(json);
     if (!Array.isArray(arr)) return [];
     return arr.filter((c) => typeof c === "object" && c !== null && typeof c.fact === "string").map((c) => ({
       fact: String(c.fact).trim().slice(0, 300),
@@ -1214,6 +1215,30 @@ function messageText(content) {
   }
   return "";
 }
+function extractClaimsJsonArray(text) {
+  const start = text.indexOf("[");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth += 1;
+    else if (ch === "]" || ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
 function validateKeeperOutput(text, finishKind, expectClaims = false) {
   if (finishKind === "max-tokens") {
     return { valid: false, reason: "Stream truncated by maxOutputTokens limit" };
@@ -1235,18 +1260,41 @@ function validateKeeperOutput(text, finishKind, expectClaims = false) {
       if (/^(none|n\/a|\[\s*\])$/i.test(rawClaims)) {
         return { valid: true };
       }
-      const jsonMatch = rawClaims.match(/\[[\s\S]*?\]/);
-      if (!jsonMatch) {
-        return { valid: false, reason: "CLAIMS tag present but JSON array was truncated/unclosed" };
+      const json = extractClaimsJsonArray(rawClaims);
+      if (json === null) {
+        return { valid: false, reason: "CLAIMS tag present but JSON array was truncated/unclosed", cutLike: true };
       }
       try {
-        JSON.parse(jsonMatch[0]);
+        JSON.parse(json);
       } catch (e) {
         return { valid: false, reason: `Malformed CLAIMS JSON: ${String(e)}` };
       }
     }
   }
   return { valid: true };
+}
+var KEEPER_ROUTE_FAILURE_THRESHOLD = 2;
+var KEEPER_ROUTE_QUARANTINE_MS = 5 * 6e4;
+var keeperRouteHealth = /* @__PURE__ */ new Map();
+function resetKeeperRouteHealth() {
+  keeperRouteHealth.clear();
+}
+function keeperRouteQuarantineRemaining(provider, model, now = Date.now()) {
+  const entry = keeperRouteHealth.get(`${provider}/${model}`);
+  return entry !== void 0 && entry.quarantinedUntil > now ? entry.quarantinedUntil - now : 0;
+}
+function recordKeeperRouteFailure(provider, model) {
+  const key = `${provider}/${model}`;
+  const entry = keeperRouteHealth.get(key) ?? { failures: 0, quarantinedUntil: 0 };
+  entry.failures += 1;
+  if (entry.failures >= KEEPER_ROUTE_FAILURE_THRESHOLD) {
+    entry.quarantinedUntil = Date.now() + KEEPER_ROUTE_QUARANTINE_MS;
+  }
+  keeperRouteHealth.set(key, entry);
+  return entry;
+}
+function clearKeeperRouteFailure(provider, model) {
+  keeperRouteHealth.delete(`${provider}/${model}`);
 }
 async function summarize(ctx, config, session, input, signal, route, systemPrompt, expectClaims) {
   const messages = [createUserMessage({
@@ -1271,11 +1319,25 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
     });
     const validation = validateKeeperOutput(result.text, result.finishKind, expectClaims);
     if (!validation.valid) {
-      throw new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`);
+      const error = new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`);
+      if (validation.cutLike === true) error.code = MAX_TOKENS_CUT_CODE;
+      throw error;
+    }
+    if (!expectClaims && cleanKeeperProse(result.text).length === 0) {
+      throw new Error(`Output invalid/truncated on ${provider}/${model}: empty output after keeper cleaning`);
     }
     return result.text;
   }
-  const attempts = keeperAttempts(route);
+  const allAttempts = keeperAttempts(route);
+  const enabledAttempts = allAttempts.filter(
+    (attempt) => keeperRouteQuarantineRemaining(attempt.provider, attempt.model) === 0
+  );
+  const attempts = enabledAttempts.length > 0 ? enabledAttempts : allAttempts;
+  if (enabledAttempts.length > 0 && attempts.length < allAttempts.length) {
+    const skipped = allAttempts.filter((attempt) => keeperRouteQuarantineRemaining(attempt.provider, attempt.model) > 0).map((attempt) => `${attempt.provider}/${attempt.model}`);
+    process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: skipping quarantined link(s): ${skipped.join(", ")}
+`);
+  }
   const configuredCap = config.maxOutputTokens ?? 2048;
   const escalatedCap = Math.min(configuredCap * 2, KEEPER_MAX_OUTPUT_TOKENS);
   let lastError;
@@ -1284,6 +1346,7 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
     let failure;
     try {
       const text = await executeRoute(attempt.provider, attempt.model, configuredCap, attempt.reasoningEffort);
+      clearKeeperRouteFailure(attempt.provider, attempt.model);
       if (index > 0) {
         process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: recovered on link ${index + 1} (${attempt.provider}/${attempt.model})
 `);
@@ -1294,6 +1357,7 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
       if (!signal.aborted && isMaxTokensCut(error) && escalatedCap > configuredCap) {
         try {
           const text = await executeRoute(attempt.provider, attempt.model, escalatedCap, attempt.reasoningEffort);
+          clearKeeperRouteFailure(attempt.provider, attempt.model);
           process.stderr.write(
             `[model-chain] ${route.chainId ?? "keeper"}: link ${index + 1} (${attempt.provider}/${attempt.model}) hit maxOutputTokens at ${configuredCap}; retried at ${escalatedCap} and recovered
 `
@@ -1305,6 +1369,15 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
       }
     }
     if (signal.aborted) throw failure;
+    const health = recordKeeperRouteFailure(attempt.provider, attempt.model);
+    if (health.quarantinedUntil > Date.now()) {
+      const until = new Date(health.quarantinedUntil).toISOString();
+      process.stderr.write(
+        `[model-chain] ${route.chainId ?? "keeper"}: route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)
+`
+      );
+      diag(`route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)`);
+    }
     lastError = failure;
     const next = attempts[index + 1];
     if (next === void 0) break;
@@ -1372,6 +1445,8 @@ export {
   KEEPER_CACHE_CAP,
   KEEPER_MAX_OUTPUT_TOKENS,
   KEEPER_MESSAGE_KIND,
+  KEEPER_ROUTE_FAILURE_THRESHOLD,
+  KEEPER_ROUTE_QUARANTINE_MS,
   PREFETCH_DEBOUNCE_MS,
   apply,
   buildTemplateCheckpoint,
@@ -1379,16 +1454,19 @@ export {
   cleanKeeperProse,
   createBriefService,
   createCheckpointService,
+  extractClaimsJsonArray,
   getBriefService,
   getCheckpointService,
   getKeeperBookkeeping,
   inject,
   keeperAttempts,
   keeperProseRejection,
+  keeperRouteQuarantineRemaining,
   latestCheckpoint,
   latestCheckpointMessageSeq,
   name,
   renderCheckpointBlock,
+  resetKeeperRouteHealth,
   resolveKeeperParams,
   resolveKeeperRoute,
   splitClaims,

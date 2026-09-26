@@ -1,7 +1,10 @@
-import { describe, expect, it, vi, afterEach } from 'vitest'
+import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import {
   keeperAttempts,
+  keeperRouteQuarantineRemaining,
+  resetKeeperRouteHealth,
   resolveKeeperRoute,
+  splitClaims,
   summarize,
   type Config,
 } from '../src/index.ts'
@@ -76,6 +79,12 @@ function makeSession() {
 
 afterEach(() => {
   vi.restoreAllMocks()
+})
+
+// Route health is process-local; each spec starts from a clean slate so the
+// quarantine window of one test never leaks into another.
+beforeEach(() => {
+  resetKeeperRouteHealth()
 })
 
 describe('keeper chain route resolution', () => {
@@ -279,5 +288,143 @@ describe('keeper chain link iteration (summarize)', () => {
       'system',
       false,
     )).rejects.toThrow(/all summary routes failed \(2 attempt\(s\)\)/)
+  })
+})
+
+describe('keeper route health (empty landings + quarantine)', () => {
+  const route = {
+    provider: 'p1', model: 'm1', fallbackProvider: 'f', fallbackModel: 'fm',
+    chainId: 'stable', chainLinks: CHAIN.links,
+  }
+
+  it('fails over when a link lands empty output (clean stop, no text)', async () => {
+    const calls: string[] = []
+    const stream = async function* (options: { provider: string; model: string }) {
+      calls.push(`${options.provider}/${options.model}`)
+      if (options.provider === 'p1') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield* goodStream()()
+    }
+    const ctx = makeCtx({ stream })
+    const result = await summarize(
+      ctx as never, baseConfig, makeSession() as never, 'recent events',
+      new AbortController().signal, route, 'system', false,
+    )
+    expect(calls).toEqual(['p1/m1', 'p2/m2'])
+    expect(result.route).toBe('p2/m2')
+  })
+
+  it('fails over when a link lands only negative-filler sections (cleans to empty)', async () => {
+    const filler = '🎯 ACTIVE GOAL: none\n- No blockers remain\n- No open questions'
+    const calls: string[] = []
+    const stream = async function* (options: { provider: string; model: string }) {
+      calls.push(`${options.provider}/${options.model}`)
+      if (options.provider === 'p1') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: filler }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: filler } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield* goodStream()()
+    }
+    const ctx = makeCtx({ stream })
+    const result = await summarize(
+      ctx as never, baseConfig, makeSession() as never, 'recent events',
+      new AbortController().signal, route, 'system', false,
+    )
+    expect(calls).toEqual(['p1/m1', 'p2/m2'])
+    expect(result.route).toBe('p2/m2')
+  })
+
+  it('quarantines a route after N consecutive failures and skips it on the next run', async () => {
+    const calls: string[] = []
+    const stream = async function* (options: { provider: string; model: string }) {
+      calls.push(`${options.provider}/${options.model}`)
+      if (options.provider === 'p1') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield* goodStream()()
+    }
+    const ctx = makeCtx({ stream })
+    const written: string[] = []
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true })
+
+    for (let run = 0; run < 3; run += 1) {
+      const result = await summarize(
+        ctx as never, baseConfig, makeSession() as never, 'recent events',
+        new AbortController().signal, route, 'system', false,
+      )
+      expect(result.route).toBe('p2/m2')
+    }
+    expect(calls).toEqual(['p1/m1', 'p2/m2', 'p1/m1', 'p2/m2', 'p2/m2'])
+    expect(keeperRouteQuarantineRemaining('p1', 'm1')).toBeGreaterThan(0)
+    expect(written.some(line => line.includes('quarantined until'))).toBe(true)
+    expect(written.some(line => line.includes('skipping quarantined link(s): p1/m1'))).toBe(true)
+  })
+
+  it('keeps a normal landing on link 1 unchanged (no failover, no health)', async () => {
+    const ctx = makeCtx({})
+    const result = await summarize(
+      ctx as never, baseConfig, makeSession() as never, 'recent events',
+      new AbortController().signal, route, 'system', false,
+    )
+    expect(ctx.streamSpy).toHaveBeenCalledTimes(1)
+    expect(result.route).toBe('p1/m1')
+    expect(keeperRouteQuarantineRemaining('p1', 'm1')).toBe(0)
+  })
+})
+
+describe('keeper claims JSON extraction', () => {
+  const route = {
+    provider: 'p1', model: 'm1', fallbackProvider: 'f', fallbackModel: 'fm',
+    chainId: 'stable', chainLinks: CHAIN.links,
+  }
+
+  it('accepts claims whose text contains brackets (no false route failure)', async () => {
+    const text = 'CLAIMS: [{"fact":"fixed the [bug] in foo.ts","category":"PROJECT","source":"tool"}]'
+    const stream = async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const result = await summarize(
+      ctx as never, baseConfig, makeSession() as never, 'recent events',
+      new AbortController().signal, route, 'system', true,
+    )
+    expect(ctx.streamSpy).toHaveBeenCalledTimes(1)
+    expect(result.route).toBe('p1/m1')
+    expect(splitClaims(result.text)).toHaveLength(1)
+  })
+
+  it('retries a truncated claims block at the escalated cap (cut-shaped)', async () => {
+    const caps: number[] = []
+    const stream = async function* (options: { provider: string; model: string; maxTokens?: number }) {
+      caps.push(options.maxTokens ?? 0)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      if ((options.maxTokens ?? 0) <= 2048) {
+        yield { type: 'text-delta', index: 0, text: 'CLAIMS: [{"fact":"cut' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const text = 'CLAIMS: [{"fact":"done","category":"PROJECT","source":"tool"}]'
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const result = await summarize(
+      ctx as never, baseConfig, makeSession() as never, 'recent events',
+      new AbortController().signal, route, 'system', true,
+    )
+    expect(caps).toEqual([2048, 4096])
+    expect(result.route).toBe('p1/m1')
   })
 })

@@ -2,11 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   resolveKeeperRoute,
   cleanKeeperProse,
+  resetKeeperRouteHealth,
   splitClaims,
   createBriefService,
   apply,
   type Config,
 } from '../src/index'
+
+beforeEach(() => { resetKeeperRouteHealth() })
 
 /**
  * Minimal session mock satisfying the keeper's reads: `frameInput` walks
@@ -184,6 +187,12 @@ describe('enpoi-context-keeper splitClaims (trust labels)', () => {
   it('returns [] for no CLAIMS block or malformed JSON', () => {
     expect(splitClaims('just prose')).toEqual([])
     expect(splitClaims('CLAIMS: [{"fact":')).toEqual([])
+  })
+
+  it('parses claims whose text contains JSON brackets (live defect 2026-09-26)', () => {
+    const claims = splitClaims('CLAIMS: [{"fact":"fixed the [bug] in foo.ts","category":"PROJECT","source":"tool"}]')
+    expect(claims).toHaveLength(1)
+    expect(claims[0]!.fact).toBe('fixed the [bug] in foo.ts')
   })
 })
 

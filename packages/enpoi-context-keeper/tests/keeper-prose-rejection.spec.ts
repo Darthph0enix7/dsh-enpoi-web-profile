@@ -1,12 +1,15 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   cleanKeeperProse,
   keeperProseRejection,
   createBriefService,
   createCheckpointService,
+  resetKeeperRouteHealth,
   type Config,
   type CheckpointData,
 } from '../src/index'
+
+beforeEach(() => { resetKeeperRouteHealth() })
 
 /**
  * The real live garbage (2026-09-19, freellmapi/auto, session-d84cadc0 →

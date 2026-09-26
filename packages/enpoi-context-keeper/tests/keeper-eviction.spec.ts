@@ -8,8 +8,11 @@ import {
   getKeeperBookkeeping,
   BoundedSessionCache,
   KEEPER_CACHE_CAP,
+  resetKeeperRouteHealth,
   type Config,
 } from '../src/index'
+
+beforeEach(() => { resetKeeperRouteHealth() })
 
 /**
  * Session mock that serves both paths: `snapshotEvents` reflects appends (the

@@ -1,14 +1,17 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   buildTemplateCheckpoint,
   checkpointTelemetry,
   createCheckpointService,
   latestCheckpoint,
   renderCheckpointBlock,
+  resetKeeperRouteHealth,
   apply as applyKeeper,
   type CheckpointData,
   type Config,
 } from '../src/index'
+
+beforeEach(() => { resetKeeperRouteHealth() })
 
 /**
  * Minimal session mock: `snapshotEvents` reflects appended events, `seq` is the
@@ -230,12 +233,16 @@ describe('enpoi-context-keeper CheckpointService', () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     let calls = 0
+    // A publishable brief needs at least one content line: the empty-landing
+    // failover (live defect 2026-09-26) now treats header-only output as a
+    // route failure, so a bare header would legitimately fail over.
+    const brief = '🎯 ACTIVE GOAL: gated goal\n- gated bullet'
     const stream = async function* () {
       calls += 1
       await gate
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: gated goal' }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: gated goal' } }
+      yield { type: 'text-delta', index: 0, text: brief }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: brief } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
     const { ctx } = makeCtx({ stream })

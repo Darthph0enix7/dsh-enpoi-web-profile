@@ -50,6 +50,7 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 import { deadline } from '@deepseek-ai/dsh-timeout'
 import { appendFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { openMemoryDb } from 'dsh-enpoi-memory'
 import { makePipeline } from 'dsh-enpoi-memory'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
@@ -83,7 +84,11 @@ export const inject = ['llm']
 /** Minimal file diagnostics — the Cordis logger only buffers (no console sink). */
 function diag(line: string): void {
   try {
-    const home = process.env.DSH_HOME ?? process.env.HOME ?? '/tmp'
+    // Unit runs (vitest) must not append fixture noise to the operator's live
+    // journal; an explicit DSH_HOME still wins (the prefetch spec asserts its
+    // own redirected log).
+    const home = process.env.DSH_HOME
+      ?? (process.env.VITEST === 'true' ? join(tmpdir(), 'dsh-keeper-vitest') : process.env.HOME ?? '/tmp')
     const dir = join(home.endsWith('.dsh') ? home : join(home, '.dsh'), 'logs')
     mkdirSync(dir, { recursive: true })
     appendFileSync(join(dir, 'enpoi-keeper.log'), `${new Date().toISOString()} ${line}\n`)
@@ -1635,12 +1640,13 @@ export function splitClaims(text: string): Array<{ fact: string; category: strin
   if (idx === -1) return []
   const jsonPart = text.slice(idx + 'CLAIMS:'.length).trim()
   try {
-    // Non-greedy match (Oracle defect 5): the greedy [\s\S]* ran to the LAST
-    // ']' in the output, so trailing bracketed prose broke JSON.parse and
-    // silently dropped the whole pass's claims.
-    const m = jsonPart.match(/\[[\s\S]*?\]/)
-    if (m === null) return []
-    const arr: unknown = JSON.parse(m[0])
+    // Balanced extraction (Oracle defect 5 + live defect 2026-09-26): greedy
+    // matching ran to the LAST ']' (trailing bracketed prose broke parse);
+    // non-greedy stopped at the FIRST ']' even inside a string value. The
+    // string-aware scanner honours both.
+    const json = extractClaimsJsonArray(jsonPart)
+    if (json === null) return []
+    const arr: unknown = JSON.parse(json)
     if (!Array.isArray(arr)) return []
     return arr
       .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null && typeof (c as Record<string, unknown>).fact === 'string')
@@ -1790,9 +1796,45 @@ function messageText(content: unknown): string {
   return ''
 }
 
+/**
+ * Extract the first balanced JSON array from `text`, ignoring brackets inside
+ * JSON strings and escapes. The non-greedy `\[[\s\S]*?\]` match it replaces
+ * stopped at the first `]` even inside a string value (live defect 2026-09-26:
+ * a claim containing `[bug]` made both chain links reject valid JSON with
+ * "Unterminated string" and the claims pass exhausted the chain).
+ * @param text - raw text beginning at/near the array's `[`.
+ * @returns the balanced array substring, or null when unclosed.
+ */
+export function extractClaimsJsonArray(text: string): string | null {
+  const start = text.indexOf('[')
+  if (start === -1) return null
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '[' || ch === '{') depth += 1
+    else if (ch === ']' || ch === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, i + 1)
+      if (depth < 0) return null
+    }
+  }
+  return null
+}
+
 interface KeeperValidationResult {
   valid: boolean
   reason?: string
+  /** Whether the failure is truncation-shaped (cap escalation may recover it). */
+  cutLike?: boolean
 }
 
 /**
@@ -1830,13 +1872,13 @@ function validateKeeperOutput(text: string, finishKind?: string, expectClaims = 
       if (/^(none|n\/a|\[\s*\])$/i.test(rawClaims)) {
         return { valid: true }
       }
-      // Non-greedy JSON block match
-      const jsonMatch = rawClaims.match(/\[[\s\S]*?\]/)
-      if (!jsonMatch) {
-        return { valid: false, reason: 'CLAIMS tag present but JSON array was truncated/unclosed' }
+      // Balanced (string-aware) JSON block extraction — see extractClaimsJsonArray.
+      const json = extractClaimsJsonArray(rawClaims)
+      if (json === null) {
+        return { valid: false, reason: 'CLAIMS tag present but JSON array was truncated/unclosed', cutLike: true }
       }
       try {
-        JSON.parse(jsonMatch[0])
+        JSON.parse(json)
       } catch (e) {
         return { valid: false, reason: `Malformed CLAIMS JSON: ${String(e)}` }
       }
@@ -1844,6 +1886,59 @@ function validateKeeperOutput(text: string, finishKind?: string, expectClaims = 
   }
 
   return { valid: true }
+}
+
+/**
+ * Consecutive final failures (any cause: empty landing, timeout, cap, invalid
+ * output) before a keeper route link is quarantined. Mirrors the web-search
+ * provider's bounded identity quarantine, but keyed on the route the keeper
+ * actually selects (`provider/model`): the shared `llm` seam's `poolStatus`
+ * reports credential-identity HTTP cooldowns, not per-route semantic health,
+ * so the keeper keeps this in process memory (singleton, resets on restart).
+ */
+export const KEEPER_ROUTE_FAILURE_THRESHOLD = 2
+
+/** In-memory quarantine window after repeated keeper route failures (web-search parity: 5 min). */
+export const KEEPER_ROUTE_QUARANTINE_MS = 5 * 60_000
+
+interface KeeperRouteHealth {
+  failures: number
+  quarantinedUntil: number
+}
+
+const keeperRouteHealth = new Map<string, KeeperRouteHealth>()
+
+/** Clear all in-memory route health (tests / operator diagnostics). */
+export function resetKeeperRouteHealth(): void {
+  keeperRouteHealth.clear()
+}
+
+/** Remaining quarantine for one route in ms (0 = healthy / not tripped). */
+export function keeperRouteQuarantineRemaining(provider: string, model: string, now = Date.now()): number {
+  const entry = keeperRouteHealth.get(`${provider}/${model}`)
+  return entry !== undefined && entry.quarantinedUntil > now ? entry.quarantinedUntil - now : 0
+}
+
+/**
+ * Count one final failure of a route link. The failure streak survives a
+ * quarantine expiry (a repeatedly bad route is re-quarantined on its very next
+ * failure) and is cleared only by an actual landing success.
+ * @returns the updated health row.
+ */
+function recordKeeperRouteFailure(provider: string, model: string): KeeperRouteHealth {
+  const key = `${provider}/${model}`
+  const entry = keeperRouteHealth.get(key) ?? { failures: 0, quarantinedUntil: 0 }
+  entry.failures += 1
+  if (entry.failures >= KEEPER_ROUTE_FAILURE_THRESHOLD) {
+    entry.quarantinedUntil = Date.now() + KEEPER_ROUTE_QUARANTINE_MS
+  }
+  keeperRouteHealth.set(key, entry)
+  return entry
+}
+
+/** A landed success clears the route's failure streak and quarantine. */
+function clearKeeperRouteFailure(provider: string, model: string): void {
+  keeperRouteHealth.delete(`${provider}/${model}`)
 }
 
 /** One LLM completion with resolved primary route + fixed fallback (soft-degrading + cutoff shield). */
@@ -1882,14 +1977,36 @@ export async function summarize(
     // CLAIMS JSON) — an invalid result throws, so the caller advances.
     const validation = validateKeeperOutput(result.text, result.finishKind, expectClaims)
     if (!validation.valid) {
-      throw new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`)
+      const error = new Error(`Output invalid/truncated on ${provider}/${model}: ${validation.reason}`) as Error & { code?: string }
+      // A structurally truncated claims block is cut-shaped: earn the same
+      // one-shot escalated-cap retry as a provider max-tokens finish.
+      if (validation.cutLike === true) error.code = MAX_TOKENS_CUT_CODE
+      throw error
+    }
+    // An empty landing after prose cleaning is still a dead route (live defect
+    // 2026-09-26: a degraded route emitting only negative-filler sections
+    // landed 0 chars and negative-cached without ever trying the next link).
+    if (!expectClaims && cleanKeeperProse(result.text).length === 0) {
+      throw new Error(`Output invalid/truncated on ${provider}/${model}: empty output after keeper cleaning`)
     }
     return result.text
   }
 
   // Frozen attempt list: chain links when the keeper persona assigned a chain,
-  // else primary → fallback. Never re-read between attempts.
-  const attempts = keeperAttempts(route)
+  // else primary → fallback. Never re-read between attempts. Links inside
+  // their bounded quarantine window are skipped; fail-open if every link is
+  // quarantined (a transient quarantine must never wedge the keeper).
+  const allAttempts = keeperAttempts(route)
+  const enabledAttempts = allAttempts.filter(
+    attempt => keeperRouteQuarantineRemaining(attempt.provider, attempt.model) === 0,
+  )
+  const attempts = enabledAttempts.length > 0 ? enabledAttempts : allAttempts
+  if (enabledAttempts.length > 0 && attempts.length < allAttempts.length) {
+    const skipped = allAttempts
+      .filter(attempt => keeperRouteQuarantineRemaining(attempt.provider, attempt.model) > 0)
+      .map(attempt => `${attempt.provider}/${attempt.model}`)
+    process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: skipping quarantined link(s): ${skipped.join(', ')}\n`)
+  }
   const configuredCap = config.maxOutputTokens ?? 2048
   // One same-link retry at the doc-38 ceiling when a summary is cut by the
   // configured output cap. A long brief overflowing 2048 output tokens used to
@@ -1902,6 +2019,7 @@ export async function summarize(
     let failure: unknown
     try {
       const text = await executeRoute(attempt.provider, attempt.model, configuredCap, attempt.reasoningEffort)
+      clearKeeperRouteFailure(attempt.provider, attempt.model)
       if (index > 0) {
         process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: recovered on link ${index + 1} (${attempt.provider}/${attempt.model})\n`)
       }
@@ -1911,6 +2029,7 @@ export async function summarize(
       if (!signal.aborted && isMaxTokensCut(error) && escalatedCap > configuredCap) {
         try {
           const text = await executeRoute(attempt.provider, attempt.model, escalatedCap, attempt.reasoningEffort)
+          clearKeeperRouteFailure(attempt.provider, attempt.model)
           process.stderr.write(
             `[model-chain] ${route.chainId ?? 'keeper'}: link ${index + 1} (${attempt.provider}/${attempt.model})`
             + ` hit maxOutputTokens at ${configuredCap}; retried at ${escalatedCap} and recovered\n`,
@@ -1922,6 +2041,18 @@ export async function summarize(
       }
     }
     if (signal.aborted) throw failure
+    // Empty/timeout/cut/invalid landings are route failures: one strike per
+    // summary attempt; a link at the threshold is quarantined for a bounded
+    // window so the next wake goes straight to the next enabled link.
+    const health = recordKeeperRouteFailure(attempt.provider, attempt.model)
+    if (health.quarantinedUntil > Date.now()) {
+      const until = new Date(health.quarantinedUntil).toISOString()
+      process.stderr.write(
+        `[model-chain] ${route.chainId ?? 'keeper'}: route ${attempt.provider}/${attempt.model}`
+        + ` quarantined until ${until} (${health.failures} consecutive failures)\n`,
+      )
+      diag(`route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)`)
+    }
     lastError = failure
     const next = attempts[index + 1]
     if (next === undefined) break
