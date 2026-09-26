@@ -24,7 +24,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution, ToolRunContext, PreToolDecision } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
@@ -231,8 +231,10 @@ function renderValue(value: ToolGroupsValue): string {
     lines.push(`tool_groups ${value.action} refused: ${value.reason}`)
   } else if (value.action === 'list') {
     lines.push(`tool_groups: attached [${value.attached.join(', ')}]`)
+  } else if (value.action === 'attach') {
+    lines.push(`tool_groups attach ${value.group}: ATTACHED. Its tools are NOT in your tool list yet, and calling them now fails. END YOUR TURN NOW — they become callable from the next turn; do not retry them in this turn.`)
   } else {
-    lines.push(`tool_groups ${value.action} ${value.group}: queued — the attached set is now [${value.attached.join(', ')}]; the tool block updates at the next turn.`)
+    lines.push(`tool_groups detach ${value.group}: DETACHED. Its tools leave your tool list from the next turn; calls already running still finish.`)
   }
   for (const group of value.groups) {
     lines.push(`- ${group.id} (${group.mode}${group.enabled ? '' : ', disabled'}${group.attached ? ', attached' : ''}): ${group.purpose} — ${group.members.join(', ')}`)
@@ -385,7 +387,7 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   // The meta-tool: visible to every agent of this preset, never group-filtered.
   ctx.tools.register({
     name: TOOL_GROUPS_TOOL,
-    description: 'List, attach, or detach on-demand tool groups. On-demand groups (peer interconnect, debug/observability) stay out of the tool list until attached; attaching one makes its tools available from the next turn. Static groups are always on and cannot be attached or detached.',
+    description: 'List, attach, or detach on-demand tool groups. On-demand groups (peer interconnect, debug/observability) stay out of the tool list until attached; after `attach` the group\'s tools become callable only FROM THE NEXT TURN, so end the turn after attaching before calling them. Static groups are always on and cannot be attached or detached.',
     parameters: {
       type: 'object',
       properties: {
@@ -464,6 +466,45 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
     installer.release(agent)
     states.delete(agent.session.id)
   })
+
+  /**
+   * The hint a call to a not-currently-callable group tool carries instead of a
+   * bare `UNKNOWN_TOOL`: pending (attached this turn), never attached, or
+   * operator-disabled. Ungrouped, static, and callable names return undefined
+   * so the call proceeds untouched.
+   */
+  const groupCallHint = (exec: ToolExecution): string | undefined => {
+    const agent = exec.agent
+    if (agent === undefined) return undefined
+    const state = states.get(agent.session.id)
+    if (state === undefined) return undefined
+    const groups = catalog()
+    const callable = new Set(state.applied ?? [])
+    const durable = new Set(plannedAttached(agent, groups) ?? callable)
+    for (const group of groups.groups) {
+      if (group.mode !== 'on-demand' || !group.members.includes(exec.name)) continue
+      if (!group.enabled) {
+        return `tool "${exec.name}" belongs to tool group "${group.id}", which is disabled by the operator and can never be attached.`
+      }
+      if (durable.has(group.id) && !callable.has(group.id)) {
+        return `tool "${exec.name}" belongs to tool group "${group.id}", which was attached this turn and is NOT callable yet. End your turn now — it becomes available from the next turn; do not retry it in this turn.`
+      }
+      if (!durable.has(group.id)) {
+        return `tool "${exec.name}" belongs to tool group "${group.id}", which is not attached. Call tool_groups with action "attach" and group "${group.id}" first; its tools become callable from the next turn.`
+      }
+      return undefined
+    }
+    return undefined
+  }
+
+  // Replace the bare UNKNOWN_TOOL for a group tool that is not callable yet
+  // with the reason and the next action. The waterfall only short-circuits for
+  // that case; every other call delegates unchanged.
+  ctx.on('tools/pre-execute', (exec: ToolExecution, next: () => Promise<PreToolDecision>) => {
+    const hint = groupCallHint(exec)
+    return hint === undefined ? next() : Promise.resolve({ kind: 'deny' as const, reason: hint })
+  })
+
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type === 'turn/end') {
       const state = states.get(session.id)

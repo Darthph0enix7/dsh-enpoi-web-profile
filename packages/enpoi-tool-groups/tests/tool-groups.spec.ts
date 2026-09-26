@@ -160,6 +160,20 @@ describe('tool-group catalog', () => {
     const catalog = catalogWith({ toolGroups: { groups: { ghost: { enabled: false } } } })
     expect(denyNames(catalog, new Set())).toEqual(denyNames(catalogWith(), new Set()))
     expect(denyNames(catalog, new Set())).not.toContain('some_unknown_tool')
+    expect(denyNames(catalog, new Set())).not.toContain('ungrouped_synthetic')
+  })
+
+  it('never denies the reserved presentation transport, even if a hidden group lists it', () => {
+    const catalog = catalogWith()
+    const withRunCode = {
+      ...catalog,
+      groups: catalog.groups.map(group => group.id === 'peer'
+        ? { ...group, members: [...group.members, 'run_code'] }
+        : group),
+    }
+    const denied = denyNames(withRunCode as any, new Set())
+    expect(denied).toContain('peer_ask')
+    expect(denied).not.toContain('run_code')
   })
 
   it('always denies a disabled group, attached or not', () => {
@@ -417,5 +431,67 @@ describe('tool_groups plugin', () => {
     expect(logs.some(line => line.includes('[enpoi-tool-groups] mounted')
       && line.includes('seat=orchestrator')
       && line.includes('on-demand: peer, debug'))).toBe(true)
+  })
+
+  it('tells the model to end the turn after attach (tools are next-turn only)', async () => {
+    const projections = fakeProjections()
+    const { ctx, tool } = mount({ projections })
+    const agent = fakeAgent('s-message', (type, data) => {
+      if (type === 'tool-groups/change') projections.set('s-message', data.attached)
+    })
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+
+    const attached = await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
+    const attachText = tool.output.render({}, attached)[0].text
+    expect(attachText).toContain('END YOUR TURN NOW')
+    expect(attachText).toContain('next turn')
+    expect(attachText).toContain('do not retry')
+
+    const detached = await tool.execute({ action: 'detach', group: 'peer' }, EXEC(agent))
+    const detachText = tool.output.render({}, detached)[0].text
+    expect(detachText).toContain('next turn')
+  })
+
+  it('replaces UNKNOWN_TOOL with a next-action hint for not-callable group tools', async () => {
+    const projections = fakeProjections()
+    const { ctx, tool } = mount({ projections })
+    const agent = fakeAgent('s-hint', (type, data) => {
+      if (type === 'tool-groups/change') projections.set('s-hint', data.attached)
+    })
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    const handlers = ctx.handlers.get('tools/pre-execute') ?? []
+    expect(handlers).toHaveLength(1)
+    const run = (name: string) => handlers[0]({ agent, name }, () => Promise.resolve({ kind: 'allow' }))
+
+    // Never attached: point at the attach action.
+    const unattached = await run('session_debug')
+    expect(unattached.kind).toBe('deny')
+    expect(unattached.reason).toContain('not attached')
+    expect(unattached.reason).toContain('attach')
+
+    // Attached this turn but not callable yet: end the turn.
+    await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
+    const pending = await run('peer_status')
+    expect(pending.kind).toBe('deny')
+    expect(pending.reason).toContain('End your turn now')
+    expect(pending.reason).toContain('next turn')
+
+    // Static, ungrouped, and meta-tool names delegate untouched.
+    expect((await run('read')).kind).toBe('allow')
+    expect((await run('tool_groups')).kind).toBe('allow')
+
+    // After the boundary the call is normal again.
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+    expect((await run('peer_status')).kind).toBe('allow')
+  })
+
+  it('hints operator-disabled membership instead of UNKNOWN_TOOL', async () => {
+    const { ctx } = mount({ document: { toolGroups: { groups: { peer: { enabled: false } } } } })
+    const agent = fakeAgent('s-disabled')
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    const handler = (ctx.handlers.get('tools/pre-execute') ?? [])[0]
+    const decision = await handler({ agent, name: 'peer_ask' }, () => Promise.resolve({ kind: 'allow' }))
+    expect(decision.kind).toBe('deny')
+    expect(decision.reason).toContain('disabled by the operator')
   })
 })

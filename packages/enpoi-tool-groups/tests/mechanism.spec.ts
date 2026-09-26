@@ -34,7 +34,7 @@ async function setup() {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  for (const name of [...PEER, ...DEBUG, 'read', 'bash']) ctx.tools.register(fixtureTool(name) as never)
+  for (const name of [...PEER, ...DEBUG, 'read', 'bash', 'synthetic_ungrouped']) ctx.tools.register(fixtureTool(name) as never)
   return ctx
 }
 
@@ -92,13 +92,38 @@ describe('real composition: scope filter + plugin', () => {
       const base = ctx.tools.schemas(agent).map(tool => tool.name)
       expect([...PEER, ...DEBUG].every(name => !base.includes(name))).toBe(true)
       expect(['read', 'bash'].every(name => base.includes(name))).toBe(true)
+      // The ungrouped tool is not a group member: it must stay present.
+      expect(base).toContain('synthetic_ungrouped')
 
       await definition!.execute({ action: 'attach', group: 'peer' }, { agent } as never)
       expect(appended.at(-1)).toEqual({ type: 'tool-groups/change', data: { attached: ['peer'] } })
+
+      // Before the boundary the peer tool is not callable: the call must carry
+      // the next-turn hint, not a bare UNKNOWN_TOOL.
+      const pending = await ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: 'c-pending' as never,
+        name: 'peer_status',
+        arguments: {},
+        agent: agent as never,
+      })
+      expect(pending.isError).toBe(true)
+      expect(JSON.stringify(pending.content)).toContain('End your turn now')
+
       ctx.emit('session/event', agent.session as never, { type: 'turn/end', data: { turn: 1 } } as never)
       const after = ctx.tools.schemas(agent).map(tool => tool.name)
       expect(PEER.every(name => after.includes(name))).toBe(true)
       expect(DEBUG.every(name => !after.includes(name))).toBe(true)
+      expect(after).toContain('synthetic_ungrouped')
+
+      const settled = await ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: 'c-settled' as never,
+        name: 'peer_status',
+        arguments: {},
+        agent: agent as never,
+      })
+      expect(settled.isError).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }

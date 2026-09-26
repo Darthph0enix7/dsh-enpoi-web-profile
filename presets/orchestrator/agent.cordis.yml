@@ -102,6 +102,10 @@
         bash for pipelines, commands, and anything the dedicated tools cannot
         express — do not wrap cat/find/rg in a shell command when the
         dedicated tool fits; shell output is bulkier and less structured.
+      - Your FIRST search action must be the grep or glob tool, not a shell
+        search (grep/rg/find/ls): call the tool first, then do any remaining
+        shell work separately. A shell search is a last resort when no
+        dedicated tool can express the query.
       - Before any git command, confirm you are in a repository (git rev-parse
         --is-inside-work-tree); if not, verify a change by reading the file —
         never run git diff outside a work tree.

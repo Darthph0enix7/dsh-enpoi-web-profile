@@ -236,9 +236,21 @@ function sortGroupIds(ids: Iterable<string>): string[] {
 }
 
 /**
+ * Tool names the presentation transport owns. `tools.restrict()` refuses a
+ * filter that names one, and the transport is inserted outside capability
+ * filtering, so a group definition can never remove it.
+ */
+const RESERVED_PRESENTATION_NAMES: ReadonlySet<string> = new Set(['run_code'])
+
+/**
  * The exact tool names the presentation filter must deny for one applied
- * attached set. Only members of known group definitions are ever named:
- * a name in no group, or a group absent from the catalog, is never hidden.
+ * attached set.
+ *
+ * The rule is deny-only and membership-driven: a name is denied ONLY when it
+ * is a member of a disabled group, or of an enabled `on-demand` group that is
+ * not attached. A tool belonging to no group — and the reserved presentation
+ * transport — is never named here, so it stays present (fail open); only
+ * explicit `on-demand` membership (or an operator disable) can remove a tool.
  * @param catalog - the resolved catalog.
  * @param attached - applied attached group ids.
  * @returns deny names in catalog order.
@@ -250,7 +262,7 @@ export function denyNames(catalog: ResolvedToolGroups, attached: ReadonlySet<str
     const hidden = !group.enabled || (group.mode === 'on-demand' && !attached.has(group.id))
     if (!hidden) continue
     for (const member of group.members) {
-      if (seen.has(member)) continue
+      if (seen.has(member) || RESERVED_PRESENTATION_NAMES.has(member)) continue
       seen.add(member)
       denied.push(member)
     }
