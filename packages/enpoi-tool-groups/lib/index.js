@@ -1,6 +1,6 @@
 // src/index.ts
 import Schema from "@deepseek-ai/schemastery";
-import { createScope } from "@deepseek-ai/dsh-scope";
+import { createScope, scopeOf } from "@deepseek-ai/dsh-scope";
 import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 
 // src/catalog.ts
@@ -275,6 +275,14 @@ function agentIdOfScope(scope) {
   const candidate = scope;
   return typeof candidate.id === "string" && candidate.id.length > 0 ? candidate.id : void 0;
 }
+function reportIncident(ctx, kind, message) {
+  try {
+    const diagnostics = ctx.get("diagnostics");
+    if (typeof diagnostics?.report !== "function") return;
+    diagnostics.report({ kind, message });
+  } catch {
+  }
+}
 function parseAction(args) {
   const record = args !== null && typeof args === "object" ? args : {};
   const action = record["action"];
@@ -334,11 +342,22 @@ function renderValue(value) {
   return lines.join("\n");
 }
 function apply(ctx, config = {}, seams = {}) {
+  try {
+    mount(ctx, config, seams);
+  } catch (error) {
+    const message = `enpoi-tool-groups mount failed: ${error instanceof Error ? error.message : String(error)}`;
+    ctx.logger?.error?.(message);
+    reportIncident(ctx, "tool-groups/mount-failed", message);
+    throw error;
+  }
+}
+function mount(ctx, config, seams) {
   const seat = config.seat ?? "default";
   const installer = seams.installer ?? scopeInstaller(ctx);
   let projections = seams.projections === void 0 ? ctx.get("sessionProjections") ?? null : seams.projections;
   const settings = seams.settings ?? ctx.get("settings");
   const states = /* @__PURE__ */ new Map();
+  const reportedInert = /* @__PURE__ */ new Set();
   const catalog = () => resolveToolGroups(readOrchestrationDocument(settings));
   const plannedAttached = (agent, groups) => {
     if (projections === null) return null;
@@ -368,7 +387,13 @@ function apply(ctx, config = {}, seams = {}) {
       state.applied = effective;
     } catch (error) {
       state.applied = null;
-      ctx.logger?.warn(`enpoi-tool-groups: restriction install failed for ${state.agent.session.id}: ${String(error)}`);
+      const id = state.agent.session.id;
+      const detail = `enpoi-tool-groups: restriction install failed for ${id}: ${String(error)}`;
+      ctx.logger?.warn(detail);
+      if (!reportedInert.has(id)) {
+        reportedInert.add(id);
+        reportIncident(ctx, "tool-groups/inert", `${detail}; the presentation filter is failing open for this session`);
+      }
     }
   };
   const ensure = (agent) => {
@@ -394,7 +419,9 @@ function apply(ctx, config = {}, seams = {}) {
     try {
       ctx.get("sessionProjections")?.register(toolGroupsProjection);
     } catch (error) {
-      ctx.logger?.warn(`enpoi-tool-groups: projection registration failed; tool groups fail open: ${String(error)}`);
+      const detail = `enpoi-tool-groups: projection registration failed; durable attach unavailable and the presentation filter fails open: ${String(error)}`;
+      ctx.logger?.error?.(detail);
+      reportIncident(ctx, "tool-groups/inert", detail);
       projections = null;
     }
   }
@@ -469,6 +496,16 @@ function apply(ctx, config = {}, seams = {}) {
       return { ok: true, action, group: groupId, attached: [...planned.attached], groups: rows, reason: "" };
     }
   });
+  if (typeof ctx.tools.get === "function" && ctx.tools.get(TOOL_GROUPS_TOOL, scopeOf(ctx)) === void 0) {
+    throw new Error(`tool "${TOOL_GROUPS_TOOL}" did not register into this preset scope`);
+  }
+  const resolved = catalog();
+  const onDemand = resolved.groups.filter((group) => group.mode === "on-demand" && group.enabled).map((group) => group.id);
+  const log = seams.log ?? ((line) => {
+    process.stderr.write(line);
+  });
+  log(`[enpoi-tool-groups] mounted (seat=${seat}, ${String(resolved.groups.length)} groups, on-demand: ${onDemand.join(", ") || "none"})
+`);
   ctx.on("agent/created", ({ agent }) => {
     safeEnsure(agent);
   });

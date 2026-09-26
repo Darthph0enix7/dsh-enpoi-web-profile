@@ -66,7 +66,7 @@ function fakeAgent(id = 'session-1', onAppend?: (type: string, data: any) => voi
 }
 
 /** Fake preset ctx capturing handlers, sections, and registered tools. */
-function fakeCtx() {
+function fakeCtx(gets: Record<string, unknown> = {}, options: { toolVisible?: boolean } = {}) {
   const handlers = new Map<string, Array<(...args: any[]) => any>>()
   const sections: any[] = []
   const registeredTools: any[] = []
@@ -74,15 +74,20 @@ function fakeCtx() {
     handlers,
     sections,
     registeredTools,
-    logger: { warn: () => {} },
-    get: (_name: string) => undefined,
+    logger: { warn: () => {}, error: () => {} },
+    get: (name: string) => gets[name],
     on(name: string, handler: (...args: any[]) => any) {
       const list = handlers.get(name) ?? []
       list.push(handler)
       handlers.set(name, list)
       return () => {}
     },
-    tools: { register: (definition: any) => { registeredTools.push(definition); return () => {} } },
+    tools: {
+      register: (definition: any) => { registeredTools.push(definition); return () => {} },
+      get: (name: string) => (options.toolVisible === false
+        ? undefined
+        : registeredTools.find(candidate => candidate.name === name)),
+    },
     systemPrompt: { section: (section: any) => { sections.push(section); return () => {} } },
     fire(name: string, ...args: any[]) {
       for (const handler of handlers.get(name) ?? []) handler(...args)
@@ -95,18 +100,36 @@ function mount(options: {
   projections?: ReturnType<typeof fakeProjections> | null
   installer?: ReturnType<typeof fakeInstaller>
   seat?: string
+  gets?: Record<string, unknown>
+  toolVisible?: boolean
+  registerThrows?: boolean
 } = {}) {
-  const ctx = fakeCtx()
+  const incidents: Array<{ kind?: string; message?: string }> = []
+  const gets: Record<string, unknown> = {
+    diagnostics: { report: (request: { kind?: string; message?: string }) => { incidents.push(request); return { code: 'T1' } } },
+    ...options.gets,
+  }
+  const ctx = fakeCtx(gets, { toolVisible: options.toolVisible })
+  if (options.registerThrows === true) {
+    ctx.tools.register = () => { throw new Error('register exploded') }
+  }
   const installer = options.installer ?? fakeInstaller()
   const projections = options.projections === undefined ? fakeProjections() : options.projections
-  apply(ctx as any, { seat: options.seat ?? 'orchestrator' }, {
-    installer: installer as any,
-    projections: projections as any,
-    settings: fakeSettings(options.document) as any,
-  })
+  const logs: string[] = []
+  let error: unknown
+  try {
+    apply(ctx as any, { seat: options.seat ?? 'orchestrator' }, {
+      installer: installer as any,
+      projections: projections as any,
+      settings: fakeSettings(options.document) as any,
+      log: (line: string) => { logs.push(line) },
+    })
+  } catch (thrown: unknown) {
+    error = thrown
+  }
   const tool = ctx.registeredTools.find(candidate => candidate.name === TOOL_GROUPS_TOOL)
   const menu = ctx.sections.find(section => section.name === 'tool-groups:menu')
-  return { ctx, installer, projections, tool, menu }
+  return { ctx, installer, projections, tool, menu, incidents, error, logs }
 }
 
 const EXEC = (agent: any) => ({ agent, signal: new AbortController().signal })
@@ -346,5 +369,53 @@ describe('tool_groups plugin', () => {
     expect(missing.ok).toBe(false)
     expect(missing.reason).toContain('requires a group id')
     expect(agent.appended).toHaveLength(0)
+  })
+
+  it('records a mount-failed incident and rethrows when registration fails', () => {
+    const { error, incidents } = mount({ registerThrows: true })
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('register exploded')
+    expect(incidents.some(incident => incident.kind === 'tool-groups/mount-failed')).toBe(true)
+  })
+
+  it('records a mount-failed incident and rethrows when the meta-tool does not resolve', () => {
+    const { error, incidents } = mount({ toolVisible: false })
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('did not register')
+    expect(incidents.some(incident => incident.kind === 'tool-groups/mount-failed')).toBe(true)
+  })
+
+  it('records an inert incident and fails open when projection registration is rejected', () => {
+    const { ctx, installer, tool, incidents, error } = mount({
+      gets: { sessionProjections: { register: () => { throw new Error('projection boom') } } },
+    })
+    expect(error).toBeUndefined()
+    expect(tool).toBeDefined()
+    expect(incidents.some(incident => incident.kind === 'tool-groups/inert')).toBe(true)
+    const agent = fakeAgent()
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    expect(installer.calls).toHaveLength(0)
+  })
+
+  it('records an inert incident once per session when a restriction cannot install', () => {
+    const installer = fakeInstaller()
+    const failing = {
+      calls: installer.calls,
+      install: () => { throw new Error('restrict boom') },
+      release: () => {},
+      live: () => null,
+    }
+    const { ctx, incidents } = mount({ installer: failing as any })
+    const agent = fakeAgent()
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+    expect(incidents.filter(incident => incident.kind === 'tool-groups/inert')).toHaveLength(1)
+  })
+
+  it('writes a mount witness naming the seat and the on-demand groups', () => {
+    const { logs } = mount()
+    expect(logs.some(line => line.includes('[enpoi-tool-groups] mounted')
+      && line.includes('seat=orchestrator')
+      && line.includes('on-demand: peer, debug'))).toBe(true)
   })
 })

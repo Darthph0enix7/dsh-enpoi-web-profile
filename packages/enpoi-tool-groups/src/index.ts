@@ -19,7 +19,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import { createScope } from '@deepseek-ai/dsh-scope'
+import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -91,6 +91,8 @@ export interface ToolGroupsSeams {
   /** `null` forces the fail-open path where no projection registry exists. */
   readonly projections?: ProjectionReader | null
   readonly settings?: SettingsDocumentReader | undefined
+  /** Boot witness sink; defaults to stderr. */
+  readonly log?: (line: string) => void
 }
 
 /** The default installer: one plugin-owned scope per agent, restrictions keyed by the agent. */
@@ -132,6 +134,25 @@ function agentIdOfScope(scope: unknown): string | undefined {
   if (scope === null || typeof scope !== 'object') return undefined
   const candidate = scope as { id?: unknown }
   return typeof candidate.id === 'string' && candidate.id.length > 0 ? candidate.id : undefined
+}
+
+/**
+ * Report one coded diagnostics incident. Best-effort by contract: a missing
+ * diagnostics service or a throwing report never changes the caller's path.
+ * @param ctx - owning context (resolves the optional `diagnostics` service).
+ * @param kind - failure class, prefixed `tool-groups/`.
+ * @param message - human-readable detail, truncated by the incident store.
+ */
+function reportIncident(ctx: Context, kind: string, message: string): void {
+  try {
+    const diagnostics = ctx.get('diagnostics') as
+      | { report?: (request: { kind?: string; message?: string }) => unknown }
+      | undefined
+    if (typeof diagnostics?.report !== 'function') return
+    diagnostics.report({ kind, message })
+  } catch {
+    // The incident channel is observability only; it never gates the mount.
+  }
 }
 
 /** Parse the meta-tool arguments without trusting the model. */
@@ -220,12 +241,27 @@ function renderValue(value: ToolGroupsValue): string {
 }
 
 /**
- * Mount the plugin on one preset's standing scope.
+ * Mount the plugin on one preset's standing scope. A wiring failure is a
+ * MOUNT failure, not a runtime restriction gap: it is logged, recorded as a
+ * coded diagnostics incident, and rethrown so the preset audit reports the row
+ * instead of leaving a silently inert composition.
  * @param ctx - agent-plane mount context (the preset's standing scope).
  * @param config - seat identity for per-seat pre-attach.
  * @param seams - injectable test seams; production resolves from `ctx`.
  */
 export function apply(ctx: Context, config: Config = {}, seams: ToolGroupsSeams = {}): void {
+  try {
+    mount(ctx, config, seams)
+  } catch (error: unknown) {
+    const message = `enpoi-tool-groups mount failed: ${error instanceof Error ? error.message : String(error)}`
+    ctx.logger?.error?.(message)
+    reportIncident(ctx, 'tool-groups/mount-failed', message)
+    throw error
+  }
+}
+
+/** Wire the plugin; every failure propagates to {@link apply}'s loud mount boundary. */
+function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   const seat = config.seat ?? 'default'
   const installer = seams.installer ?? scopeInstaller(ctx)
   let projections: ProjectionReader | null = seams.projections === undefined
@@ -233,6 +269,8 @@ export function apply(ctx: Context, config: Config = {}, seams: ToolGroupsSeams 
     : seams.projections
   const settings = seams.settings ?? (ctx.get('settings') as SettingsDocumentReader | undefined)
   const states = new Map<string, AgentState>()
+  /** Session ids whose fail-open restriction failure was already reported. */
+  const reportedInert = new Set<string>()
 
   /** Resolve the catalog hot: operator edits apply to the next ensure. */
   const catalog = (): ResolvedToolGroups => resolveToolGroups(readOrchestrationDocument(settings))
@@ -267,9 +305,16 @@ export function apply(ctx: Context, config: Config = {}, seams: ToolGroupsSeams 
       state.restriction = installer.install(state.agent, deny)
       state.applied = effective
     } catch (error: unknown) {
-      // Fail open: a filter that cannot be installed hides nothing.
+      // Fail open (a filter that cannot be installed hides nothing) — but
+      // never silently: the first failure per session reaches the ledger.
       state.applied = null
-      ctx.logger?.warn(`enpoi-tool-groups: restriction install failed for ${state.agent.session.id}: ${String(error)}`)
+      const id = state.agent.session.id
+      const detail = `enpoi-tool-groups: restriction install failed for ${id}: ${String(error)}`
+      ctx.logger?.warn(detail)
+      if (!reportedInert.has(id)) {
+        reportedInert.add(id)
+        reportIncident(ctx, 'tool-groups/inert', `${detail}; the presentation filter is failing open for this session`)
+      }
     }
   }
 
@@ -297,12 +342,16 @@ export function apply(ctx: Context, config: Config = {}, seams: ToolGroupsSeams 
   }
 
   // The durable attached set (projection) drives replay across resume. A
-  // registration failure fails open: no projection means no filtering.
+  // registration failure fails open (no projection means no filtering) but is
+  // recorded: durable attach is unavailable, and silence would read as a
+  // healthy base surface.
   if (projections !== null) {
     try {
       ctx.get('sessionProjections')?.register(toolGroupsProjection)
     } catch (error: unknown) {
-      ctx.logger?.warn(`enpoi-tool-groups: projection registration failed; tool groups fail open: ${String(error)}`)
+      const detail = `enpoi-tool-groups: projection registration failed; durable attach unavailable and the presentation filter fails open: ${String(error)}`
+      ctx.logger?.error?.(detail)
+      reportIncident(ctx, 'tool-groups/inert', detail)
       projections = null
     }
   }
@@ -392,6 +441,18 @@ export function apply(ctx: Context, config: Config = {}, seams: ToolGroupsSeams 
       return { ok: true, action, group: groupId, attached: [...planned.attached], groups: rows, reason: '' }
     },
   })
+
+  // Mount verification: a registration that resolved to nothing would leave a
+  // preset that looks healthy while the meta-tool is unreachable. Fail loud.
+  if (typeof ctx.tools.get === 'function' && ctx.tools.get(TOOL_GROUPS_TOOL, scopeOf(ctx)) === undefined) {
+    throw new Error(`tool "${TOOL_GROUPS_TOOL}" did not register into this preset scope`)
+  }
+
+  // One boot witness line: the preset row is otherwise silent on success.
+  const resolved = catalog()
+  const onDemand = resolved.groups.filter(group => group.mode === 'on-demand' && group.enabled).map(group => group.id)
+  const log = seams.log ?? ((line: string) => { process.stderr.write(line) })
+  log(`[enpoi-tool-groups] mounted (seat=${seat}, ${String(resolved.groups.length)} groups, on-demand: ${onDemand.join(', ') || 'none'})\n`)
 
   // Lifecycle: base surface at creation, turn-boundary commit, release on disposal.
   ctx.on('agent/created', ({ agent }) => { safeEnsure(agent) })
