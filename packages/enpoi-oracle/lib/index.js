@@ -293,7 +293,19 @@ function parseVerdict(text) {
   const blockers = sentences.filter((s) => /blocker|blocked|prevent|fails? closed|cannot|incompatible/i.test(s)).slice(0, 4);
   return { approved, concerns, unverified: [], blockers };
 }
-async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4) {
+var OracleTimeoutError = class extends Error {
+  /**
+   * @param childId - the still-running oracle child the wait abandoned.
+   * @param timeoutMs - the exceeded wait budget.
+   */
+  constructor(childId, timeoutMs) {
+    super(`oracle consultation timed out after ${timeoutMs}ms`);
+    this.childId = childId;
+    this.timeoutMs = timeoutMs;
+    this.name = "OracleTimeoutError";
+  }
+};
+async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4, pollMs = 100) {
   const started = Date.now();
   const controller = new AbortController();
   const onAbort = () => controller.abort();
@@ -301,7 +313,7 @@ async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4) {
   try {
     for (; ; ) {
       if (signal.aborted) throw new Error("oracle consultation aborted");
-      if (Date.now() - started > timeoutMs) throw new Error(`oracle consultation timed out after ${timeoutMs}ms`);
+      if (Date.now() - started > timeoutMs) throw new OracleTimeoutError(childId, timeoutMs);
       if (ctx.agents.get(childId) === void 0) {
         const persistence = ctx.get("sessionPersistence");
         if (persistence !== void 0) {
@@ -341,10 +353,40 @@ async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4) {
           }
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
   } finally {
     signal.removeEventListener("abort", onAbort);
+  }
+}
+async function deliverDetachedOracleVerdict(options) {
+  const { ctx, parent, childId, fiber, key, busy } = options;
+  try {
+    const text = await waitForChildTurn(
+      ctx,
+      childId,
+      new AbortController().signal,
+      Number.POSITIVE_INFINITY,
+      options.pollMs ?? 1e3
+    );
+    const verdict = parseVerdict(text);
+    fiber.consultations += 1;
+    fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns });
+    const agent = ctx.get("agents")?.get(parent.session.id);
+    if (agent !== void 0) {
+      agent.inject(createUserMessage({
+        content: [{
+          type: "text",
+          text: `\u{1F4EC} Oracle (detached after timeout) finished \u2014 ${verdict.approved ? "APPROVED" : "CONCERNS"} (${verdict.concerns.length} concern(s)).
+
+${text}`
+        }],
+        source: { kind: "enpoi-oracle" }
+      }));
+    }
+  } catch {
+  } finally {
+    busy.delete(key);
   }
 }
 function apply(ctx) {
@@ -500,6 +542,7 @@ function registerOracleTools(ctx, root) {
             } catch (error) {
               lastError = error;
               if (callSignal().aborted) throw error;
+              if (error instanceof OracleTimeoutError) throw error;
               const current = attemptModels[index];
               const next = advance ? attemptModels[index + 1] : void 0;
               if (next === void 0) break;
@@ -545,7 +588,13 @@ function registerOracleTools(ctx, root) {
           const childId = fiber.childId;
           void (async () => {
             try {
-              const t = await waitWithChainAdvance(childId, fresh);
+              let t;
+              try {
+                t = await waitWithChainAdvance(childId, fresh);
+              } catch (error) {
+                if (!(error instanceof OracleTimeoutError)) throw error;
+                t = await waitForChildTurn(ctx, error.childId, new AbortController().signal, Number.POSITIVE_INFINITY, 1e3);
+              }
               const v = parseVerdict(t);
               fiber.consultations += 1;
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
@@ -585,6 +634,18 @@ ${t}`
         try {
           verdictText = await waitWithChainAdvance(fiber.childId, fresh);
         } catch (err) {
+          if (err instanceof OracleTimeoutError) {
+            handedOff = true;
+            void deliverDetachedOracleVerdict({ ctx, parent, childId: err.childId, fiber, key, busy });
+            return {
+              approved: false,
+              concerns: [`Oracle consultation timed out after ${err.timeoutMs}ms; the oracle child is still running.`],
+              unverified: [],
+              blockers: [`ORACLE_TIMEOUT_DETACHED: oracle child ${err.childId} was NOT cancelled \u2014 its verdict will be delivered as a message when it finishes.`],
+              summary: `Oracle consultation timed out after ${err.timeoutMs}ms. The oracle child ${err.childId} was NOT cancelled and is still working; its verdict will be delivered as a message when it finishes.`,
+              rejected: true
+            };
+          }
           const errMsg = err instanceof Error ? err.message : String(err);
           fibers.delete(key);
           return {
@@ -747,8 +808,10 @@ var EVIDENCE_CHILD_DENY = [
   "list_agents"
 ];
 export {
+  OracleTimeoutError,
   apply,
   buildInitialPackage,
+  deliverDetachedOracleVerdict,
   inject,
   isExternalEvidenceTarget,
   name,
@@ -756,5 +819,6 @@ export {
   resolveOracleChainAttempts,
   resolveOracleTimeoutMs,
   resolvePersonaModel,
-  textOfContent
+  textOfContent,
+  waitForChildTurn
 };

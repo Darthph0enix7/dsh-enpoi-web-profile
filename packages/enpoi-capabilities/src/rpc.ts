@@ -9,7 +9,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { mcpToolNames, removeMcpServerFenced, type McpCatalogSettings, type McpToolsView } from './mcp-tools'
+import {
+  mcpToolNames, registeredToolNames, removeMcpServerFenced,
+  type McpCatalogSettings, type McpToolsView, type RegisteredToolsView,
+} from './mcp-tools'
 
 /** The live tool registry as this RPC reads it. */
 interface ToolSchemaSource {
@@ -17,9 +20,9 @@ interface ToolSchemaSource {
 }
 
 /**
- * The live-capabilities remote namespace: `enpoiCapabilities.mcpTools()` over
- * the shared Typert Gateway. Every method reads fresh per call — the client
- * never caches a mount state.
+ * The live-capabilities remote namespace: `enpoiCapabilities.mcpTools()` and
+ * `enpoiCapabilities.registeredTools()` over the shared Typert Gateway. Every
+ * method reads fresh per call — the client never caches a mount state.
  */
 export class EnpoiCapabilitiesService extends TypertRemoteService {
   /**
@@ -42,6 +45,27 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
       const tools = this.ctx.get('tools') as ToolSchemaSource | undefined
       const schemas = tools?.schemas?.() ?? []
       return { tools: mcpToolNames(schemas.map(schema => schema.name)) }
+    } catch {
+      // Advisory read: an unavailable registry must not fail the settings page.
+      return { tools: [] }
+    }
+  }
+
+  /**
+   * Every tool the runtime currently registers (native, profile plugins, and
+   * `mcp__<server>__<tool>` names alike), read fresh from the tool registry on
+   * each call (`ctx.tools.schemas()`). The Permissions matrix and the Dynamic
+   * → Roles tool grid build their rows from this projection, so any future
+   * tool appears automatically. Failure posture is fail-open: an unavailable
+   * registry answers an empty list.
+   * @returns the sorted unique public tool names.
+   */
+  @Remote
+  async registeredTools(): Promise<RegisteredToolsView> {
+    try {
+      const tools = this.ctx.get('tools') as ToolSchemaSource | undefined
+      const schemas = tools?.schemas?.() ?? []
+      return { tools: registeredToolNames(schemas.map(schema => schema.name)) }
     } catch {
       // Advisory read: an unavailable registry must not fail the settings page.
       return { tools: [] }

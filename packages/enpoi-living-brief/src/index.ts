@@ -149,7 +149,8 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
           decisions?: string[]
           openThreads?: string[]
           basedOnSeq: number
-          basedOnStructuralCount: number
+          /** Absent on keeper events written before the structural watermark existed. */
+          basedOnStructuralCount?: number
           structuralDistanceK?: number
           model: string
           text: string
@@ -164,7 +165,9 @@ export function fold(ctx: Context, state: LivingBriefState, event: SessionEvent)
             updatedAt: event.time,
             model: data.model,
             basedOnSeq: data.basedOnSeq,
-            basedOnStructuralCount: data.basedOnStructuralCount,
+            // Legacy keeper events predate the structural watermark; 0 keeps
+            // the prose honestly stale until the next keeper update.
+            basedOnStructuralCount: data.basedOnStructuralCount ?? 0,
             structuralDistanceK: data.structuralDistanceK ?? 24,
           },
           lastEventSeq: event.seq,

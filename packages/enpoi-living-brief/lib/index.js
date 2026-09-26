@@ -106,7 +106,9 @@ function fold(ctx, state, event) {
             updatedAt: event.time,
             model: data.model,
             basedOnSeq: data.basedOnSeq,
-            basedOnStructuralCount: data.basedOnStructuralCount,
+            // Legacy keeper events predate the structural watermark; 0 keeps
+            // the prose honestly stale until the next keeper update.
+            basedOnStructuralCount: data.basedOnStructuralCount ?? 0,
             structuralDistanceK: data.structuralDistanceK ?? 24
           },
           lastEventSeq: event.seq

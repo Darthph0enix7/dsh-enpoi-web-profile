@@ -332,6 +332,19 @@ function resolvePolicy(input) {
   }
   return { kind: "allow", source: "defaults" };
 }
+function advertisedToolNames(toolNames, approvalPolicy, input) {
+  if (approvalPolicy !== "never") return [...toolNames];
+  return toolNames.filter((toolName) => {
+    const decision = resolvePolicy({
+      toolName,
+      agent: input.agent,
+      config: input.config,
+      sandboxMode: input.sandboxMode,
+      mcpServerNames: input.mcpServerNames
+    });
+    return decision.kind !== "ask";
+  });
+}
 function isMcpToolName(toolName) {
   return toolName.startsWith("mcp__");
 }
@@ -394,7 +407,17 @@ var init_policy = __esm({
       session_event_read: "allow",
       session_event_trace: "allow",
       council_list: "allow",
+      // The whiteboard is permanent core orchestrator context (doc 66 §3c/§67 §B):
+      // its five per-feature asks fold into ONE family policy (the curated
+      // `whiteboard_*` row in the Permissions UI, permissions-model.ts
+      // POLICY_FAMILIES). Operator decision 2026-09-26 after granting read/write/
+      // pin/unpin per feature; existing standing grants stay on record but are no
+      // longer needed to absorb an ask.
       whiteboard_read: "allow",
+      whiteboard_write: "allow",
+      whiteboard_pin: "allow",
+      whiteboard_unpin: "allow",
+      whiteboard_forget: "allow",
       edit: "allow",
       write: "allow",
       bash: "ask",
@@ -444,6 +467,9 @@ function canFenceMcpWrites(settings) {
 function mcpToolNames(names) {
   return names.filter((name2) => typeof name2 === "string" && name2.startsWith(MCP_TOOL_PREFIX)).sort((left, right) => left.localeCompare(right));
 }
+function registeredToolNames(names) {
+  return [...new Set(names.filter((name2) => typeof name2 === "string" && name2 !== ""))].sort((left, right) => left.localeCompare(right));
+}
 async function removeMcpServerFenced(settings, id, ns = ORCHESTRATION_NS) {
   if (!canFenceMcpWrites(settings)) return { removed: false, rows: 0 };
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
@@ -488,12 +514,12 @@ import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 function mountCapabilitiesRemote(ctx) {
   ctx.plugin(EnpoiCapabilitiesService);
 }
-var _removeMcpServer_dec, _mcpTools_dec, _a, _init, EnpoiCapabilitiesService;
+var _removeMcpServer_dec, _registeredTools_dec, _mcpTools_dec, _a, _init, EnpoiCapabilitiesService;
 var init_rpc = __esm({
   "src/rpc.ts"() {
     "use strict";
     init_mcp_tools();
-    EnpoiCapabilitiesService = class extends (_a = TypertRemoteService, _mcpTools_dec = [Remote], _removeMcpServer_dec = [Remote], _a) {
+    EnpoiCapabilitiesService = class extends (_a = TypertRemoteService, _mcpTools_dec = [Remote], _registeredTools_dec = [Remote], _removeMcpServer_dec = [Remote], _a) {
       /**
        * @param ctx - owning Host Context (the Typert binding is installed by the base).
        */
@@ -510,6 +536,15 @@ var init_rpc = __esm({
           return { tools: [] };
         }
       }
+      async registeredTools() {
+        try {
+          const tools = this.ctx.get("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          return { tools: registeredToolNames(schemas.map((schema) => schema.name)) };
+        } catch {
+          return { tools: [] };
+        }
+      }
       async removeMcpServer(id) {
         const settings = this.ctx.get("settings");
         return await removeMcpServerFenced(settings, id);
@@ -517,6 +552,7 @@ var init_rpc = __esm({
     };
     _init = __decoratorStart(_a);
     __decorateElement(_init, 1, "mcpTools", _mcpTools_dec, EnpoiCapabilitiesService);
+    __decorateElement(_init, 1, "registeredTools", _registeredTools_dec, EnpoiCapabilitiesService);
     __decorateElement(_init, 1, "removeMcpServer", _removeMcpServer_dec, EnpoiCapabilitiesService);
     __decoratorMetadata(_init, EnpoiCapabilitiesService);
   }
@@ -794,16 +830,26 @@ function apply(ctx, config = {}) {
     return void 0;
   });
   ctx.effect(() => disposeGuard, "enpoi-capabilities: tool guard");
-  const disposeAssemble = ctx.on("system-prompt/assemble", (async (_assembly, _context, next) => {
+  const disposeAssemble = ctx.on("system-prompt/assemble", (async (_assembly, context, next) => {
     const assembled = await next();
     if (!Array.isArray(assembled.tools) || assembled.tools.length === 0) return assembled;
     const state = initialCapabilitiesState(getGlobalDefaults());
     const disabled = new Set(
       Object.entries(state.tools).filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id)).map(([id]) => id)
     );
-    if (disabled.size === 0) return assembled;
-    const kept = assembled.tools.filter((tool) => !disabled.has(tool.name));
-    if (kept.length === assembled.tools.length) return assembled;
+    let kept = disabled.size === 0 ? assembled.tools : assembled.tools.filter((tool) => !disabled.has(tool.name));
+    const scope = context?.scope;
+    const approvalPolicy = readApprovalPolicy(scope);
+    if (approvalPolicy?.policy === "never") {
+      const advertise = new Set(advertisedToolNames(kept.map((tool) => tool.name), approvalPolicy.policy, {
+        agent: askingAgentOf({ agent: scope }),
+        config: readPermissionConfig(),
+        sandboxMode: readSandboxMode(scope),
+        mcpServerNames: readMcpServerNames() ?? []
+      }));
+      kept = kept.filter((tool) => advertise.has(tool.name));
+    }
+    if (kept === assembled.tools) return assembled;
     return { ...assembled, tools: kept };
   }));
   ctx.effect(() => disposeAssemble, "enpoi-capabilities: tool schema strip");
@@ -1035,6 +1081,22 @@ function apply(ctx, config = {}) {
       return void 0;
     }
   }
+  function readApprovalPolicy(agent) {
+    try {
+      const session = agent?.session;
+      if (session === void 0 || typeof session.eventAt !== "function") return void 0;
+      const seq = typeof session.seq === "number" ? session.seq : 0;
+      for (let index = seq - 1; index >= 0; index -= 1) {
+        const event = session.eventAt(index);
+        if (event?.type === "approval/policy") {
+          return { policy: String(event.data?.policy ?? ""), delegated: event.data?.source === "delegation" };
+        }
+      }
+      return void 0;
+    } catch {
+      return void 0;
+    }
+  }
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
     const state = initialCapabilitiesState(getGlobalDefaults());
     const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs());
@@ -1053,6 +1115,13 @@ function apply(ctx, config = {}) {
     });
     if (decision.kind === "allow") return await next();
     if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
+    const approvalPolicy = readApprovalPolicy(exec.agent);
+    if (approvalPolicy?.policy === "never") {
+      return {
+        kind: "deny",
+        reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? "delegated subagent" : "session"} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`
+      };
+    }
     if (typeof exec.callId === "string" && pendingGrants.size < 128) {
       pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : void 0, askingAgentOf(exec)));
     }

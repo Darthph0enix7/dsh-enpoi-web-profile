@@ -108,7 +108,7 @@ interface Verdict {
   blockers: string[]
 }
 
-interface OracleFiber {
+export interface OracleFiber {
   childId: SessionId | null
   consultations: number
   lastParentUserSeq: number
@@ -421,7 +421,29 @@ function parseVerdict(text: string): Verdict {
   return { approved, concerns, unverified: [], blockers }
 }
 
-async function waitForChildTurn(ctx: Context, childId: SessionId, signal: AbortSignal, timeoutMs = 120_000): Promise<string> {
+/**
+ * Raised when a blocking consultation exceeds its wait budget. The child is
+ * NOT cancelled: the caller owns deciding whether to park it or detach the
+ * verdict delivery (see {@link deliverDetachedOracleVerdict}).
+ */
+export class OracleTimeoutError extends Error {
+  /**
+   * @param childId - the still-running oracle child the wait abandoned.
+   * @param timeoutMs - the exceeded wait budget.
+   */
+  constructor(readonly childId: SessionId, readonly timeoutMs: number) {
+    super(`oracle consultation timed out after ${timeoutMs}ms`)
+    this.name = 'OracleTimeoutError'
+  }
+}
+
+export async function waitForChildTurn(
+  ctx: Context,
+  childId: SessionId,
+  signal: AbortSignal,
+  timeoutMs = 120_000,
+  pollMs = 100,
+): Promise<string> {
   const started = Date.now()
   const controller = new AbortController()
   const onAbort = () => controller.abort()
@@ -429,7 +451,7 @@ async function waitForChildTurn(ctx: Context, childId: SessionId, signal: AbortS
   try {
     for (;;) {
       if (signal.aborted) throw new Error('oracle consultation aborted')
-      if (Date.now() - started > timeoutMs) throw new Error(`oracle consultation timed out after ${timeoutMs}ms`)
+      if (Date.now() - started > timeoutMs) throw new OracleTimeoutError(childId, timeoutMs)
       // The child parks when its turn settles (cold-resume model, Spike A).
       if (ctx.agents.get(childId) === undefined) {
         const persistence = ctx.get('sessionPersistence') as SessionPersistence | undefined
@@ -478,10 +500,56 @@ async function waitForChildTurn(ctx: Context, childId: SessionId, signal: AbortS
           }
         }
       }
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await new Promise(resolve => setTimeout(resolve, pollMs))
     }
   } finally {
     signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
+ * Deliver a timed-out consultation's verdict when the still-running child
+ * eventually finishes: waits without a deadline (bounded by the child's own
+ * turn settling), parses the verdict, records it on the fiber, and injects the
+ * result into the parent as a message. The child is never cancelled — a
+ * timeout must not abandon live work silently.
+ * @param options - parent, child, fiber, mutex key, and poll cadence.
+ */
+export async function deliverDetachedOracleVerdict(options: {
+  ctx: Context
+  parent: Agent
+  childId: SessionId
+  fiber: OracleFiber
+  key: string
+  busy: Set<string>
+  pollMs?: number
+}): Promise<void> {
+  const { ctx, parent, childId, fiber, key, busy } = options
+  try {
+    const text = await waitForChildTurn(
+      ctx,
+      childId,
+      new AbortController().signal,
+      Number.POSITIVE_INFINITY,
+      options.pollMs ?? 1_000,
+    )
+    const verdict = parseVerdict(text)
+    fiber.consultations += 1
+    fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns })
+    const agent = ctx.get('agents')?.get(parent.session.id)
+    if (agent !== undefined) {
+      agent.inject(createUserMessage({
+        content: [{
+          type: 'text',
+          text: `📬 Oracle (detached after timeout) finished — ${verdict.approved ? 'APPROVED' : 'CONCERNS'} (${verdict.concerns.length} concern(s)).\n\n${text}`,
+        }],
+        source: { kind: 'enpoi-oracle' },
+      }))
+    }
+  } catch {
+    // The child was disposed or its turn failed: there is no verdict to deliver.
+  } finally {
+    busy.delete(key)
   }
 }
 
@@ -685,6 +753,10 @@ function registerOracleTools(ctx: Context, root: Context): void {
             } catch (error) {
               lastError = error
               if (callSignal().aborted) throw error
+              // A timed-out child is still working: never advance the chain
+              // (which would delete it) and never abandon it — the caller
+              // detaches the verdict delivery instead.
+              if (error instanceof OracleTimeoutError) throw error
               const current = attemptModels[index]!
               const next = advance ? attemptModels[index + 1] : undefined
               if (next === undefined) break
@@ -732,7 +804,16 @@ function registerOracleTools(ctx: Context, root: Context): void {
           const childId = fiber.childId!
           void (async () => {
             try {
-              const t = await waitWithChainAdvance(childId, fresh)
+              let t: string
+              try {
+                t = await waitWithChainAdvance(childId, fresh)
+              } catch (error) {
+                // A background wait that timed out keeps the still-running
+                // child instead of dropping the delivery: wait without a
+                // deadline for its verdict (no silent orphans).
+                if (!(error instanceof OracleTimeoutError)) throw error
+                t = await waitForChildTurn(ctx, error.childId, new AbortController().signal, Number.POSITIVE_INFINITY, 1_000)
+              }
               const v = parseVerdict(t)
               fiber.consultations += 1
               fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns })
@@ -772,6 +853,21 @@ function registerOracleTools(ctx: Context, root: Context): void {
         try {
           verdictText = await waitWithChainAdvance(fiber.childId!, fresh)
         } catch (err: unknown) {
+          if (err instanceof OracleTimeoutError) {
+            // No silent orphan: keep the child alive, keep the fiber pointing
+            // at it, and deliver its verdict into the parent when it finishes.
+            // The single-flight mutex stays held until the detached wait ends.
+            handedOff = true
+            void deliverDetachedOracleVerdict({ ctx, parent, childId: err.childId, fiber, key, busy })
+            return {
+              approved: false,
+              concerns: [`Oracle consultation timed out after ${err.timeoutMs}ms; the oracle child is still running.`],
+              unverified: [],
+              blockers: [`ORACLE_TIMEOUT_DETACHED: oracle child ${err.childId} was NOT cancelled — its verdict will be delivered as a message when it finishes.`],
+              summary: `Oracle consultation timed out after ${err.timeoutMs}ms. The oracle child ${err.childId} was NOT cancelled and is still working; its verdict will be delivered as a message when it finishes.`,
+              rejected: true,
+            }
+          }
           const errMsg = err instanceof Error ? err.message : String(err)
           fibers.delete(key)
           return {

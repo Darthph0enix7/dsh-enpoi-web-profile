@@ -35,6 +35,11 @@ export interface McpToolsView {
   tools: string[]
 }
 
+/** The `enpoiCapabilities.registeredTools` payload: EVERY live tool name. */
+export interface RegisteredToolsView {
+  tools: string[]
+}
+
 /** One path op inside the orchestration settings namespace. */
 export interface SettingsPathOp {
   op: string
@@ -79,6 +84,20 @@ export function canFenceMcpWrites(settings: McpCatalogSettings | undefined): set
 export function mcpToolNames(names: readonly string[]): string[] {
   return names
     .filter(name => typeof name === 'string' && name.startsWith(MCP_TOOL_PREFIX))
+    .sort((left, right) => left.localeCompare(right))
+}
+
+/**
+ * Every name the live tool registry currently holds, deduped and sorted for a
+ * stable answer. The Permissions matrix derives its rows from this projection,
+ * so a tool added by any plugin (whiteboard, upstream, a future MCP server)
+ * appears with no client code change; the curated client overlay only orders
+ * and labels rows.
+ * @param names - every tool name the runtime currently registers.
+ * @returns sorted unique non-empty names.
+ */
+export function registeredToolNames(names: readonly string[]): string[] {
+  return [...new Set(names.filter(name => typeof name === 'string' && name !== ''))]
     .sort((left, right) => left.localeCompare(right))
 }
 

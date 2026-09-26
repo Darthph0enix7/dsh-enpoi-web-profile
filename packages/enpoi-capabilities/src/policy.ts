@@ -75,7 +75,15 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   session_debug: 'allow', diagnostics_report: 'allow', fast_report: 'allow',
   session_search: 'allow', session_trace: 'allow',
   session_event_search: 'allow', session_event_read: 'allow', session_event_trace: 'allow',
-  council_list: 'allow', whiteboard_read: 'allow',
+  council_list: 'allow',
+  // The whiteboard is permanent core orchestrator context (doc 66 §3c/§67 §B):
+  // its five per-feature asks fold into ONE family policy (the curated
+  // `whiteboard_*` row in the Permissions UI, permissions-model.ts
+  // POLICY_FAMILIES). Operator decision 2026-09-26 after granting read/write/
+  // pin/unpin per feature; existing standing grants stay on record but are no
+  // longer needed to absorb an ask.
+  whiteboard_read: 'allow', whiteboard_write: 'allow', whiteboard_pin: 'allow',
+  whiteboard_unpin: 'allow', whiteboard_forget: 'allow',
   edit: 'allow', write: 'allow',
   bash: 'ask',
   str_replace_editor: 'ask',
@@ -541,6 +549,42 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
     return { kind: 'ask', reason: `unconfigured tool ${toolName} requires approval (default)`, source: 'defaults', grantTier: 'tool' }
   }
   return { kind: 'allow', source: 'defaults' }
+}
+
+/**
+ * The tool names an agent's model-facing surface keeps under its approval
+ * policy. An answerable policy (`ask`, or no logged policy) returns every name
+ * unchanged. An impossible one (`never`, e.g. a delegated child) drops every
+ * tool whose resolution is `ask`: no user can answer it and the executor
+ * auto-denies each call, so advertising it only burns a model call. A grant
+ * resolves the tool to `allow` in {@link resolvePolicy} and keeps it visible;
+ * `allow`/`deny` tools are out of scope here.
+ * @param toolNames - the assembled wire tool names.
+ * @param approvalPolicy - the agent's effective approval policy.
+ * @param input - resolution context (agent role, permission config, sandbox, MCP catalog).
+ * @returns the names to advertise, in input order.
+ */
+export function advertisedToolNames(
+  toolNames: readonly string[],
+  approvalPolicy: string | undefined,
+  input: {
+    agent?: string
+    config: PermissionPolicyConfig
+    sandboxMode?: string
+    mcpServerNames?: readonly string[]
+  },
+): string[] {
+  if (approvalPolicy !== 'never') return [...toolNames]
+  return toolNames.filter((toolName) => {
+    const decision = resolvePolicy({
+      toolName,
+      agent: input.agent,
+      config: input.config,
+      sandboxMode: input.sandboxMode,
+      mcpServerNames: input.mcpServerNames,
+    })
+    return decision.kind !== 'ask'
+  })
 }
 
 /** True when toolName is an MCP-namespaced tool (mcp__server__tool). */

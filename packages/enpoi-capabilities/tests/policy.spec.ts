@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   resolvePolicy, splitCompoundCommand, stripEnvPrefixes, matchBashPattern,
   mcpLadder, mcpServerNameOf, agentRoleOf, grantProposalFor, standingGrantRecord,
-  SHIPPED_TOOL_DEFAULTS, type PermissionPolicyConfig,
+  SHIPPED_TOOL_DEFAULTS, advertisedToolNames, type PermissionPolicyConfig,
 } from '../src/policy'
 
 const EMPTY: PermissionPolicyConfig = {}
@@ -94,30 +94,44 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'rm x', config: cfg2 }).kind).toBe('ask')
   })
 
-  it('an allowed-always tool grant absorbs the unknown-tool ask (the whiteboard flow)', () => {
-    // Live flow (session 297eded4): whiteboard_write asked from `defaults`,
-    // the host wrote the standing grant on `allowed-always`, and the next
-    // call in the same session resolved allow — no second approval/asked.
-    // (`whiteboard_read` no longer serves as the example: read-only
-    // introspection ships allowed so unattended runs cannot park on it.)
-    const ask = resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: { defaults: { unknownTools: 'ask' } } })
-    expect(ask.kind).toBe('ask')
+  it('an allowed-always tool grant absorbs the unknown-tool ask', () => {
+    // Historical live flow (session 297eded4): whiteboard_write asked from
+    // `defaults`, the host wrote the standing grant on `allowed-always`, and
+    // the next call in the same session resolved allow — no second approval.
+    // The whiteboard now ships allowed as one family policy, so the ask is
+    // re-created with an explicit `tools` row to keep the grant semantics
+    // under test.
+    const askCfg: PermissionPolicyConfig = { tools: { whiteboard_write: 'ask' }, defaults: { unknownTools: 'ask' } }
+    expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: askCfg }).kind).toBe('ask')
     const granted = resolvePolicy({
       toolName: 'whiteboard_write',
       agent: 'orchestrator',
-      config: { defaults: { unknownTools: 'ask' }, grants: { g: { id: 'g', tool: 'whiteboard_write' } } },
+      config: { ...askCfg, grants: { g: { id: 'g', tool: 'whiteboard_write' } } },
     })
     expect(granted).toMatchObject({ kind: 'allow', source: 'grant:tool' })
   })
 
-  it('read-only introspection ships allowed, mutations still ask', () => {
+  it('read-only introspection ships allowed, unknown mutations still ask', () => {
     const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }
-    for (const toolName of ['session_debug', 'diagnostics_report', 'fast_report', 'session_search', 'whiteboard_read']) {
+    for (const toolName of ['session_debug', 'diagnostics_report', 'fast_report', 'session_search']) {
       expect(resolvePolicy({ toolName, agent: 'orchestrator', config })).toMatchObject({ kind: 'allow' })
     }
-    for (const toolName of ['whiteboard_write', 'whiteboard_pin', 'some_unknown_tool']) {
+    for (const toolName of ['some_unknown_tool', 'brand_new_mutation']) {
       expect(resolvePolicy({ toolName, agent: 'orchestrator', config }).kind).toBe('ask')
     }
+  })
+
+  it('the whiteboard is one permanent family policy (all five tools ship allowed)', () => {
+    // Operator decision 2026-09-26: the per-feature asks (read/write/pin/
+    // unpin grants) fold into one shipped family policy; the curated
+    // `whiteboard_*` row in the Permissions UI edits this family as one entry.
+    const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }
+    for (const toolName of ['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget']) {
+      expect(SHIPPED_TOOL_DEFAULTS[toolName]).toBe('allow')
+      expect(resolvePolicy({ toolName, agent: 'orchestrator', config })).toMatchObject({ kind: 'allow', source: 'matrix:global' })
+    }
+    // An operator row still outranks the shipped family default.
+    expect(resolvePolicy({ toolName: 'whiteboard_write', config: { tools: { whiteboard_write: 'deny' } } }).kind).toBe('deny')
   })
 
   it('agent-scoped grants only apply to that agent', () => {
@@ -221,11 +235,13 @@ describe('resolution order (Oracle-amended)', () => {
     expect(proposal).toEqual({ tool: 'whiteboard_write', agent: 'fixer' })
     const record = standingGrantRecord('g-new', proposal, '2026-09-23T00:00:00.000Z')
     expect(record).toMatchObject({ tool: 'whiteboard_write', agent: 'fixer', global: true })
-    // The recorded agent is audit-only: a different agent is still absorbed.
-    const globalCfg = { defaults: { unknownTools: 'ask' as const }, grants: { 'g-new': record } }
+    // The whiteboard now ships allowed; an explicit `ask` row re-creates the
+    // grant-absorption path. The recorded agent is audit-only: a different
+    // agent is still absorbed.
+    const globalCfg = { tools: { whiteboard_write: 'ask' as const }, grants: { 'g-new': record } }
     expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: globalCfg }).kind).toBe('allow')
     // An agent-scoped grant (no `global`) still scopes, exactly as before.
-    const scopedCfg = { defaults: { unknownTools: 'ask' as const }, grants: { g2: { id: 'g2', tool: 'whiteboard_write', agent: 'fixer' } } }
+    const scopedCfg = { tools: { whiteboard_write: 'ask' as const }, grants: { g2: { id: 'g2', tool: 'whiteboard_write', agent: 'fixer' } } }
     expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config: scopedCfg }).kind).toBe('ask')
   })
 
@@ -267,5 +283,33 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'brand_new_tool', config: { defaults: { unknownTools: 'ask' } } }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'present', config: { tools: { present: 'ask' } } }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'present', agent: 'fixer', config: { agents: { fixer: { tools: { present: 'deny' } } } } }).kind).toBe('deny')
+  })
+})
+
+describe('approval-impossible agents are not advertised unanswerable asks', () => {
+  const TOOLS = ['read', 'bash', 'oracle_review', 'run_code', 'mcp__demo__mutate']
+
+  it('never-policy drops ask-required-and-ungranted tools and keeps allowed ones', () => {
+    const kept = advertisedToolNames(TOOLS, 'never', { agent: 'fixer', config: { defaults: { unknownTools: 'ask' } } })
+    expect(kept).not.toContain('run_code')
+    expect(kept).not.toContain('mcp__demo__mutate')
+    expect(kept).toContain('read')
+    expect(kept).toContain('oracle_review')
+    // bash keeps its place: its surface resolution is per-command, not an ask.
+    expect(kept).toContain('bash')
+  })
+
+  it('a standing grant makes the tool usable again and it stays visible', () => {
+    const config: PermissionPolicyConfig = {
+      defaults: { unknownTools: 'ask' },
+      grants: { g1: { id: 'g1', tool: 'run_code', global: true } },
+    }
+    const kept = advertisedToolNames(TOOLS, 'never', { agent: 'fixer', config })
+    expect(kept).toContain('run_code')
+  })
+
+  it('an answerable policy leaves the root surface untouched', () => {
+    expect(advertisedToolNames(TOOLS, 'ask', { agent: 'orchestrator', config: {} })).toEqual(TOOLS)
+    expect(advertisedToolNames(TOOLS, undefined, { agent: 'orchestrator', config: {} })).toEqual(TOOLS)
   })
 })

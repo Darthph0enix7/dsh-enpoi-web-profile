@@ -25,7 +25,7 @@ import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
 import {
   resolvePolicy, grantProposalFor, standingGrantRecord, agentRoleOf, mcpServerNameOf, mcpPolicyRemovalOps,
-  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS,
+  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames,
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
@@ -211,10 +211,12 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }
 
-  // 0b. Permissions matrix source: `enpoiCapabilities.mcpTools` projects the
-  //     LIVE tool registry (`ctx.tools.schemas()`) so the Permissions page
-  //     lists the real `mcp__<server>__<tool>` rows with their policy chips,
-  //     and follows mounting/unmounting dynamically. Imported lazily so the
+  // 0b. Permissions matrix source: `enpoiCapabilities.registeredTools`
+  //     projects the ENTIRE live tool registry (`ctx.tools.schemas()`), and
+  //     `enpoiCapabilities.mcpTools` the MCP subset, so the Permissions page
+  //     and the per-agent tool grid list every real tool with its policy chips
+  //     (whiteboard, upstream additions, `mcp__<server>__<tool>` rows alike)
+  //     and follow mounting/unmounting dynamically. Imported lazily so the
   //     @Remote decorator stays out of the unit-test import graph.
   void import('./rpc.ts').then((remote) => {
     try {
@@ -239,8 +241,12 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // system-prompt/assemble waterfall carries the assembled tool list; we
   // filter out every disabled tool (minus the I15 protected set) so the model
   // never sees the schema, never attempts the call, and never wastes tokens.
-  // The B1 guard stays as the execution-time backstop for in-flight turns.
-  const disposeAssemble = ctx.on('system-prompt/assemble', (async (_assembly: unknown, _context: unknown, next: () => Promise<unknown>) => {
+  // 1c. Same surface, approval honesty: an agent whose policy makes approval
+  // impossible (delegated children pin 'never') is not advertised tools whose
+  // every call would auto-deny on an unanswerable ask — a granted tool resolves
+  // allow and stays visible. The B1 guard stays as the execution-time backstop
+  // for in-flight turns.
+  const disposeAssemble = ctx.on('system-prompt/assemble', (async (_assembly: unknown, context: unknown, next: () => Promise<unknown>) => {
     const assembled = (await next()) as { tools?: Array<{ name: string }> }
     if (!Array.isArray(assembled.tools) || assembled.tools.length === 0) return assembled
     const state = initialCapabilitiesState(getGlobalDefaults())
@@ -249,9 +255,19 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         .filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id))
         .map(([id]) => id),
     )
-    if (disabled.size === 0) return assembled
-    const kept = assembled.tools.filter(tool => !disabled.has(tool.name))
-    if (kept.length === assembled.tools.length) return assembled
+    let kept = disabled.size === 0 ? assembled.tools : assembled.tools.filter(tool => !disabled.has(tool.name))
+    const scope = (context as { scope?: AgentLike & { session?: { id?: string } } } | undefined)?.scope
+    const approvalPolicy = readApprovalPolicy(scope)
+    if (approvalPolicy?.policy === 'never') {
+      const advertise = new Set(advertisedToolNames(kept.map(tool => tool.name), approvalPolicy.policy, {
+        agent: askingAgentOf({ agent: scope }),
+        config: readPermissionConfig(),
+        sandboxMode: readSandboxMode(scope),
+        mcpServerNames: readMcpServerNames() ?? [],
+      }))
+      kept = kept.filter(tool => advertise.has(tool.name))
+    }
+    if (kept === assembled.tools) return assembled
     return { ...assembled, tools: kept }
   }) as (...args: unknown[]) => unknown)
   ctx.effect(() => disposeAssemble, 'enpoi-capabilities: tool schema strip')
@@ -582,6 +598,32 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }
 
+  /**
+   * The asking session's pinned approval policy from its log (`approval/policy`,
+   * the last one wins) with the delegation marker. Child-agent delegation pins
+   * `'never'`, which makes every ask reject deterministically before any card
+   * can appear — the registry then reports that rejection as a user rejection.
+   */
+  function readApprovalPolicy(agent: { session?: unknown } | undefined): { policy: string; delegated: boolean } | undefined {
+    try {
+      const session = agent?.session as {
+        seq?: number
+        eventAt?: (seq: number) => { type?: string; data?: { policy?: unknown; source?: unknown } } | undefined
+      } | undefined
+      if (session === undefined || typeof session.eventAt !== 'function') return undefined
+      const seq = typeof session.seq === 'number' ? session.seq : 0
+      for (let index = seq - 1; index >= 0; index -= 1) {
+        const event = session.eventAt(index)
+        if (event?.type === 'approval/policy') {
+          return { policy: String(event.data?.policy ?? ''), delegated: event.data?.source === 'delegation' }
+        }
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+
   const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: AgentLike }, next: () => Promise<{ kind: string; reason?: string }>) => {
     // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
     // before guardReason, so a disabled tool with an ask policy would otherwise
@@ -603,6 +645,18 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     })
     if (decision.kind === 'allow') return await next()
     if (decision.kind === 'deny') return { kind: 'deny', reason: decision.reason }
+    // A session with approval prompts disabled (delegation pins 'never') cannot
+    // answer this ask: the approval seam auto-rejects it and the registry
+    // reports that as "the user rejected tool ...". Deny here instead, naming
+    // the real actor (the session's approval policy) and the ask reason, so the
+    // model and the transcript show why the call could never run.
+    const approvalPolicy = readApprovalPolicy(exec.agent)
+    if (approvalPolicy?.policy === 'never') {
+      return {
+        kind: 'deny',
+        reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? 'delegated subagent' : 'session'} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`,
+      }
+    }
     // ask: stash the grant proposal for the host-side allow-always writer.
     if (typeof exec.callId === 'string' && pendingGrants.size < 128) {
       pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : undefined, askingAgentOf(exec)))

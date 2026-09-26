@@ -159,3 +159,57 @@ describe('request_evidence fact sheet parsing', () => {
     expect(isExternalEvidenceTarget('council engine ledger')).toBe(false)
   })
 })
+
+describe('enpoi-oracle timeout must not orphan live work', () => {
+  /** Minimal structural ctx: child facts come from a fake persistence handle. */
+  function fakeOracleCtx(events: () => Array<Record<string, unknown>>, injected: string[]) {
+    const handle = {
+      read: async () => ({ events: events(), eventState: 'detached' }),
+      close: async () => {},
+    }
+    const persistence = { open: async () => handle }
+    const agents = {
+      get: (id: string) => id === 'parent-1'
+        ? { session: { id: 'parent-1' }, inject: (message: { content: Array<{ text?: string }> }) => { injected.push(message.content[0]?.text ?? '') } }
+        : undefined,
+    }
+    return { agents, get: (name: string) => name === 'sessionPersistence' ? persistence : name === 'agents' ? agents : undefined } as never
+  }
+
+  it('raises OracleTimeoutError naming the still-running child, without deleting it', async () => {
+    const { waitForChildTurn, OracleTimeoutError } = await import('../src/index.ts')
+    const ctx = fakeOracleCtx(() => [{ type: 'user/message', seq: 0, data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'review this' }] } } }], [])
+    const error = await waitForChildTurn(ctx, 'child-1' as never, new AbortController().signal, 20, 5).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(OracleTimeoutError)
+    expect((error as InstanceType<typeof OracleTimeoutError>).childId).toBe('child-1')
+    expect((error as InstanceType<typeof OracleTimeoutError>).timeoutMs).toBe(20)
+  })
+
+  it('delivers the verdict after the slow child finishes and releases the single-flight mutex', async () => {
+    const { deliverDetachedOracleVerdict } = await import('../src/index.ts')
+    const injected: string[] = []
+    let finished = false
+    const events = () => [
+      { type: 'user/message', seq: 0, data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'review this' }] } } },
+      ...(finished
+        ? [{ type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: '{"approved":true,"concerns":[],"unverified":[],"blockers":[]}' }] } } }]
+        : []),
+    ]
+    const ctx = fakeOracleCtx(events, injected)
+    const fiber = { childId: 'child-1', consultations: 0, lastParentUserSeq: 0, scorecard: { files: [], verdicts: [] }, brief: null }
+    const busy = new Set(['parent-1'])
+    const parent = { session: { id: 'parent-1' } }
+    const delivery = deliverDetachedOracleVerdict({ ctx, parent: parent as never, childId: 'child-1' as never, fiber: fiber as never, key: 'parent-1', busy, pollMs: 5 })
+    // Still running: nothing delivered and the mutex stays held.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(injected).toEqual([])
+    expect(busy.has('parent-1')).toBe(true)
+    finished = true
+    await delivery
+    expect(injected).toHaveLength(1)
+    expect(injected[0]).toContain('detached after timeout')
+    expect(injected[0]).toContain('APPROVED')
+    expect(busy.has('parent-1')).toBe(false)
+    expect(fiber.consultations).toBe(1)
+  })
+})

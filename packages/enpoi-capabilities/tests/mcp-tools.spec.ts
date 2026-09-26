@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  mcpToolNames, removeMcpServerFenced, MCP_TOOL_PREFIX,
+  mcpToolNames, registeredToolNames, removeMcpServerFenced, MCP_TOOL_PREFIX,
   type McpCatalogSettings, type SettingsPathOp,
 } from '../src/mcp-tools'
 
@@ -19,7 +19,9 @@ function fakeSettings(tree: Tree, options: { failFirst?: boolean } = {}) {
   let attempts = 0
   const settings: McpCatalogSettings = {
     get: () => tree as unknown as { mcpServers?: Record<string, { serverName?: string }> },
-    describe: () => [{ ns: 'enpoi-orchestration', revision }],
+    // The descriptor carries the resolved document: `removeMcpServerFenced`
+    // reads the catalog + policy rows from `descriptor.value`, not `get()`.
+    describe: () => [{ ns: 'enpoi-orchestration', revision, value: tree }],
     mutate: async (_ns: string, ops: SettingsPathOp[], expected?: number) => {
       attempts += 1
       if (options.failFirst === true && attempts === 1) {
@@ -62,6 +64,14 @@ describe('enpoi-capabilities MCP tool projection', () => {
   it('drops non-string entries instead of leaking them into the client', () => {
     expect(mcpToolNames([42 as unknown as string, null as unknown as string, 'mcp__srv__t']))
       .toEqual(['mcp__srv__t'])
+  })
+
+  it('projects EVERY live tool name, deduped and sorted (the dynamic row source)', () => {
+    expect(registeredToolNames(['whiteboard_write', 'bash', 'whiteboard_read', 'bash', 'mcp__plane__x']))
+      .toEqual(['bash', 'mcp__plane__x', 'whiteboard_read', 'whiteboard_write'])
+    expect(registeredToolNames(['', 'read'])).toEqual(['read'])
+    expect(registeredToolNames([])).toEqual([])
+    expect(registeredToolNames([42 as unknown as string, null as unknown as string, 'read'])).toEqual(['read'])
   })
 
   it('names the exact registration prefix the resolver wildcard ladder keys on', () => {
