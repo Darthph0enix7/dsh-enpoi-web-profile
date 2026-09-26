@@ -166,10 +166,10 @@ describe('keeper chain link iteration (summarize)', () => {
     expect(written.some(line => line.includes('[model-chain] stable: link 1 (p1/m1)'))).toBe(true)
   })
 
-  it('advances to link 2 when link 1 is CUT (validateKeeperOutput max-tokens)', async () => {
-    const calls: Array<{ provider: string; model: string }> = []
-    const stream = async function* (options: { provider: string; model: string }) {
-      calls.push({ provider: options.provider, model: options.model })
+  it('retries a cut link at the escalated cap, then advances when it cuts again', async () => {
+    const calls: Array<{ provider: string; model: string; maxTokens?: number }> = []
+    const stream = async function* (options: { provider: string; model: string; maxTokens?: number }) {
+      calls.push({ provider: options.provider, model: options.model, maxTokens: options.maxTokens })
       if (options.provider === 'p1') {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: 'truncated mid-thought' }
@@ -192,8 +192,46 @@ describe('keeper chain link iteration (summarize)', () => {
       'system',
       false,
     )
-    expect(calls.map(call => call.provider)).toEqual(['p1', 'p2'])
+    expect(calls).toEqual([
+      { provider: 'p1', model: 'm1', maxTokens: 2048 },
+      { provider: 'p1', model: 'm1', maxTokens: 4096 },
+      { provider: 'p2', model: 'm2', maxTokens: 2048 },
+    ])
     expect(result.route).toBe('p2/m2')
+  })
+
+  it('recovers a long-brief summary on the same link when the escalated cap completes it', async () => {
+    const longBrief = `--- PREVIOUS SESSION BRIEF ---\n${'🎯 ACTIVE GOAL: long brief line\n'.repeat(200)}`
+    const caps: number[] = []
+    const stream = async function* (options: { provider: string; model: string; maxTokens?: number }) {
+      caps.push(options.maxTokens ?? 0)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      if ((options.maxTokens ?? 0) <= 2048) {
+        yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: truncated mid-brief' }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      yield { type: 'text-delta', index: 0, text: GOOD_PROSE }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: GOOD_PROSE } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const result = await summarize(
+      ctx as never,
+      baseConfig,
+      makeSession() as never,
+      longBrief,
+      new AbortController().signal,
+      {
+        provider: 'p1', model: 'm1', fallbackProvider: 'f', fallbackModel: 'fm',
+        chainId: 'stable', chainLinks: CHAIN.links,
+      },
+      'system',
+      false,
+    )
+    expect(caps).toEqual([2048, 4096])
+    expect(result.route).toBe('p1/m1')
+    expect(result.text).toContain('test goal')
   })
 
   it('keeps the primary → fallback behaviour when no chain is assigned', async () => {

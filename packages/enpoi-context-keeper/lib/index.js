@@ -146,6 +146,7 @@ var CLAIMS_PROMPT = [
   "No other text at all."
 ].join("\n");
 var STRUCTURAL_TYPES = /* @__PURE__ */ new Set(["user/message", "turn/end", "tool/call", "tool/result"]);
+var KEEPER_MAX_OUTPUT_TOKENS = 4096;
 var structuralCounters = /* @__PURE__ */ new WeakMap();
 function structuralTotal(session) {
   const known = structuralCounters.get(session);
@@ -207,7 +208,7 @@ function resolveKeeperParams(ctx, config) {
       ...config,
       leaseMs: clamp(p.leaseMs, config.leaseMs ?? 45e3, 15e3, 12e4),
       maxInputEvents: clamp(p.maxInputEvents, config.maxInputEvents ?? 80, 20, 200),
-      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, 4096),
+      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, KEEPER_MAX_OUTPUT_TOKENS),
       structuralDistanceK: clamp(p.structuralDistanceK, config.structuralDistanceK ?? 24, 4, 200),
       minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 6e4, 5e3, 3e5),
       negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 12e4, 5e3, 6e5),
@@ -1260,9 +1261,10 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
     purpose: "context-keeper",
     signal
   };
-  async function executeRoute(provider, model, reasoningEffort) {
+  async function executeRoute(provider, model, maxTokens, reasoningEffort) {
     const result = await streamTextWithMeta(ctx, {
       ...base,
+      maxTokens,
       provider,
       model,
       ...reasoningEffort !== void 0 ? { reasoningEffort } : {}
@@ -1274,29 +1276,49 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
     return result.text;
   }
   const attempts = keeperAttempts(route);
+  const configuredCap = config.maxOutputTokens ?? 2048;
+  const escalatedCap = Math.min(configuredCap * 2, KEEPER_MAX_OUTPUT_TOKENS);
   let lastError;
   for (let index = 0; index < attempts.length; index += 1) {
     const attempt = attempts[index];
+    let failure;
     try {
-      const text = await executeRoute(attempt.provider, attempt.model, attempt.reasoningEffort);
+      const text = await executeRoute(attempt.provider, attempt.model, configuredCap, attempt.reasoningEffort);
       if (index > 0) {
         process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: recovered on link ${index + 1} (${attempt.provider}/${attempt.model})
 `);
       }
       return { text, route: `${attempt.provider}/${attempt.model}` };
     } catch (error) {
-      if (signal.aborted) throw error;
-      lastError = error;
-      const next = attempts[index + 1];
-      if (next === void 0) break;
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: link ${index + 1} (${attempt.provider}/${attempt.model}) FAILED/CUT \u2192 link ${index + 2} (${next.provider}/${next.model}): ${message}
-`);
-      ctx.logger.warn(`enpoi-context-keeper: route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`);
-      diag(`route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`);
+      failure = error;
+      if (!signal.aborted && isMaxTokensCut(error) && escalatedCap > configuredCap) {
+        try {
+          const text = await executeRoute(attempt.provider, attempt.model, escalatedCap, attempt.reasoningEffort);
+          process.stderr.write(
+            `[model-chain] ${route.chainId ?? "keeper"}: link ${index + 1} (${attempt.provider}/${attempt.model}) hit maxOutputTokens at ${configuredCap}; retried at ${escalatedCap} and recovered
+`
+          );
+          return { text, route: `${attempt.provider}/${attempt.model}` };
+        } catch (escalationError) {
+          failure = escalationError;
+        }
+      }
     }
+    if (signal.aborted) throw failure;
+    lastError = failure;
+    const next = attempts[index + 1];
+    if (next === void 0) break;
+    const message = failure instanceof Error ? failure.message : String(failure);
+    process.stderr.write(`[model-chain] ${route.chainId ?? "keeper"}: link ${index + 1} (${attempt.provider}/${attempt.model}) FAILED/CUT \u2192 link ${index + 2} (${next.provider}/${next.model}): ${message}
+`);
+    ctx.logger.warn(`enpoi-context-keeper: route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`);
+    diag(`route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`);
   }
   throw new Error(`enpoi-context-keeper: all summary routes failed (${attempts.length} attempt(s)). Last: ${String(lastError)}`);
+}
+var MAX_TOKENS_CUT_CODE = "MAX_TOKENS_CUT";
+function isMaxTokensCut(error) {
+  return error instanceof Error && error.code === MAX_TOKENS_CUT_CODE;
 }
 async function streamTextWithMeta(ctx, options) {
   var _stack = [];
@@ -1330,8 +1352,11 @@ function finishError(finish) {
       error.code = failure.code;
       return error;
     }
-    case "max-tokens":
-      return new Error("enpoi-context-keeper: summary output reached maxOutputTokens");
+    case "max-tokens": {
+      const error = new Error("enpoi-context-keeper: summary output reached maxOutputTokens");
+      error.code = MAX_TOKENS_CUT_CODE;
+      return error;
+    }
     case "tool-calls":
       return new Error("enpoi-context-keeper: summarizer unexpectedly requested a tool");
     default:
@@ -1345,6 +1370,7 @@ export {
   CheckpointService,
   Config,
   KEEPER_CACHE_CAP,
+  KEEPER_MAX_OUTPUT_TOKENS,
   KEEPER_MESSAGE_KIND,
   PREFETCH_DEBOUNCE_MS,
   apply,

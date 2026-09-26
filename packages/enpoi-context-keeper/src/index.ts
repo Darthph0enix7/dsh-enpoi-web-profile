@@ -200,6 +200,15 @@ const CLAIMS_PROMPT = [
 const STRUCTURAL_TYPES = new Set(['user/message', 'turn/end', 'tool/call', 'tool/result'])
 
 /**
+ * Doc-38 ceiling for a keeper summary's output budget. `maxOutputTokens` is
+ * clamped to this value, and a route cut by the configured cap is retried once
+ * at the ceiling before the chain treats the link as dead: a long brief is a
+ * cap problem, not a route problem, and losing the whole distill to it leaves
+ * the Living Brief stale (live defect 2026-09-26).
+ */
+export const KEEPER_MAX_OUTPUT_TOKENS = 4096
+
+/**
  * Incremental structural-event totals per Session object (a WeakMap, so a
  * disposed session takes its counter with it): seeded with ONE read per
  * session, then maintained from committed events so freshness checks are O(1)
@@ -322,7 +331,7 @@ export function resolveKeeperParams(ctx: Context, config: Config): Config {
       ...config,
       leaseMs: clamp(p.leaseMs, config.leaseMs ?? 45_000, 15_000, 120_000),
       maxInputEvents: clamp(p.maxInputEvents, config.maxInputEvents ?? 80, 20, 200),
-      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, 4096),
+      maxOutputTokens: clamp(p.maxOutputTokens, config.maxOutputTokens ?? 2048, 512, KEEPER_MAX_OUTPUT_TOKENS),
       structuralDistanceK: clamp(p.structuralDistanceK, config.structuralDistanceK ?? 24, 4, 200),
       minRefreshMs: clamp(p.minRefreshMs, config.minRefreshMs ?? 60_000, 5_000, 300_000),
       negativeCacheMs: clamp(p.negativeCacheMs, config.negativeCacheMs ?? 120_000, 5_000, 600_000),
@@ -1861,9 +1870,10 @@ export async function summarize(
     signal,
   }
 
-  async function executeRoute(provider: string, model: string, reasoningEffort?: string): Promise<string> {
+  async function executeRoute(provider: string, model: string, maxTokens: number, reasoningEffort?: string): Promise<string> {
     const result = await streamTextWithMeta(ctx, {
       ...base,
+      maxTokens,
       provider,
       model,
       ...(reasoningEffort !== undefined ? { reasoningEffort: reasoningEffort as GenerateOptions['reasoningEffort'] } : {}),
@@ -1880,29 +1890,57 @@ export async function summarize(
   // Frozen attempt list: chain links when the keeper persona assigned a chain,
   // else primary → fallback. Never re-read between attempts.
   const attempts = keeperAttempts(route)
+  const configuredCap = config.maxOutputTokens ?? 2048
+  // One same-link retry at the doc-38 ceiling when a summary is cut by the
+  // configured output cap. A long brief overflowing 2048 output tokens used to
+  // kill every link in turn (both cuts, then `all summary routes failed`), so
+  // the Living Brief went stale on exactly the sessions that needed it most.
+  const escalatedCap = Math.min(configuredCap * 2, KEEPER_MAX_OUTPUT_TOKENS)
   let lastError: unknown
   for (let index = 0; index < attempts.length; index += 1) {
     const attempt = attempts[index]!
+    let failure: unknown
     try {
-      const text = await executeRoute(attempt.provider, attempt.model, attempt.reasoningEffort)
+      const text = await executeRoute(attempt.provider, attempt.model, configuredCap, attempt.reasoningEffort)
       if (index > 0) {
         process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: recovered on link ${index + 1} (${attempt.provider}/${attempt.model})\n`)
       }
       return { text, route: `${attempt.provider}/${attempt.model}` }
     } catch (error) {
-      if (signal.aborted) throw error
-      lastError = error
-      const next = attempts[index + 1]
-      if (next === undefined) break
-      const message = error instanceof Error ? error.message : String(error)
-      // One stderr audit line per failover (this harness's logger drops
-      // info/warn, so stderr is the observable channel — doc 60).
-      process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: link ${index + 1} (${attempt.provider}/${attempt.model}) FAILED/CUT → link ${index + 2} (${next.provider}/${next.model}): ${message}\n`)
-      ctx.logger.warn(`enpoi-context-keeper: route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`)
-      diag(`route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`)
+      failure = error
+      if (!signal.aborted && isMaxTokensCut(error) && escalatedCap > configuredCap) {
+        try {
+          const text = await executeRoute(attempt.provider, attempt.model, escalatedCap, attempt.reasoningEffort)
+          process.stderr.write(
+            `[model-chain] ${route.chainId ?? 'keeper'}: link ${index + 1} (${attempt.provider}/${attempt.model})`
+            + ` hit maxOutputTokens at ${configuredCap}; retried at ${escalatedCap} and recovered\n`,
+          )
+          return { text, route: `${attempt.provider}/${attempt.model}` }
+        } catch (escalationError) {
+          failure = escalationError
+        }
+      }
     }
+    if (signal.aborted) throw failure
+    lastError = failure
+    const next = attempts[index + 1]
+    if (next === undefined) break
+    const message = failure instanceof Error ? failure.message : String(failure)
+    // One stderr audit line per failover (this harness's logger drops
+    // info/warn, so stderr is the observable channel — doc 60).
+    process.stderr.write(`[model-chain] ${route.chainId ?? 'keeper'}: link ${index + 1} (${attempt.provider}/${attempt.model}) FAILED/CUT → link ${index + 2} (${next.provider}/${next.model}): ${message}\n`)
+    ctx.logger.warn(`enpoi-context-keeper: route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`)
+    diag(`route ${attempt.provider}/${attempt.model} failed/cut off (${message}), advancing to ${next.provider}/${next.model}`)
   }
   throw new Error(`enpoi-context-keeper: all summary routes failed (${attempts.length} attempt(s)). Last: ${String(lastError)}`)
+}
+
+/** Provider finish code marking a summary cut by its output cap (retryable at a higher cap). */
+const MAX_TOKENS_CUT_CODE = 'MAX_TOKENS_CUT'
+
+/** Whether a failed keeper attempt was cut by the output cap rather than by the route. */
+function isMaxTokensCut(error: unknown): boolean {
+  return error instanceof Error && (error as Error & { code?: string }).code === MAX_TOKENS_CUT_CODE
 }
 
 /** Stream one completion into plain text and terminal metadata via BlockAssembler. */
@@ -1937,8 +1975,11 @@ function finishError(finish: { kind: string; failure?: { message: string; code: 
       error.code = failure.code
       return error
     }
-    case 'max-tokens':
-      return new Error('enpoi-context-keeper: summary output reached maxOutputTokens')
+    case 'max-tokens': {
+      const error = new Error('enpoi-context-keeper: summary output reached maxOutputTokens') as Error & { code?: string }
+      error.code = MAX_TOKENS_CUT_CODE
+      return error
+    }
     case 'tool-calls':
       return new Error('enpoi-context-keeper: summarizer unexpectedly requested a tool')
     default:

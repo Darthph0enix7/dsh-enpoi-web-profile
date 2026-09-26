@@ -766,7 +766,11 @@ var OrchestrationSettingsSchema = Schema.object({
   // core-context board, owned by enpoi-whiteboard and rendered into every
   // runtime-context snapshot. Declared so the namespace contract admits the
   // key rather than relying on unknown-key survival.
-  whiteboard: live(Schema.dict(Schema.any()).default({}))
+  whiteboard: live(Schema.dict(Schema.any()).default({})),
+  // Tool-group overrides (doc 80): `groups.<id>.enabled` and
+  // `seats.<seat>.preAttach`. Declared so the namespace contract admits the
+  // key; the shipped group catalog lives in dsh-enpoi-tool-groups.
+  toolGroups: live(Schema.dict(Schema.any()).default({}))
 });
 var Config = OrchestrationSettingsSchema;
 async function pruneRemovedMcpPolicyRows(settings, servers, readConfig) {
