@@ -54,7 +54,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790455550802
+        checkedAt: 1790455800374
     personas:
       oracle: null
       fixer:
@@ -2005,32 +2005,6 @@
         api: anthropic-messages
         baseURL: http://100.122.163.25:8082
         models:
-          - id: gemini-3-flash-agent
-            name: Gemini 3 Flash Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.6-flash-medium
-            name: Gemini 3.6 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
           - id: gemini-3.5-flash-lite
             name: Gemini 3.5 Flash Lite
             contextWindow: 1048576
@@ -2044,43 +2018,31 @@
               low: low
               medium: medium
               high: high
-          - id: gemini-3.5-flash-extra-low
-            name: Gemini 3.5 Flash (Low)
+          - id: gemini-3.1-pro-low
+            name: Gemini 3.1 Pro Preview
             contextWindow: 1048576
             maxTokens: 65536
             input:
               - text
               - image
-            reasoning: false
-          - id: gemini-2.5-flash-lite
-            name: Gemini 2.5 Flash-Lite
-            contextWindow: 1048576
-            maxTokens: 65536
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.1-flash-image
+            name: Nano Banana 2
+            contextWindow: 131072
+            maxTokens: 32768
             input:
               - text
               - image
             reasoning: true
             reasoningEfforts:
               minimal: minimal
-              low: low
-              medium: medium
               high: high
-              xhigh: xhigh
-              max: max
-          - id: gemini-3.7-flash-tiered
-            name: Gemini 3.7 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.6-flash-tiered
-            name: Gemini 3.6 Flash
+          - id: gemini-3-flash-agent
+            name: Gemini 3 Flash Preview
             contextWindow: 1048576
             maxTokens: 65536
             input:
@@ -2107,148 +2069,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: gemini-3.6-flash-high
-            name: Gemini 3.6 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.1-pro-high
-            name: Gemini 3.1 Pro Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-2.5-flash
-            name: Gemini 2.5 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: gemini-3.1-pro-low
-            name: Gemini 3.1 Pro Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.8-flash-tiered
-            name: Gemini 3.8 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.1-flash-image
-            name: Nano Banana 2
-            contextWindow: 131072
-            maxTokens: 32768
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              high: high
-          - id: gemini-2.5-pro
-            name: Gemini 2.5 Pro
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: gemini-3.1-flash-lite
-            name: Gemini 3.1 Flash Lite
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.5-flash-low
-            name: Gemini 3.5 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: claude-opus-4-6-thinking
-            name: Claude Opus 4.6
-            contextWindow: 1000000
-            maxTokens: 128000
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              max: max
-          - id: gemini-3-flash
-            name: Gemini 3 Flash Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
           - id: gemini-3.6-flash-low
             name: Gemini 3.6 Flash
             contextWindow: 1048576
@@ -2274,6 +2094,146 @@
               low: low
               medium: medium
               high: high
+          - id: gemini-3.6-flash-high
+            name: Gemini 3.6 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-2.5-flash-lite
+            name: Gemini 2.5 Flash-Lite
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: gemini-3.5-flash-low
+            name: Gemini 3.5 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.6-flash-tiered
+            name: Gemini 3.6 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3-flash
+            name: Gemini 3 Flash Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.1-flash-lite
+            name: Gemini 3.1 Flash Lite
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.5-flash-extra-low
+            name: Gemini 3.5 Flash (Low)
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: claude-opus-4-6-thinking
+            name: Claude Opus 4.6
+            contextWindow: 1000000
+            maxTokens: 128000
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              max: max
+          - id: gemini-3.7-flash-tiered
+            name: Gemini 3.7 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-2.5-pro
+            name: Gemini 2.5 Pro
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: gemini-3.1-pro-high
+            name: Gemini 3.1 Pro Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
           - id: claude-sonnet-4-6
             name: Claude Sonnet 4.6
             contextWindow: 1000000
@@ -2286,6 +2246,46 @@
               low: low
               medium: medium
               high: high
+              max: max
+          - id: gemini-3.6-flash-medium
+            name: Gemini 3.6 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.8-flash-tiered
+            name: Gemini 3.8 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-2.5-flash
+            name: Gemini 2.5 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
               max: max
       opencode-go:
         displayName: OpenCode Go

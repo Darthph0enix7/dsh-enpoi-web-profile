@@ -29,6 +29,7 @@ import {
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
+import { installSearchNudge } from './search-nudge'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -670,6 +671,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     return { kind: 'ask', reason: decision.reason }
   }) as (...args: unknown[]) => unknown)
   ctx.effect(() => disposePolicy, 'enpoi-capabilities: permission policy pre-execute')
+
+  // ── bash search nudge (doc 80 follow-up) ───────────────────────────────────
+  // One advisory line when a search-leading bash command runs in a turn that
+  // has not used grep/glob yet; never a deny, once per turn (search-nudge.ts).
+  installSearchNudge(ctx)
 
   // Host-side allow-always persistence (Oracle amendment 2): the card only
   // answers; the host observes the decided outcome and writes the standing
