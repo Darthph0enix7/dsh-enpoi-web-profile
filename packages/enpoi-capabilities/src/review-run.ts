@@ -27,12 +27,14 @@
  * @module dsh-enpoi-capabilities/review-run
  */
 
+import { accessSync, constants, readFileSync, statSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: loads the `tools` property augmentation on Context.
 import type {} from '@deepseek-ai/dsh-tools'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
-import { agentRoleOf, REVIEW_ROLES, REVIEW_RUN_TOOL, type AgentLike } from './policy'
+import { reviewerSeatOf, REVIEW_RUN_TOOL, type AgentLike } from './policy'
 
 /** Default wall-clock budget for one review run. */
 export const REVIEW_RUN_DEFAULT_TIMEOUT_MS = 120_000
@@ -42,12 +44,18 @@ export const REVIEW_RUN_MAX_TIMEOUT_MS = 600_000
 
 /** One allowed runner: base argv plus whether a target argument is appended. */
 interface RunnerSpec {
-  /** Fixed argv prefix; the only variable token is the validated target. */
+  /** Fixed argv prefix; the only variable tokens are the resolved interpreter and the validated target. */
   readonly argv: readonly string[]
   /** Target appended when supplied; when omitted the runtime default applies. */
   readonly target: boolean
   /** Default target appended when the caller supplies none. */
   readonly defaultTarget?: string
+  /**
+   * Workspace-relative interpreter candidates probed when the workspace spec
+   * names none (first executable wins). A runner without candidates keeps its
+   * fixed argv[0].
+   */
+  readonly interpreterCandidates?: readonly string[]
 }
 
 /**
@@ -58,7 +66,11 @@ interface RunnerSpec {
  * arbitrary project-defined commands.
  */
 export const REVIEW_RUNNERS: Readonly<Record<string, RunnerSpec>> = Object.freeze({
-  pytest: { argv: ['python3', '-m', 'pytest', '-q'], target: true },
+  pytest: {
+    argv: ['python3', '-m', 'pytest', '-q'],
+    target: true,
+    interpreterCandidates: ['.venv/bin/python', 'venv/bin/python'],
+  },
   vitest: { argv: ['npx', '--no-install', 'vitest', 'run'], target: true },
   jest: { argv: ['npx', '--no-install', 'jest'], target: true },
   'node-test': { argv: ['node', '--test'], target: true },
@@ -69,6 +81,125 @@ export const REVIEW_RUNNERS: Readonly<Record<string, RunnerSpec>> = Object.freez
 /** POSIX single-quote escaping for the one caller-supplied token. */
 export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/** Quote only when the token is not already shell-safe (absolute interpreter paths usually are). */
+function shellToken(value: string): string {
+  return /^[A-Za-z0-9_./@+-]+$/.test(value) ? value : shellQuote(value)
+}
+
+/** Workspace-relative path of the validated runner overlay. */
+export const REVIEW_RUN_SPEC_RELATIVE_PATH = '.dsh/review-run.json'
+
+/** One runner's validated workspace overlay: interpreter plus extra environment. */
+export interface ReviewRunnerOverride {
+  /** Absolute path to the executable that replaces the runner's argv[0]. */
+  readonly interpreter: string
+  /** Extra environment for the run (PYTHONPATH=src is the canonical use). */
+  readonly env?: Readonly<Record<string, string>>
+}
+
+/** Whether a path is an executable regular file (symlinks resolved). */
+function isExecutableFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false
+    accessSync(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Read and validate one workspace's `.dsh/review-run.json` overlay. Absent
+ * file → no override. Malformed file → throws (misconfiguration fails loud;
+ * the tool body turns it into a bounded error value). Validation: known
+ * runner keys only, `interpreter` an absolute executable file, `env` a plain
+ * string map with POSIX names, no `DSH_*` keys (the executor owns those and
+ * would silently displace them), and no `LD_*`/`DYLD_*` loader variables
+ * (the environment reaches the sandbox-runner process, so loader variables
+ * would subvert confinement).
+ * @param workspaceRoot - absolute workspace root the run is scoped to.
+ * @param runner - the runner the overlay is requested for.
+ * @returns the validated override, or undefined when the spec names none.
+ */
+export function readReviewRunnerOverride(workspaceRoot: string, runner: string): ReviewRunnerOverride | undefined {
+  const specPath = join(workspaceRoot, REVIEW_RUN_SPEC_RELATIVE_PATH)
+  let raw: string
+  try {
+    raw = readFileSync(specPath, 'utf8')
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return undefined
+    throw new Error(`review-run spec ${specPath} is unreadable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error(`review-run spec ${specPath} is not valid JSON`)
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`review-run spec ${specPath} must be a JSON object of runner → { interpreter, env? }`)
+  }
+  const table = parsed as Record<string, unknown>
+  const unknownRunners = Object.keys(table).filter(key => !Object.hasOwn(REVIEW_RUNNERS, key))
+  if (unknownRunners.length > 0) {
+    throw new Error(`review-run spec ${specPath} names unknown runner(s): ${unknownRunners.join(', ')}`)
+  }
+  const entry = table[runner]
+  if (entry === undefined) return undefined
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+    throw new Error(`review-run spec ${specPath}: ${runner} must be an object`)
+  }
+  const fields = entry as Record<string, unknown>
+  const unknownFields = Object.keys(fields).filter(key => key !== 'interpreter' && key !== 'env')
+  if (unknownFields.length > 0) {
+    throw new Error(`review-run spec ${specPath}: ${runner} has unknown field(s): ${unknownFields.join(', ')}`)
+  }
+  const interpreter = fields['interpreter']
+  if (typeof interpreter !== 'string' || !isAbsolute(interpreter)) {
+    throw new Error(`review-run spec ${specPath}: ${runner}.interpreter must be an absolute path`)
+  }
+  if (!isExecutableFile(interpreter)) {
+    throw new Error(`review-run spec ${specPath}: ${runner}.interpreter is not an executable file: ${interpreter}`)
+  }
+  let env: Record<string, string> | undefined
+  const rawEnv = fields['env']
+  if (rawEnv !== undefined) {
+    if (typeof rawEnv !== 'object' || rawEnv === null || Array.isArray(rawEnv)) {
+      throw new Error(`review-run spec ${specPath}: ${runner}.env must be an object of NAME → value`)
+    }
+    env = {}
+    for (const [name, value] of Object.entries(rawEnv as Record<string, unknown>)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env has an invalid name: ${JSON.stringify(name)}`)
+      }
+      if (name.startsWith('DSH_')) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env may not set managed ${name}`)
+      }
+      // The env reaches the sandbox-runner process too, so dynamic-loader
+      // variables could subvert confinement — never accept them from a
+      // workspace-authored file.
+      if (name.startsWith('LD_') || name.startsWith('DYLD_')) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env may not set dynamic-loader ${name}`)
+      }
+      if (typeof value !== 'string' || value.includes('\0')) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env.${name} must be a string`)
+      }
+      env[name] = value
+    }
+  }
+  return { interpreter, ...env === undefined ? {} : { env } }
+}
+
+/** Resolve the interpreter for one runner: spec override, workspace candidates, then the fixed argv[0]. */
+export function resolveReviewInterpreter(workspaceRoot: string, spec: RunnerSpec, override: ReviewRunnerOverride | undefined): string {
+  if (override !== undefined) return override.interpreter
+  for (const candidate of spec.interpreterCandidates ?? []) {
+    const path = join(workspaceRoot, candidate)
+    if (isExecutableFile(path)) return path
+  }
+  return spec.argv[0] ?? 'sh'
 }
 
 /**
@@ -92,20 +223,35 @@ export function validateReviewTarget(target: string): string {
 
 /**
  * Build the exact shell command for one review run: a frozen argv from
- * {@link REVIEW_RUNNERS} plus, at most, one validated and quoted target.
+ * {@link REVIEW_RUNNERS}, the workspace-resolved interpreter in argv[0]
+ * position, and at most one validated and quoted target.
  * @param runner - the runner key; must exist in {@link REVIEW_RUNNERS}.
  * @param target - optional workspace-relative target.
+ * @param workspaceRoot - absolute workspace root; omitted keeps the fixed argv[0] (unit callers).
+ * @param override - validated workspace overlay, when one exists.
  * @returns the command string handed to the (confined) executor.
  * @throws on an unknown runner or an invalid target.
  */
-export function buildReviewRunCommand(runner: string, target: string | undefined): string {
+export function buildReviewRunCommand(
+  runner: string,
+  target: string | undefined,
+  workspaceRoot?: string,
+  override?: ReviewRunnerOverride,
+): string {
   const spec = REVIEW_RUNNERS[runner]
   if (spec === undefined) {
     throw new Error(`unknown runner "${runner}" (available: ${Object.keys(REVIEW_RUNNERS).join(', ')})`)
   }
   const resolved = target === undefined || target.trim() === '' ? spec.defaultTarget : validateReviewTarget(target)
-  const argv = resolved === undefined ? spec.argv : [...spec.argv, shellQuote(resolved)]
+  const argv = [...spec.argv]
+  if (workspaceRoot !== undefined) argv[0] = shellToken(resolveReviewInterpreter(workspaceRoot, spec, override))
+  if (resolved !== undefined) argv.push(shellQuote(resolved))
   return argv.join(' ')
+}
+
+/** The run environment: the read-only accommodation plus the workspace overlay's env. */
+export function reviewRunEnv(override: ReviewRunnerOverride | undefined): Record<string, string> {
+  return { PYTHONDONTWRITEBYTECODE: '1', ...override?.env }
 }
 
 /** Clamp the caller's timeout into the accepted window. */
@@ -176,20 +322,26 @@ const REVIEW_RUN_OUTPUT_SCHEMA = {
  * @param ctx - plugin context carrying `tools` and, once mounted, `shell`.
  */
 export function installReviewRunTool(ctx: Context): void {
-  ctx.inject(['shell'], (scope) => {
-    const shell = scope.get('shell') as ShellExecutor | undefined
-    const policyService = scope.get('sandboxPolicy') as { resolve: (request?: { session?: unknown }) => SandboxExecutionPolicy } | undefined
+  ctx.inject(['shell'], () => {
+    const shell = ctx.get('shell') as ShellExecutor | undefined
+    const policyService = ctx.get('sandboxPolicy') as { resolve: (request?: { session?: unknown }) => SandboxExecutionPolicy } | undefined
     if (shell === undefined || shell.sandboxMode === undefined || policyService === undefined) {
       process.stderr.write('[enpoi-capabilities] review_run not registered: no confining executor/sandbox policy\n')
       return
     }
-    scope.tools.register({
+    // Register on the PLUGIN context, never the inject child scope: a layer
+    // owned by the inject scope is invisible to agent scopes (it appears in no
+    // request schema even though pre-execute still vetoes the name). Mirrors
+    // enpoi-oracle's `ctx = root` registration.
+    ctx.tools.register({
       name: REVIEW_RUN_TOOL,
       description: [
         'Run the workspace test suite READ-ONLY: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),',
         'an optional workspace-relative target, a timeout, and no free shell. The command executes in the',
         'workspace root under the read-only sandbox, so tests cannot write files; runner stderr may still show',
-        'cache writes denied, and network access is not blocked. Available to reviewer/oracle seats only.',
+        'cache writes denied, and network access is not blocked. A workspace `.dsh/review-run.json` may pin the',
+        'runner interpreter (absolute executable path) and extra env (e.g. PYTHONPATH=src). Available to',
+        'reviewer/oracle seats only.',
       ].join(' '),
       parameters: {
         type: 'object',
@@ -215,22 +367,9 @@ export function installReviewRunTool(ctx: Context): void {
       async execute(args: unknown, exec): Promise<unknown> {
         const request = (args ?? {}) as { runner?: unknown; target?: unknown; timeoutSeconds?: unknown }
         const runner = typeof request.runner === 'string' ? request.runner : ''
-        const role = agentRoleOf(exec.agent as AgentLike | undefined)
-        if (role === undefined || !REVIEW_ROLES.has(role)) {
-          throw new Error(`review_run is available only to reviewer/oracle seats (role ${role ?? 'unknown'})`)
-        }
-        const command = buildReviewRunCommand(
-          runner,
-          typeof request.target === 'string' ? request.target : undefined,
-        )
-        const timeoutMs = reviewRunTimeoutMs(
-          typeof request.timeoutSeconds === 'number' ? request.timeoutSeconds : undefined,
-        )
-        const standing = policyService.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
-        const sandboxPolicy: SandboxExecutionPolicy = { ...standing, mode: 'read-only' }
         const value: ReviewRunValue = {
           runner,
-          command,
+          command: '',
           exitCode: null,
           signal: null,
           timedOut: false,
@@ -239,13 +378,30 @@ export function installReviewRunTool(ctx: Context): void {
           stderr: '',
         }
         try {
+          // The seat check uses the descriptor-aware resolver: a delegated
+          // reviewer child carries the parent's preset, so the role id alone
+          // cannot authorize it.
+          if (!reviewerSeatOf(exec.agent as AgentLike | undefined)) {
+            throw new Error('review_run is available only to reviewer/oracle seats')
+          }
+          const timeoutMs = reviewRunTimeoutMs(
+            typeof request.timeoutSeconds === 'number' ? request.timeoutSeconds : undefined,
+          )
+          const standing = policyService.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
+          const override = readReviewRunnerOverride(standing.workspaceRoot, runner)
+          value.command = buildReviewRunCommand(
+            runner,
+            typeof request.target === 'string' ? request.target : undefined,
+            standing.workspaceRoot,
+            override,
+          )
+          const sandboxPolicy: SandboxExecutionPolicy = { ...standing, mode: 'read-only' }
           const execution = await shell.execute(shell.resolve({
-            command,
+            command: value.command,
             workdir: standing.workspaceRoot,
             timeoutMs,
             signal: exec.signal,
-            // Python must not try to write bytecode under the read-only sandbox.
-            env: { PYTHONDONTWRITEBYTECODE: '1' },
+            env: reviewRunEnv(override),
             sandboxPolicy,
           }))
           const result = await execution.result()

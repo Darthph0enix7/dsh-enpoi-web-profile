@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   resolvePolicy, splitCompoundCommand, stripEnvPrefixes, matchBashPattern,
-  mcpLadder, mcpServerNameOf, agentRoleOf, grantProposalFor, grantProposalForOutcome, standingGrantRecord,
+  mcpLadder, mcpServerNameOf, agentRoleOf, reviewerSeatOf, grantProposalFor, grantProposalForOutcome, standingGrantRecord,
   dangerVerbOfPattern, SHIPPED_TOOL_DEFAULTS, advertisedToolNames,
   REVIEW_RUN_TOOL, REVIEW_ROLES, type PermissionPolicyConfig,
 } from '../src/policy'
@@ -347,6 +347,50 @@ describe('reviewer-exec policy seat', () => {
     // The seat's grant is not weakened by an operator ask row, and no other
     // bash grant interacts with it.
     expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, agent: 'oracle', config: { tools: { [REVIEW_RUN_TOOL]: 'ask' } } }).kind).toBe('allow')
+  })
+
+  it('honors the descriptor-derived reviewer flag for a delegated child', () => {
+    const child = { session: { header: { agentPreset: 'orchestrator' } } }
+    expect(reviewerSeatOf(child)).toBe(false)
+    expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, agent: 'orchestrator', reviewer: false, config: EMPTY }).kind).toBe('deny')
+    expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, agent: 'orchestrator', reviewer: true, config: EMPTY }))
+      .toEqual({ kind: 'allow', source: 'review:seat' })
+  })
+
+  it('identifies reviewer children from the newest subagent descriptor, not the parent preset', () => {
+    expect(reviewerSeatOf(undefined)).toBe(false)
+    expect(reviewerSeatOf({ session: { header: { agentPreset: 'fixer' } } })).toBe(false)
+    expect(reviewerSeatOf({ session: { header: { agentPreset: 'oracle' } } })).toBe(true)
+    // The oracle child's label/persona are written by the spawning tool.
+    expect(reviewerSeatOf({
+      session: {
+        header: { agentPreset: 'orchestrator' },
+        ownEvents: () => [{ type: 'subagent/descriptor', data: { label: 'oracle review: plan', persona: 'You are the Oracle — senior reviewer.' } }],
+      },
+    })).toBe(true)
+    expect(reviewerSeatOf({
+      session: {
+        header: { agentPreset: 'orchestrator' },
+        ownEvents: () => [{ type: 'subagent/descriptor', data: { persona: 'You are the Oracle — senior reviewer.' } }],
+      },
+    })).toBe(true)
+    // A writer child with the same parent preset is refused.
+    expect(reviewerSeatOf({
+      session: {
+        header: { agentPreset: 'orchestrator' },
+        ownEvents: () => [{ type: 'subagent/descriptor', data: { label: 'fixer: probe', persona: 'You are the Fixer — implementation specialist.' } }],
+      },
+    })).toBe(false)
+    // Only the NEWEST descriptor counts.
+    expect(reviewerSeatOf({
+      session: {
+        header: { agentPreset: 'orchestrator' },
+        ownEvents: () => [
+          { type: 'subagent/descriptor', data: { label: 'oracle review: first' } },
+          { type: 'subagent/descriptor', data: { label: 'fixer: second' } },
+        ],
+      },
+    })).toBe(false)
   })
 
   it('builds fixed runner argv with one quoted, validated target', () => {

@@ -1,7 +1,32 @@
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { installReviewRunTool, REVIEW_RUN_DEFAULT_TIMEOUT_MS, REVIEW_RUN_MAX_TIMEOUT_MS } from '../src/review-run'
+import {
+  buildReviewRunCommand, installReviewRunTool, readReviewRunnerOverride, resolveReviewInterpreter,
+  reviewRunEnv, REVIEW_RUN_DEFAULT_TIMEOUT_MS, REVIEW_RUN_MAX_TIMEOUT_MS, REVIEW_RUN_SPEC_RELATIVE_PATH,
+  REVIEW_RUNNERS,
+} from '../src/review-run'
 import type { ShellExecRequest, ShellExecSpec } from '@deepseek-ai/dsh-shell'
+
+/** A fresh writable workspace root for spec/venv probing. */
+function scratchWorkspace(): string {
+  return mkdtempSync(join(tmpdir(), 'review-run-ws-'))
+}
+
+/** Write `.dsh/review-run.json` under the workspace root. */
+function writeSpec(root: string, body: string): void {
+  mkdirSync(join(root, '.dsh'), { recursive: true })
+  writeFileSync(join(root, REVIEW_RUN_SPEC_RELATIVE_PATH), body)
+}
+
+/** Create an executable placeholder file. */
+function touchExecutable(path: string): void {
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, '#!/bin/sh\nexit 0\n')
+  chmodSync(path, 0o755)
+}
 
 interface FakeToolDefinition {
   name: string
@@ -51,7 +76,7 @@ function fakeShell(sandboxMode: string | undefined): { shell: unknown; specs: Sh
   return { shell, specs }
 }
 
-async function setup(options: { sandboxMode?: string | undefined; withPolicy?: boolean } = {}): Promise<Registered> {
+async function setup(options: { sandboxMode?: string | undefined; withPolicy?: boolean; workspaceRoot?: string } = {}): Promise<Registered> {
   const ctx = new Context()
   let registered: FakeToolDefinition | undefined
   ctx.provide('tools', {
@@ -64,7 +89,11 @@ async function setup(options: { sandboxMode?: string | undefined; withPolicy?: b
   ctx.provide('shell', shell as never)
   if (options.withPolicy !== false) {
     ctx.provide('sandboxPolicy', {
-      resolve: (request?: { session?: { id?: string } }) => ({ mode: 'workspace-write', workspaceRoot: '/ws', sessionId: request?.session?.id }),
+      resolve: (request?: { session?: { id?: string } }) => ({
+        mode: 'workspace-write',
+        workspaceRoot: options.workspaceRoot ?? '/ws',
+        sessionId: request?.session?.id,
+      }),
     } as never)
   }
   await ctx.plugin({ apply: (pluginCtx: Context) => { installReviewRunTool(pluginCtx) } })
@@ -75,6 +104,22 @@ async function setup(options: { sandboxMode?: string | undefined; withPolicy?: b
 
 const oracle = { id: 'a1', session: { header: { agentPreset: 'oracle' } } }
 const fixer = { id: 'a2', session: { header: { agentPreset: 'fixer' } } }
+/** A delegated reviewer child: parent preset in the header, identity in its own descriptor. */
+const oracleChild = {
+  id: 'a3',
+  session: {
+    header: { agentPreset: 'orchestrator' },
+    ownEvents: () => [{ type: 'subagent/descriptor', data: { label: 'oracle review: check', persona: 'You are the Oracle — senior reviewer.' } }],
+  },
+}
+/** A delegated non-reviewer child: same parent preset, a non-reviewer descriptor. */
+const fixerChild = {
+  id: 'a4',
+  session: {
+    header: { agentPreset: 'orchestrator' },
+    ownEvents: () => [{ type: 'subagent/descriptor', data: { label: 'fixer: probe', persona: 'You are the Fixer — implementation specialist.' } }],
+  },
+}
 
 describe('review_run registration fence', () => {
   it('registers nothing without a confining executor or a sandbox policy service', async () => {
@@ -104,8 +149,18 @@ describe('review_run registration fence', () => {
 
   it('refuses non-reviewer roles in the tool body even when policy is bypassed', async () => {
     const { definition, specs } = await setup()
-    await expect(definition.execute({ runner: 'pytest' }, { agent: fixer })).rejects.toThrow(/reviewer\/oracle seats/)
+    await expect(definition.execute({ runner: 'pytest' }, { agent: fixer }))
+      .resolves.toMatchObject({ error: expect.stringMatching(/reviewer\/oracle seats/) as unknown as string })
+    await expect(definition.execute({ runner: 'pytest' }, { agent: fixerChild }))
+      .resolves.toMatchObject({ error: expect.stringMatching(/reviewer\/oracle seats/) as unknown as string })
     expect(specs).toHaveLength(0)
+  })
+
+  it('admits a delegated reviewer child identified by its own descriptor', async () => {
+    const { definition, specs } = await setup()
+    const value = await definition.execute({ runner: 'pytest' }, { agent: oracleChild })
+    expect(value).toMatchObject({ exitCode: 0 })
+    expect(specs).toHaveLength(1)
   })
 
   it('clamps the requested timeout into the accepted window', async () => {
@@ -126,5 +181,65 @@ describe('review_run registration fence', () => {
     await ctx.fiber.await()
     const value = await registered?.execute({ runner: 'pytest' }, { agent: oracle }) as { error?: string }
     expect(value.error).toContain('spawn denied')
+  })
+})
+
+describe('workspace-aware runner resolution', () => {
+  it('prefers a workspace venv interpreter over the bare python3 fallback', () => {
+    const root = scratchWorkspace()
+    touchExecutable(join(root, '.venv/bin/python'))
+    expect(buildReviewRunCommand('pytest', 'tests/x.py', root))
+      .toBe(`${join(root, '.venv/bin/python')} -m pytest -q 'tests/x.py'`)
+    expect(buildReviewRunCommand('pytest', undefined, root)).toBe(`${join(root, '.venv/bin/python')} -m pytest -q`)
+    // A runner without interpreter candidates keeps its fixed argv[0].
+    expect(buildReviewRunCommand('node-test', 'tests/x.js', root)).toBe("node --test 'tests/x.js'")
+  })
+
+  it('reads a validated spec override and merges its env without displacing the read-only accommodation', () => {
+    const root = scratchWorkspace()
+    writeSpec(root, JSON.stringify({ pytest: { interpreter: process.execPath, env: { PYTHONPATH: 'src' } } }))
+    const override = readReviewRunnerOverride(root, 'pytest')
+    expect(override).toEqual({ interpreter: process.execPath, env: { PYTHONPATH: 'src' } })
+    expect(buildReviewRunCommand('pytest', 'tests', root, override))
+      .toBe(`${process.execPath} -m pytest -q 'tests'`)
+    expect(reviewRunEnv(override)).toEqual({ PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: 'src' })
+    expect(resolveReviewInterpreter(root, REVIEW_RUNNERS['pytest'] as never, undefined)).toBe('python3')
+  })
+
+  it('rejects malformed specs loud', () => {
+    const unknownRunner = scratchWorkspace()
+    writeSpec(unknownRunner, JSON.stringify({ mocha: { interpreter: process.execPath } }))
+    expect(() => readReviewRunnerOverride(unknownRunner, 'pytest')).toThrow(/unknown runner/)
+    const relative = scratchWorkspace()
+    writeSpec(relative, JSON.stringify({ pytest: { interpreter: 'python3' } }))
+    expect(() => readReviewRunnerOverride(relative, 'pytest')).toThrow(/absolute path/)
+    const missing = scratchWorkspace()
+    writeSpec(missing, JSON.stringify({ pytest: { interpreter: '/no/such/python' } }))
+    expect(() => readReviewRunnerOverride(missing, 'pytest')).toThrow(/not an executable file/)
+    const badEnv = scratchWorkspace()
+    writeSpec(badEnv, JSON.stringify({ pytest: { interpreter: process.execPath, env: { DSH_FAKE: 'x' } } }))
+    expect(() => readReviewRunnerOverride(badEnv, 'pytest')).toThrow(/may not set managed/)
+    const loaderEnv = scratchWorkspace()
+    writeSpec(loaderEnv, JSON.stringify({ pytest: { interpreter: process.execPath, env: { LD_PRELOAD: '/tmp/evil.so' } } }))
+    expect(() => readReviewRunnerOverride(loaderEnv, 'pytest')).toThrow(/dynamic-loader/)
+    const notJson = scratchWorkspace()
+    writeSpec(notJson, '{ nope')
+    expect(() => readReviewRunnerOverride(notJson, 'pytest')).toThrow(/not valid JSON/)
+  })
+
+  it('executes with the workspace override and reports a malformed spec as a bounded value', async () => {
+    const root = scratchWorkspace()
+    writeSpec(root, JSON.stringify({ pytest: { interpreter: process.execPath, env: { PYTHONPATH: 'src' } } }))
+    const { definition, specs } = await setup({ workspaceRoot: root })
+    const value = await definition.execute({ runner: 'pytest' }, { agent: oracleChild }) as { command?: string }
+    expect(value.command).toBe(`${process.execPath} -m pytest -q`)
+    expect(specs[0]?.env).toEqual({ PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: 'src' })
+
+    const broken = scratchWorkspace()
+    writeSpec(broken, '{ nope')
+    const second = await setup({ workspaceRoot: broken })
+    const failed = await second.definition.execute({ runner: 'pytest' }, { agent: oracle }) as { error?: string }
+    expect(failed.error).toMatch(/not valid JSON/)
+    expect(second.specs).toHaveLength(0)
   })
 })

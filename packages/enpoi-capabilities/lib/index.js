@@ -249,6 +249,20 @@ function agentRoleOf(agent, readCurrentPreset) {
   }
   return void 0;
 }
+function reviewerSeatOf(agent, readCurrentPreset) {
+  const role = agentRoleOf(agent, readCurrentPreset);
+  if (role !== void 0 && REVIEW_ROLES.has(role)) return true;
+  const events = agent?.session?.ownEvents?.() ?? [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "subagent/descriptor") continue;
+    const label = typeof event.data?.label === "string" ? event.data.label.toLowerCase() : "";
+    if (REVIEW_CHILD_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))) return true;
+    const persona = typeof event.data?.persona === "string" ? event.data.persona : "";
+    return REVIEW_CHILD_PERSONA.test(persona);
+  }
+  return false;
+}
 function resolvePolicy(input) {
   const { toolName, command, sandboxMode } = input;
   const agent = input.agent ?? "(unknown)";
@@ -320,7 +334,7 @@ function resolvePolicy(input) {
     return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
   }
   if (toolName === REVIEW_RUN_TOOL) {
-    return REVIEW_ROLES.has(agent) ? { kind: "allow", source: "review:seat" } : { kind: "deny", reason: `review_run is available only to reviewer/oracle seats (role ${agent})`, source: "review:seat" };
+    return input.reviewer === true || REVIEW_ROLES.has(agent) ? { kind: "allow", source: "review:seat" } : { kind: "deny", reason: `review_run is available only to reviewer/oracle seats (role ${agent})`, source: "review:seat" };
   }
   const agentCfg = input.agent !== void 0 ? input.config.agents?.[input.agent] : void 0;
   const agentPolicy = agentCfg?.tools?.[toolName];
@@ -398,7 +412,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, REVIEW_RUN_TOOL, REVIEW_ROLES, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERBS, DANGER_VERB_SET, OPAQUE_EXECUTORS, INLINE_INTERPRETERS;
+var MUTATION_TOOLS, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERBS, DANGER_VERB_SET, OPAQUE_EXECUTORS, INLINE_INTERPRETERS;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -414,6 +428,17 @@ var init_policy = __esm({
       "architect",
       "pragmatist"
     ]);
+    REVIEW_CHILD_LABEL_PREFIXES = Object.freeze([
+      "oracle review:",
+      "reviewer:",
+      "critic:",
+      "referee:",
+      "chair:",
+      "skeptic:",
+      "architect:",
+      "pragmatist:"
+    ]);
+    REVIEW_CHILD_PERSONA = /^you are the (?:oracle|reviewer|critic|referee|chair|skeptic|architect|pragmatist)\b/i;
     SHIPPED_TOOL_DEFAULTS = {
       read: "allow",
       glob: "allow",
@@ -4998,10 +5023,16 @@ function installSearchNudge(ctx) {
 
 // src/review-run.ts
 init_policy();
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 var REVIEW_RUN_DEFAULT_TIMEOUT_MS = 12e4;
 var REVIEW_RUN_MAX_TIMEOUT_MS = 6e5;
 var REVIEW_RUNNERS = Object.freeze({
-  pytest: { argv: ["python3", "-m", "pytest", "-q"], target: true },
+  pytest: {
+    argv: ["python3", "-m", "pytest", "-q"],
+    target: true,
+    interpreterCandidates: [".venv/bin/python", "venv/bin/python"]
+  },
   vitest: { argv: ["npx", "--no-install", "vitest", "run"], target: true },
   jest: { argv: ["npx", "--no-install", "jest"], target: true },
   "node-test": { argv: ["node", "--test"], target: true },
@@ -5010,6 +5041,92 @@ var REVIEW_RUNNERS = Object.freeze({
 });
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+function shellToken(value) {
+  return /^[A-Za-z0-9_./@+-]+$/.test(value) ? value : shellQuote(value);
+}
+var REVIEW_RUN_SPEC_RELATIVE_PATH = ".dsh/review-run.json";
+function isExecutableFile(path) {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function readReviewRunnerOverride(workspaceRoot, runner) {
+  const specPath = join(workspaceRoot, REVIEW_RUN_SPEC_RELATIVE_PATH);
+  let raw;
+  try {
+    raw = readFileSync(specPath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return void 0;
+    throw new Error(`review-run spec ${specPath} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`review-run spec ${specPath} is not valid JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`review-run spec ${specPath} must be a JSON object of runner \u2192 { interpreter, env? }`);
+  }
+  const table = parsed;
+  const unknownRunners = Object.keys(table).filter((key) => !Object.hasOwn(REVIEW_RUNNERS, key));
+  if (unknownRunners.length > 0) {
+    throw new Error(`review-run spec ${specPath} names unknown runner(s): ${unknownRunners.join(", ")}`);
+  }
+  const entry = table[runner];
+  if (entry === void 0) return void 0;
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    throw new Error(`review-run spec ${specPath}: ${runner} must be an object`);
+  }
+  const fields = entry;
+  const unknownFields = Object.keys(fields).filter((key) => key !== "interpreter" && key !== "env");
+  if (unknownFields.length > 0) {
+    throw new Error(`review-run spec ${specPath}: ${runner} has unknown field(s): ${unknownFields.join(", ")}`);
+  }
+  const interpreter = fields["interpreter"];
+  if (typeof interpreter !== "string" || !isAbsolute(interpreter)) {
+    throw new Error(`review-run spec ${specPath}: ${runner}.interpreter must be an absolute path`);
+  }
+  if (!isExecutableFile(interpreter)) {
+    throw new Error(`review-run spec ${specPath}: ${runner}.interpreter is not an executable file: ${interpreter}`);
+  }
+  let env;
+  const rawEnv = fields["env"];
+  if (rawEnv !== void 0) {
+    if (typeof rawEnv !== "object" || rawEnv === null || Array.isArray(rawEnv)) {
+      throw new Error(`review-run spec ${specPath}: ${runner}.env must be an object of NAME \u2192 value`);
+    }
+    env = {};
+    for (const [name2, value] of Object.entries(rawEnv)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name2)) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env has an invalid name: ${JSON.stringify(name2)}`);
+      }
+      if (name2.startsWith("DSH_")) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env may not set managed ${name2}`);
+      }
+      if (name2.startsWith("LD_") || name2.startsWith("DYLD_")) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env may not set dynamic-loader ${name2}`);
+      }
+      if (typeof value !== "string" || value.includes("\0")) {
+        throw new Error(`review-run spec ${specPath}: ${runner}.env.${name2} must be a string`);
+      }
+      env[name2] = value;
+    }
+  }
+  return { interpreter, ...env === void 0 ? {} : { env } };
+}
+function resolveReviewInterpreter(workspaceRoot, spec, override) {
+  if (override !== void 0) return override.interpreter;
+  for (const candidate of spec.interpreterCandidates ?? []) {
+    const path = join(workspaceRoot, candidate);
+    if (isExecutableFile(path)) return path;
+  }
+  return spec.argv[0] ?? "sh";
 }
 function validateReviewTarget(target) {
   const trimmed = target.trim();
@@ -5021,14 +5138,19 @@ function validateReviewTarget(target) {
   }
   return trimmed;
 }
-function buildReviewRunCommand(runner, target) {
+function buildReviewRunCommand(runner, target, workspaceRoot, override) {
   const spec = REVIEW_RUNNERS[runner];
   if (spec === void 0) {
     throw new Error(`unknown runner "${runner}" (available: ${Object.keys(REVIEW_RUNNERS).join(", ")})`);
   }
   const resolved = target === void 0 || target.trim() === "" ? spec.defaultTarget : validateReviewTarget(target);
-  const argv = resolved === void 0 ? spec.argv : [...spec.argv, shellQuote(resolved)];
+  const argv = [...spec.argv];
+  if (workspaceRoot !== void 0) argv[0] = shellToken(resolveReviewInterpreter(workspaceRoot, spec, override));
+  if (resolved !== void 0) argv.push(shellQuote(resolved));
   return argv.join(" ");
+}
+function reviewRunEnv(override) {
+  return { PYTHONDONTWRITEBYTECODE: "1", ...override?.env };
 }
 function reviewRunTimeoutMs(timeoutSeconds) {
   if (timeoutSeconds === void 0 || !Number.isFinite(timeoutSeconds)) return REVIEW_RUN_DEFAULT_TIMEOUT_MS;
@@ -5074,20 +5196,22 @@ var REVIEW_RUN_OUTPUT_SCHEMA = {
   required: ["runner", "command", "exitCode", "signal", "timedOut", "sandbox", "stdout", "stderr"]
 };
 function installReviewRunTool(ctx) {
-  ctx.inject(["shell"], (scope) => {
-    const shell = scope.get("shell");
-    const policyService = scope.get("sandboxPolicy");
+  ctx.inject(["shell"], () => {
+    const shell = ctx.get("shell");
+    const policyService = ctx.get("sandboxPolicy");
     if (shell === void 0 || shell.sandboxMode === void 0 || policyService === void 0) {
       process.stderr.write("[enpoi-capabilities] review_run not registered: no confining executor/sandbox policy\n");
       return;
     }
-    scope.tools.register({
+    ctx.tools.register({
       name: REVIEW_RUN_TOOL,
       description: [
         "Run the workspace test suite READ-ONLY: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),",
         "an optional workspace-relative target, a timeout, and no free shell. The command executes in the",
         "workspace root under the read-only sandbox, so tests cannot write files; runner stderr may still show",
-        "cache writes denied, and network access is not blocked. Available to reviewer/oracle seats only."
+        "cache writes denied, and network access is not blocked. A workspace `.dsh/review-run.json` may pin the",
+        "runner interpreter (absolute executable path) and extra env (e.g. PYTHONPATH=src). Available to",
+        "reviewer/oracle seats only."
       ].join(" "),
       parameters: {
         type: "object",
@@ -5113,22 +5237,9 @@ function installReviewRunTool(ctx) {
       async execute(args, exec) {
         const request = args ?? {};
         const runner = typeof request.runner === "string" ? request.runner : "";
-        const role = agentRoleOf(exec.agent);
-        if (role === void 0 || !REVIEW_ROLES.has(role)) {
-          throw new Error(`review_run is available only to reviewer/oracle seats (role ${role ?? "unknown"})`);
-        }
-        const command = buildReviewRunCommand(
-          runner,
-          typeof request.target === "string" ? request.target : void 0
-        );
-        const timeoutMs = reviewRunTimeoutMs(
-          typeof request.timeoutSeconds === "number" ? request.timeoutSeconds : void 0
-        );
-        const standing = policyService.resolve(exec.agent === void 0 ? {} : { session: exec.agent.session });
-        const sandboxPolicy = { ...standing, mode: "read-only" };
         const value = {
           runner,
-          command,
+          command: "",
           exitCode: null,
           signal: null,
           timedOut: false,
@@ -5137,13 +5248,27 @@ function installReviewRunTool(ctx) {
           stderr: ""
         };
         try {
+          if (!reviewerSeatOf(exec.agent)) {
+            throw new Error("review_run is available only to reviewer/oracle seats");
+          }
+          const timeoutMs = reviewRunTimeoutMs(
+            typeof request.timeoutSeconds === "number" ? request.timeoutSeconds : void 0
+          );
+          const standing = policyService.resolve(exec.agent === void 0 ? {} : { session: exec.agent.session });
+          const override = readReviewRunnerOverride(standing.workspaceRoot, runner);
+          value.command = buildReviewRunCommand(
+            runner,
+            typeof request.target === "string" ? request.target : void 0,
+            standing.workspaceRoot,
+            override
+          );
+          const sandboxPolicy = { ...standing, mode: "read-only" };
           const execution = await shell.execute(shell.resolve({
-            command,
+            command: value.command,
             workdir: standing.workspaceRoot,
             timeoutMs,
             signal: exec.signal,
-            // Python must not try to write bytecode under the read-only sandbox.
-            env: { PYTHONDONTWRITEBYTECODE: "1" },
+            env: reviewRunEnv(override),
             sandboxPolicy
           }));
           const result = await execution.result();
@@ -5548,6 +5673,11 @@ function apply(ctx, config = {}) {
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
       agent: askingAgentOf(exec),
+      // A delegated child carries the PARENT's preset, so reviewer seats are
+      // identified from the child's own subagent descriptor, not the role id.
+      // Computed only for the gated tool: the descriptor scan is unnecessary
+      // work for every other call.
+      reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
       config: config2,
       sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? []

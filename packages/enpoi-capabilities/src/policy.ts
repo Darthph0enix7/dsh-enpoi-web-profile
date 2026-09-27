@@ -76,13 +76,29 @@ const MUTATION_TOOLS = new Set(['bash', 'edit', 'write', 'str_replace_editor'])
 export const REVIEW_RUN_TOOL = 'review_run'
 
 /**
- * Seats that hold {@link REVIEW_RUN_TOOL}: the Oracle, the council/review
- * personas, and any explicitly named reviewer role. A delegated child carries
- * its role id as the session-agent preset, so the same check covers children.
+ * Role ids that hold {@link REVIEW_RUN_TOOL} when they ARE the session's
+ * preset (root seats, switched seats). A delegated child does NOT carry its
+ * role id — F's `childSessionMeta` copies the parent's composed preset — so
+ * children are identified by {@link reviewerSeatOf}'s descriptor check
+ * instead.
  */
 export const REVIEW_ROLES: ReadonlySet<string> = new Set([
   'oracle', 'reviewer', 'critic', 'referee', 'chair', 'skeptic', 'architect', 'pragmatist',
 ])
+
+/**
+ * Descriptor-label prefixes the reviewer-spawning tools set on their child.
+ * The label is authored by server-side spawn code (never model input), and
+ * P-owned reviewer tools adopt it: `oracle_review` labels its child
+ * `oracle review: …`; the generic delegation tool labels children
+ * `<role>: <description>`. A future reviewer tool must add its prefix here.
+ */
+export const REVIEW_CHILD_LABEL_PREFIXES: readonly string[] = Object.freeze([
+  'oracle review:', 'reviewer:', 'critic:', 'referee:', 'chair:', 'skeptic:', 'architect:', 'pragmatist:',
+])
+
+/** Reviewer personas as authored by the spawning reviewer tools (defense in depth when the label convention drifts). */
+const REVIEW_CHILD_PERSONA = /^you are the (?:oracle|reviewer|critic|referee|chair|skeptic|architect|pragmatist)\b/i
 
 /** Shipped global defaults (user-editable via settings; absent keys fall here). */
 export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
@@ -412,6 +428,12 @@ export interface PolicyResolutionInput {
   command?: string
   /** The calling agent's name (role/persona id), when known. */
   agent?: string
+  /**
+   * Whether the caller is a reviewer/oracle seat per {@link reviewerSeatOf}.
+   * Callers with the live agent object must compute this; role-less delegated
+   * children can only be identified through their subagent descriptor.
+   */
+  reviewer?: boolean
   config: PermissionPolicyConfig
   /** Effective sandbox mode; 'read-only' vetoes mutations. */
   sandboxMode?: string
@@ -450,7 +472,10 @@ export interface AgentLike {
   label?: string
   session?: {
     header?: { agentPreset?: string; meta?: { agentPreset?: string } }
-    ownEvents?: () => readonly { type?: string; data?: { agentPreset?: unknown } }[]
+    ownEvents?: () => readonly {
+      type?: string
+      data?: { agentPreset?: unknown; label?: unknown; persona?: unknown }
+    }[]
   }
 }
 
@@ -496,10 +521,41 @@ export function agentRoleOf(
 }
 
 /**
+ * Whether the live caller is a reviewer/oracle seat. Two independent signals:
+ * the role id ({@link agentRoleOf} — a root/switched seat), and, for a
+ * delegated child, the NEWEST `subagent/descriptor` in its own log. Delegated
+ * children inherit the PARENT's preset (F's `childSessionMeta` copies
+ * `composedPreset(parent)`), so the role alone can never identify a reviewer
+ * child; the descriptor is written by the spawning tool's own code and
+ * reviewer tools label their children with
+ * {@link REVIEW_CHILD_LABEL_PREFIXES}. The scan stops at the first (newest)
+ * descriptor: a child gets exactly one at creation.
+ * @param agent - the live caller.
+ * @param readCurrentPreset - optional current-preset projection reader.
+ * @returns true only for a reviewer/oracle seat.
+ */
+export function reviewerSeatOf(
+  agent: AgentLike | undefined,
+  readCurrentPreset?: (session: unknown) => string | undefined,
+): boolean {
+  const role = agentRoleOf(agent, readCurrentPreset)
+  if (role !== undefined && REVIEW_ROLES.has(role)) return true
+  const events = agent?.session?.ownEvents?.() ?? []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'subagent/descriptor') continue
+    const label = typeof event.data?.label === 'string' ? event.data.label.toLowerCase() : ''
+    if (REVIEW_CHILD_LABEL_PREFIXES.some(prefix => label.startsWith(prefix))) return true
+    const persona = typeof event.data?.persona === 'string' ? event.data.persona : ''
+    return REVIEW_CHILD_PERSONA.test(persona)
+  }
+  return false
+}
+
+/**
  * The complete policy resolution for one tool call (doc 55, Oracle-amended).
  * Deny terminates at the first hit anywhere; grants only short-circuit an ask
  * at the granularity the ask arose at (a pattern ask is absorbed only by a
- * grant carrying that pattern; a tool-level ask only by a tool-level grant).
  */
 export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
   const { toolName, command, sandboxMode } = input
@@ -591,7 +647,7 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
   // seat never has to ask — the capability itself is the narrow, fixed surface.
   // Every other role is denied outright, so this grants nothing to workers.
   if (toolName === REVIEW_RUN_TOOL) {
-    return REVIEW_ROLES.has(agent)
+    return input.reviewer === true || REVIEW_ROLES.has(agent)
       ? { kind: 'allow', source: 'review:seat' }
       : { kind: 'deny', reason: `review_run is available only to reviewer/oracle seats (role ${agent})`, source: 'review:seat' }
   }

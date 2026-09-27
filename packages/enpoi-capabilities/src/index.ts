@@ -24,8 +24,8 @@ import { initialCapabilitiesState } from './state'
 import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
 import {
-  resolvePolicy, grantProposalFor, grantProposalForOutcome, standingGrantRecord, agentRoleOf, mcpServerNameOf, mcpPolicyRemovalOps,
-  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames,
+  resolvePolicy, grantProposalFor, grantProposalForOutcome, standingGrantRecord, agentRoleOf, reviewerSeatOf, mcpServerNameOf, mcpPolicyRemovalOps,
+  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames, REVIEW_RUN_TOOL,
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
@@ -647,6 +647,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
       agent: askingAgentOf(exec),
+      // A delegated child carries the PARENT's preset, so reviewer seats are
+      // identified from the child's own subagent descriptor, not the role id.
+      // Computed only for the gated tool: the descriptor scan is unnecessary
+      // work for every other call.
+      reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
       config,
       sandboxMode: readSandboxMode(exec.agent as { session?: unknown } | undefined),
       mcpServerNames: readMcpServerNames() ?? [],
