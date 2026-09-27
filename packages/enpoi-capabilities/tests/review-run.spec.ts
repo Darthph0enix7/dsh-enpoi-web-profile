@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -77,7 +77,7 @@ function fakeShell(sandboxMode: string | undefined): { shell: unknown; specs: Sh
   return { shell, specs }
 }
 
-async function setup(options: { sandboxMode?: string | undefined; withPolicy?: boolean; workspaceRoot?: string } = {}): Promise<Registered> {
+async function setup(options: { sandboxMode?: string | undefined; withPolicy?: boolean; workspaceRoot?: string; sessionMode?: string } = {}): Promise<Registered> {
   const ctx = new Context()
   let registered: FakeToolDefinition | undefined
   ctx.provide('tools', {
@@ -91,7 +91,7 @@ async function setup(options: { sandboxMode?: string | undefined; withPolicy?: b
   if (options.withPolicy !== false) {
     ctx.provide('sandboxPolicy', {
       resolve: (request?: { session?: { id?: string } }) => ({
-        mode: 'workspace-write',
+        mode: options.sessionMode ?? 'workspace-write',
         workspaceRoot: options.workspaceRoot ?? '/ws',
         sessionId: request?.session?.id,
       }),
@@ -162,7 +162,7 @@ describe('review_run registration fence', () => {
     await expect(setup({ withPolicy: false })).rejects.toThrow(/not registered/)
   })
 
-  it('runs the fixed command read-only in the workspace root for an oracle seat', async () => {
+  it('runs the fixed command with a scratch writable root and an untouched checkout for an oracle seat', async () => {
     const { definition, specs } = await setup()
     expect(definition.name).toBe('review_run')
     const value = await definition.execute(
@@ -177,9 +177,19 @@ describe('review_run registration fence', () => {
       timeoutMs: REVIEW_RUN_DEFAULT_TIMEOUT_MS,
       env: { PYTHONDONTWRITEBYTECODE: '1' },
     })
-    // Forced read-only: the executor's writable-root list is empty under this
-    // policy, so the run cannot mutate the workspace.
-    expect(specs[0]?.sandboxPolicy).toMatchObject({ mode: 'read-only', workspaceRoot: '/ws' })
+    // The writable root is the private scratch dir (plus platform temp by
+    // mode semantics), never the checkout at workdir.
+    const policy = specs[0]?.sandboxPolicy as { mode: string; workspaceRoot: string } | undefined
+    expect(policy?.mode).toBe('workspace-write')
+    expect(policy?.workspaceRoot).not.toBe('/ws')
+    expect(existsSync(policy?.workspaceRoot ?? '')).toBe(false)
+  })
+
+  it('fails closed for a read-only session instead of widening it', async () => {
+    const { definition, specs } = await setup({ sessionMode: 'read-only' })
+    const value = await definition.execute({ runner: 'pytest' }, { agent: oracleChild })
+    expect(value).toMatchObject({ error: expect.stringMatching(/read-only/) as unknown as string })
+    expect(specs).toHaveLength(0)
   })
 
   it('refuses non-reviewer roles in the tool body even when policy is bypassed', async () => {

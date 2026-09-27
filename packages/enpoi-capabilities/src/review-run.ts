@@ -11,23 +11,29 @@
  *   scripts — `npm test` would execute arbitrary package.json commands);
  * - an optional workspace-relative target, validated to a conservative path
  *   alphabet and quoted for the shell, never interpolated raw;
- * - execution through the confining executor under a FORCED `read-only`
- *   sandbox policy: the sandbox's writable-root allow-list is empty
- *   (`dsh-sandbox/roots`), so file mutations are denied, not merely
- *   discouraged;
+ * - execution through the confining executor with a writable-root policy that
+ *   EXCLUDES the checkout: the run's writable roots are a fresh private
+ *   scratch directory plus the platform temp areas, while cwd stays the
+ *   workspace root — so the workspace stays read-only to the test process,
+ *   but test runners get the temporary directory they require (a strict
+ *   zero-writable-roots policy aborts pytest before it collects anything:
+ *   `FileNotFoundError: No usable temporary directory found`);
  * - cwd pinned to the session workspace root, a bounded timeout, forwarded
  *   cancellation, and a scrubbed environment.
  *
  * Blast radius: arbitrary test code still executes with the harness user's
- * ambient privileges and can reach the network; only local filesystem writes
- * are denied. Nothing here is offered to non-reviewer roles: the policy engine
- * denies `review_run` outside {@link REVIEW_ROLES}, and the tool body repeats
- * the check.
+ * ambient privileges and can reach the network, and it may write the private
+ * scratch root and the platform temp areas; it cannot write the checkout.
+ * Nothing here is offered to non-reviewer roles: the policy engine denies
+ * `review_run` outside {@link REVIEW_ROLES}, and the tool body repeats the
+ * check. A session that resolves to read-only fails closed instead of
+ * widening itself.
  *
  * @module dsh-enpoi-capabilities/review-run
  */
 
-import { accessSync, constants, readFileSync, statSync } from 'node:fs'
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: loads the `tools` property augmentation on Context.
@@ -350,10 +356,11 @@ export function installReviewRunTool(ctx: Context): void {
     scope.tools.register({
       name: REVIEW_RUN_TOOL,
       description: [
-        'Run the workspace test suite READ-ONLY: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),',
+        'Run the workspace test suite READ-ONLY against the checkout: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),',
         'an optional workspace-relative target, a timeout, and no free shell. The command executes in the',
-        'workspace root under the read-only sandbox, so tests cannot write files; runner stderr may still show',
-        'cache writes denied, and network access is not blocked. A workspace `.dsh/review-run.json` may pin the',
+        'workspace root while the writable roots stay a private scratch directory plus the platform temp areas,',
+        'so the checkout cannot be mutated; runner stderr may still show checkout cache writes denied, and network',
+        'access is not blocked. A workspace `.dsh/review-run.json` may pin the',
         'runner interpreter (absolute executable path) and extra env (e.g. PYTHONPATH=src). Available to',
         'reviewer/oracle seats only.',
       ].join(' '),
@@ -402,6 +409,9 @@ export function installReviewRunTool(ctx: Context): void {
             typeof request.timeoutSeconds === 'number' ? request.timeoutSeconds : undefined,
           )
           const standing = policyService.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
+          if (standing.mode === 'read-only') {
+            throw new Error('review_run needs a writable temporary area, and this session runs read-only')
+          }
           const override = readReviewRunnerOverride(standing.workspaceRoot, runner)
           value.command = buildReviewRunCommand(
             runner,
@@ -409,23 +419,31 @@ export function installReviewRunTool(ctx: Context): void {
             standing.workspaceRoot,
             override,
           )
-          const sandboxPolicy: SandboxExecutionPolicy = { ...standing, mode: 'read-only' }
-          const execution = await shell.execute(shell.resolve({
-            command: value.command,
-            workdir: standing.workspaceRoot,
-            timeoutMs,
-            signal: exec.signal,
-            env: reviewRunEnv(override),
-            sandboxPolicy,
-          }))
-          const result = await execution.result()
-          value.exitCode = result.exitCode
-          value.signal = result.signal
-          value.timedOut = result.timedOut
-          value.stdout = result.stdout.text
-          value.stderr = result.stderr.text
-          value.sandbox = { mode: result.sandbox?.mode ?? 'read-only', denied: result.sandbox?.denied ?? false }
-          return value
+          // The checkout stays read-only to the run: the writable roots are the
+          // fresh scratch root below plus the platform temp areas. A strict
+          // zero-writable-roots policy aborts real runners before collection.
+          const scratchRoot = mkdtempSync(join(tmpdir(), 'review-run-'))
+          try {
+            const sandboxPolicy: SandboxExecutionPolicy = { ...standing, mode: 'workspace-write', workspaceRoot: scratchRoot }
+            const execution = await shell.execute(shell.resolve({
+              command: value.command,
+              workdir: standing.workspaceRoot,
+              timeoutMs,
+              signal: exec.signal,
+              env: reviewRunEnv(override),
+              sandboxPolicy,
+            }))
+            const result = await execution.result()
+            value.exitCode = result.exitCode
+            value.signal = result.signal
+            value.timedOut = result.timedOut
+            value.stdout = result.stdout.text
+            value.stderr = result.stderr.text
+            value.sandbox = { mode: result.sandbox?.mode ?? 'workspace-write', denied: result.sandbox?.denied ?? false }
+            return value
+          } finally {
+            rmSync(scratchRoot, { recursive: true, force: true })
+          }
         } catch (error) {
           value.error = `review_run could not execute: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`
           return value

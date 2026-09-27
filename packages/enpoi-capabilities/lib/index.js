@@ -5023,7 +5023,8 @@ function installSearchNudge(ctx) {
 
 // src/review-run.ts
 init_policy();
-import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 var REVIEW_RUN_DEFAULT_TIMEOUT_MS = 12e4;
 var REVIEW_RUN_MAX_TIMEOUT_MS = 6e5;
@@ -5211,10 +5212,11 @@ function installReviewRunTool(ctx) {
     scope.tools.register({
       name: REVIEW_RUN_TOOL,
       description: [
-        "Run the workspace test suite READ-ONLY: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),",
+        "Run the workspace test suite READ-ONLY against the checkout: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),",
         "an optional workspace-relative target, a timeout, and no free shell. The command executes in the",
-        "workspace root under the read-only sandbox, so tests cannot write files; runner stderr may still show",
-        "cache writes denied, and network access is not blocked. A workspace `.dsh/review-run.json` may pin the",
+        "workspace root while the writable roots stay a private scratch directory plus the platform temp areas,",
+        "so the checkout cannot be mutated; runner stderr may still show checkout cache writes denied, and network",
+        "access is not blocked. A workspace `.dsh/review-run.json` may pin the",
         "runner interpreter (absolute executable path) and extra env (e.g. PYTHONPATH=src). Available to",
         "reviewer/oracle seats only."
       ].join(" "),
@@ -5260,6 +5262,9 @@ function installReviewRunTool(ctx) {
             typeof request.timeoutSeconds === "number" ? request.timeoutSeconds : void 0
           );
           const standing = policyService.resolve(exec.agent === void 0 ? {} : { session: exec.agent.session });
+          if (standing.mode === "read-only") {
+            throw new Error("review_run needs a writable temporary area, and this session runs read-only");
+          }
           const override = readReviewRunnerOverride(standing.workspaceRoot, runner);
           value.command = buildReviewRunCommand(
             runner,
@@ -5267,23 +5272,28 @@ function installReviewRunTool(ctx) {
             standing.workspaceRoot,
             override
           );
-          const sandboxPolicy = { ...standing, mode: "read-only" };
-          const execution = await shell.execute(shell.resolve({
-            command: value.command,
-            workdir: standing.workspaceRoot,
-            timeoutMs,
-            signal: exec.signal,
-            env: reviewRunEnv(override),
-            sandboxPolicy
-          }));
-          const result = await execution.result();
-          value.exitCode = result.exitCode;
-          value.signal = result.signal;
-          value.timedOut = result.timedOut;
-          value.stdout = result.stdout.text;
-          value.stderr = result.stderr.text;
-          value.sandbox = { mode: result.sandbox?.mode ?? "read-only", denied: result.sandbox?.denied ?? false };
-          return value;
+          const scratchRoot = mkdtempSync(join(tmpdir(), "review-run-"));
+          try {
+            const sandboxPolicy = { ...standing, mode: "workspace-write", workspaceRoot: scratchRoot };
+            const execution = await shell.execute(shell.resolve({
+              command: value.command,
+              workdir: standing.workspaceRoot,
+              timeoutMs,
+              signal: exec.signal,
+              env: reviewRunEnv(override),
+              sandboxPolicy
+            }));
+            const result = await execution.result();
+            value.exitCode = result.exitCode;
+            value.signal = result.signal;
+            value.timedOut = result.timedOut;
+            value.stdout = result.stdout.text;
+            value.stderr = result.stderr.text;
+            value.sandbox = { mode: result.sandbox?.mode ?? "workspace-write", denied: result.sandbox?.denied ?? false };
+            return value;
+          } finally {
+            rmSync(scratchRoot, { recursive: true, force: true });
+          }
         } catch (error) {
           value.error = `review_run could not execute: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`;
           return value;
