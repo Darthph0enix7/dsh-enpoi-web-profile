@@ -24,12 +24,13 @@ import { initialCapabilitiesState } from './state'
 import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
 import {
-  resolvePolicy, grantProposalFor, standingGrantRecord, agentRoleOf, mcpServerNameOf, mcpPolicyRemovalOps,
+  resolvePolicy, grantProposalFor, grantProposalForOutcome, standingGrantRecord, agentRoleOf, mcpServerNameOf, mcpPolicyRemovalOps,
   SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames,
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
 import { installSearchNudge } from './search-nudge'
+import { installReviewRunTool } from './review-run'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -668,7 +669,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     if (typeof exec.callId === 'string' && pendingGrants.size < 128) {
       pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : undefined, askingAgentOf(exec)))
     }
-    return { kind: 'ask', reason: decision.reason }
+    return {
+      kind: 'ask',
+      reason: decision.reason,
+      // The danger-list broad action travels with the ask so the card can label
+      // it ("allow all rm"); the decision itself stays a closed outcome.
+      ...decision.broadAllow !== undefined ? { broadAllow: decision.broadAllow } : {},
+    }
   }) as (...args: unknown[]) => unknown)
   ctx.effect(() => disposePolicy, 'enpoi-capabilities: permission policy pre-execute')
 
@@ -676,6 +683,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // One advisory line when a search-leading bash command runs in a turn that
   // has not used grep/glob yet; never a deny, once per turn (search-nudge.ts).
   installSearchNudge(ctx)
+
+  // ── reviewer-exec: the dedicated read-only test-run tool ───────────────────
+  // Reviewer/oracle seats run under the `never` approval policy (delegation
+  // pins it), where an ask is an automatic denial. `review_run` is their
+  // read-only execution path: a fixed runner enum rooted at the workspace
+  // under a forced read-only sandbox policy, never the general bash surface.
+  installReviewRunTool(ctx)
 
   // Host-side allow-always persistence (Oracle amendment 2): the card only
   // answers; the host observes the decided outcome and writes the standing
@@ -750,7 +764,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   const disposeGrantWatch = ctx.on('session/event', ((session: { id?: string; eventAt?: (seq: number) => { type: string; data?: Record<string, unknown>; seq?: number } | undefined; seq?: number }, event: { type: string; seq?: number; data?: Record<string, unknown> }) => {
     if (event?.type !== 'approval/decided') return undefined
     const outcome = event.data?.outcome
-    if (outcome !== 'allowed-always') return undefined
+    // `allowed-always` is the default action (exact-command pin for the danger
+    // list); `allowed-always-broad` is the card's separate explicit action
+    // (rule-level pin, "allow all rm").
+    if (outcome !== 'allowed-always' && outcome !== 'allowed-always-broad') return undefined
     const approvalId = (event.data as { id?: string }).id
     if (approvalId === undefined) return undefined
     // The decided event carries the APPROVAL id; the paired asked event carries
@@ -773,7 +790,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     if (callId === undefined) return undefined
     const proposal = pendingGrants.get(callId)
     pendingGrants.delete(callId)
-    if (proposal !== undefined) void persistGrant(proposal).catch((error: unknown) => {
+    if (proposal !== undefined) void persistGrant(
+      grantProposalForOutcome(proposal, outcome === 'allowed-always-broad'),
+    ).catch((error: unknown) => {
       process.stderr.write(`[enpoi-capabilities] grant persistence failed: ${String(error)}\n`)
     })
     return undefined

@@ -52,10 +52,37 @@ export interface PermissionPolicyConfig {
 export type PolicyDecision =
   | { kind: 'allow'; source: string }
   | { kind: 'deny'; reason: string; source: string }
-  | { kind: 'ask'; reason: string; source: string; /** The grant tier that can absorb this ask. */ grantTier: 'pattern' | 'tool'; /** The pattern that asked (grantTier 'pattern'). */ pattern?: string }
+  | {
+    kind: 'ask'
+    reason: string
+    source: string
+    /** The grant tier that can absorb this ask. */
+    grantTier: 'pattern' | 'tool'
+    /** The pattern that asked (grantTier 'pattern'). */
+    pattern?: string
+    /**
+     * Present when the ask can be answered with a BROAD standing grant: the
+     * shell verb ("rm") the approval card labels its explicit "allow all"
+     * action with. Absent means the card offers only the default action, which
+     * for danger-list verbs pins the exact raw command.
+     */
+    broadAllow?: { label: string }
+  }
 
 /** Tools treated as mutations for the read-only session veto. */
 const MUTATION_TOOLS = new Set(['bash', 'edit', 'write', 'str_replace_editor'])
+
+/** The dedicated reviewer-exec tool: fixed read-only test runs, reviewer seats only. */
+export const REVIEW_RUN_TOOL = 'review_run'
+
+/**
+ * Seats that hold {@link REVIEW_RUN_TOOL}: the Oracle, the council/review
+ * personas, and any explicitly named reviewer role. A delegated child carries
+ * its role id as the session-agent preset, so the same check covers children.
+ */
+export const REVIEW_ROLES: ReadonlySet<string> = new Set([
+  'oracle', 'reviewer', 'critic', 'referee', 'chair', 'skeptic', 'architect', 'pragmatist',
+])
 
 /** Shipped global defaults (user-editable via settings; absent keys fall here). */
 export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
@@ -296,6 +323,47 @@ const HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exe
  */
 const DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/
 
+/**
+ * The danger-list verbs as a set: the same vocabulary {@link DANGER_VERBS}
+ * scans for, used to name the broad action ("allow all rm"). `mkfs.ext4`
+ * normalizes to `mkfs` for membership, and the LABEL keeps the argv0 spelling.
+ */
+const DANGER_VERB_SET: ReadonlySet<string> = new Set([
+  'rm', 'rmdir', 'unlink', 'dd', 'mkfs', 'fdisk', 'sfdisk', 'parted', 'shutdown',
+  'reboot', 'poweroff', 'halt', 'wipefs', 'shred', 'chmod', 'chown', 'mount',
+  'umount', 'kill', 'pkill', 'killall', 'truncate',
+])
+
+/**
+ * The danger-list verb a bash rule pattern asks for, or `undefined` for an
+ * ordinary rule. The verb is the pattern's argv0 without a trailing star
+ * (`rm`/`rm *` → `rm`, `dd*` → `dd`, `chmod -R *` → `chmod`); a versioned
+ * binary normalizes for membership but keeps its spelling as the label.
+ * @param pattern - one bash rule pattern.
+ * @returns the verb label when the rule is a danger-list rail, else undefined.
+ */
+export function dangerVerbOfPattern(pattern: string): string | undefined {
+  const trimmed = pattern.trim()
+  if (trimmed === '' || trimmed === '*') return undefined
+  const argv0 = (trimmed.split(/\s+/)[0] ?? '').replace(/\*+$/, '')
+  if (argv0 === '' || argv0.includes('/')) return undefined
+  const base = argv0.includes('.') ? argv0.slice(0, argv0.indexOf('.')) : argv0
+  return DANGER_VERB_SET.has(base) ? argv0 : undefined
+}
+
+/** The pattern-ask shape carrying a danger-list verb's broad-action offer. */
+function patternAsk(pattern: string, reason: string, source: string): PolicyDecision {
+  const verb = dangerVerbOfPattern(pattern)
+  return {
+    kind: 'ask',
+    reason,
+    source,
+    grantTier: 'pattern',
+    pattern,
+    ...verb !== undefined ? { broadAllow: { label: verb } } : {},
+  }
+}
+
 /** Interpreters whose invocation can execute arbitrary code. */
 const OPAQUE_EXECUTORS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'eval', 'source', '.'])
 
@@ -315,7 +383,7 @@ function decideSubCommand(
     for (const { pattern, policy } of agentPatterns) {
       if (!matchBashPattern(pattern, sub)) continue
       if (policy === 'deny') return { kind: 'deny', reason: `bash rule "${pattern}" denies this command`, source: `agent pattern:${pattern}` }
-      if (policy === 'ask') return { kind: 'ask', reason: `bash rule "${pattern}" requires approval`, source: `agent pattern:${pattern}`, grantTier: 'pattern', pattern }
+      if (policy === 'ask') return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `agent pattern:${pattern}`)
       return { kind: 'allow', source: `agent pattern:${pattern}` }
     }
   }
@@ -329,7 +397,7 @@ function decideSubCommand(
   for (const { pattern, policy } of globalPatterns) {
     if (!matchBashPattern(pattern, sub)) continue
     if (policy === 'deny') return { kind: 'deny', reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` }
-    if (policy === 'ask') return { kind: 'ask', reason: `bash rule "${pattern}" requires approval`, source: `pattern:${pattern}`, grantTier: 'pattern', pattern }
+    if (policy === 'ask') return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`)
     return { kind: 'allow', source: `pattern:${pattern}` }
   }
   const globalTool = config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? 'ask'
@@ -463,9 +531,17 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
     }
     if (sawAsk !== null) {
       const who = input.agent
-      if (sawAsk.grantTier === 'pattern' && sawAsk.pattern !== undefined
-        && grantsShortCircuit(toolName, who, input.config.grants, 'pattern', sawAsk.pattern)) {
-        return { kind: 'allow', source: `grant:pattern:${sawAsk.pattern}` }
+      if (sawAsk.grantTier === 'pattern' && sawAsk.pattern !== undefined) {
+        // A danger-list ask's default "always allow" pins the exact raw command
+        // (broadAllow present); that exact pin re-allows exactly this command.
+        if (sawAsk.broadAllow !== undefined
+          && grantsShortCircuit(toolName, who, input.config.grants, 'pattern', command)) {
+          return { kind: 'allow', source: 'grant:command' }
+        }
+        // The explicit broad action pins the rule-level pattern.
+        if (grantsShortCircuit(toolName, who, input.config.grants, 'pattern', sawAsk.pattern)) {
+          return { kind: 'allow', source: `grant:pattern:${sawAsk.pattern}` }
+        }
       }
       if (sawAsk.grantTier === 'tool' && grantsShortCircuit(toolName, who, input.config.grants, 'tool', undefined)) {
         return { kind: 'allow', source: 'grant:tool' }
@@ -509,6 +585,15 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
       }
     }
     return { kind: 'allow', source: firstAllow?.source ?? 'policy:all-subcommands-allowed' }
+  }
+
+  // The dedicated read-only test-run capability (reviewer-exec): a reviewer
+  // seat never has to ask — the capability itself is the narrow, fixed surface.
+  // Every other role is denied outright, so this grants nothing to workers.
+  if (toolName === REVIEW_RUN_TOOL) {
+    return REVIEW_ROLES.has(agent)
+      ? { kind: 'allow', source: 'review:seat' }
+      : { kind: 'deny', reason: `review_run is available only to reviewer/oracle seats (role ${agent})`, source: 'review:seat' }
   }
 
   // Non-bash: agent override → global table → MCP wildcard ladder → default.
@@ -595,17 +680,50 @@ export function isMcpToolName(toolName: string): boolean {
 /** The grant a host-side "allow always" should write for one ask (proposal). */
 export interface GrantProposal {
   tool: string
+  /**
+   * The DEFAULT always-allow pin. For danger-list verbs and the opaque/hidden
+   * scans this is the exact raw command; for an ordinary bash rule ask it is
+   * the matched rule pattern (historical behavior).
+   */
   pattern?: string
+  /**
+   * Present only when the ask offered the explicit broad action
+   * ({@link PolicyDecision.broadAllow}): the rule-level pattern that action
+   * pins ("allow all rm"). The default outcome must never write it.
+   */
+  broadPattern?: string
   /** The requesting agent (recorded on the grant; does not scope it). */
   agent?: string
 }
 
-/** Derive the standing-grant proposal from an ask decision + call context. */
+/**
+ * Derive the standing-grant proposal from an ask decision + call context.
+ * A danger-list ask offers two pins: the default exact raw command and the
+ * explicit broad rule pattern. Every other ask keeps its historical single
+ * proposal (the rule pattern, or the exact command for the scans).
+ */
 export function grantProposalFor(decision: PolicyDecision & { kind: 'ask' }, toolName: string, command: string | undefined, agent: string | undefined): GrantProposal {
   if (decision.grantTier === 'pattern' && decision.pattern !== undefined) {
+    if (decision.broadAllow !== undefined && command !== undefined && command.trim() !== '') {
+      return { tool: toolName, pattern: command, broadPattern: decision.pattern, agent }
+    }
     return { tool: toolName, pattern: decision.pattern, agent }
   }
   return { tool: toolName, agent }
+}
+
+/**
+ * The proposal one host-side always-allow decision writes: the explicit broad
+ * action writes the broad rule pattern when the ask offered one; every other
+ * outcome (including a broad answer to an ask that offers none) writes the
+ * default proposal.
+ * @param proposal - the ask's stashed dual proposal.
+ * @param broad - whether the decided outcome was the explicit broad action.
+ * @returns the proposal to persist.
+ */
+export function grantProposalForOutcome(proposal: GrantProposal, broad: boolean): GrantProposal {
+  if (!broad || proposal.broadPattern === undefined) return proposal
+  return { tool: proposal.tool, pattern: proposal.broadPattern, ...proposal.agent !== undefined ? { agent: proposal.agent } : {} }
 }
 
 /**

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   resolvePolicy, splitCompoundCommand, stripEnvPrefixes, matchBashPattern,
-  mcpLadder, mcpServerNameOf, agentRoleOf, grantProposalFor, standingGrantRecord,
-  SHIPPED_TOOL_DEFAULTS, advertisedToolNames, type PermissionPolicyConfig,
+  mcpLadder, mcpServerNameOf, agentRoleOf, grantProposalFor, grantProposalForOutcome, standingGrantRecord,
+  dangerVerbOfPattern, SHIPPED_TOOL_DEFAULTS, advertisedToolNames,
+  REVIEW_RUN_TOOL, REVIEW_ROLES, type PermissionPolicyConfig,
 } from '../src/policy'
+import { buildReviewRunCommand, reviewRunTimeoutMs, shellQuote, validateReviewTarget } from '../src/review-run'
 
 const EMPTY: PermissionPolicyConfig = {}
 
@@ -283,6 +285,83 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'brand_new_tool', config: { defaults: { unknownTools: 'ask' } } }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'present', config: { tools: { present: 'ask' } } }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'present', agent: 'fixer', config: { agents: { fixer: { tools: { present: 'deny' } } } } }).kind).toBe('deny')
+  })
+})
+
+describe('danger-list always-allow pins the exact command', () => {
+  it('the default always-allow pins the exact raw command and re-allows only it', () => {
+    const ask = resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/a', config: EMPTY })
+    expect(ask).toMatchObject({ kind: 'ask', grantTier: 'pattern', pattern: 'rm', broadAllow: { label: 'rm' } })
+    const proposal = grantProposalFor(ask, 'bash', 'rm -rf /tmp/a', 'fixer')
+    expect(proposal).toEqual({ tool: 'bash', pattern: 'rm -rf /tmp/a', broadPattern: 'rm', agent: 'fixer' })
+    // The default outcome writes the exact pin, never the broad rule pattern.
+    const exact = grantProposalForOutcome(proposal, false)
+    expect(exact).toMatchObject({ pattern: 'rm -rf /tmp/a' })
+    const cfg: PermissionPolicyConfig = {
+      grants: { g: standingGrantRecord('g', exact, '2026-09-27T00:00:00.000Z') },
+    }
+    const same = resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/a', config: cfg })
+    expect(same).toMatchObject({ kind: 'allow', source: 'grant:command' })
+    // A verb-level grant is no longer implied by an exact pin: a different rm asks again.
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/b', config: cfg }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm /tmp/b', config: cfg }).kind).toBe('ask')
+  })
+
+  it('the explicit broad action still works (rule-level pin absorbs every rm)', () => {
+    const ask = resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/a', config: EMPTY })
+    const proposal = grantProposalFor(ask, 'bash', 'rm -rf /tmp/a', undefined)
+    const broad = grantProposalForOutcome(proposal, true)
+    expect(broad).toMatchObject({ pattern: 'rm' })
+    const cfg: PermissionPolicyConfig = { grants: { g: standingGrantRecord('g', broad, '2026-09-27T00:00:00.000Z') } }
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/anything', config: cfg }))
+      .toMatchObject({ kind: 'allow', source: 'grant:pattern:rm' })
+  })
+
+  it('names the broad verb for every danger rail and no other rule', () => {
+    expect(dangerVerbOfPattern('rm')).toBe('rm')
+    expect(dangerVerbOfPattern('rm *')).toBe('rm')
+    expect(dangerVerbOfPattern('dd*')).toBe('dd')
+    expect(dangerVerbOfPattern('chmod -R *')).toBe('chmod')
+    expect(dangerVerbOfPattern('mkfs.ext4 *')).toBe('mkfs.ext4')
+    expect(dangerVerbOfPattern('git *')).toBeUndefined()
+    expect(dangerVerbOfPattern('*')).toBeUndefined()
+    for (const pattern of ['rm', 'rmdir', 'unlink', 'dd', 'shutdown', 'reboot', 'chmod -R *', 'chown -R *']) {
+      expect(dangerVerbOfPattern(pattern)).toBeDefined()
+    }
+    // A non-danger bash rule keeps the historical rule-pattern pin.
+    const ask = resolvePolicy({ toolName: 'bash', command: 'docker run img', config: { bashPatterns: [{ pattern: 'docker *', policy: 'ask' }] } })
+    expect(ask).toMatchObject({ kind: 'ask', pattern: 'docker *' })
+    expect((ask as { broadAllow?: unknown }).broadAllow).toBeUndefined()
+    expect(grantProposalFor(ask, 'bash', 'docker run img', undefined)).toEqual({ tool: 'bash', pattern: 'docker *' })
+  })
+})
+
+describe('reviewer-exec policy seat', () => {
+  it('allows review_run for reviewer/oracle seats and denies every other role', () => {
+    for (const role of REVIEW_ROLES) {
+      expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, agent: role, config: EMPTY }))
+        .toEqual({ kind: 'allow', source: 'review:seat' })
+    }
+    expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, agent: 'fixer', config: EMPTY }).kind).toBe('deny')
+    expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, config: EMPTY }).kind).toBe('deny')
+    // The seat's grant is not weakened by an operator ask row, and no other
+    // bash grant interacts with it.
+    expect(resolvePolicy({ toolName: REVIEW_RUN_TOOL, agent: 'oracle', config: { tools: { [REVIEW_RUN_TOOL]: 'ask' } } }).kind).toBe('allow')
+  })
+
+  it('builds fixed runner argv with one quoted, validated target', () => {
+    expect(buildReviewRunCommand('pytest', undefined)).toBe('python3 -m pytest -q')
+    expect(buildReviewRunCommand('pytest', 'tests/unit/test_x.py')).toBe("python3 -m pytest -q 'tests/unit/test_x.py'")
+    expect(buildReviewRunCommand('go-test', undefined)).toBe("go test './...'")
+    expect(() => buildReviewRunCommand('rm', undefined)).toThrow(/unknown runner/)
+    expect(() => buildReviewRunCommand('pytest', '../etc/passwd')).toThrow(/no `..`/)
+    expect(() => buildReviewRunCommand('pytest', '/etc/passwd')).toThrow(/workspace-relative/)
+    expect(() => buildReviewRunCommand('pytest', 'a; rm -rf /')).toThrow(/may contain only/)
+    expect(validateReviewTarget('tests/unit/test_x.py')).toBe('tests/unit/test_x.py')
+    expect(shellQuote("a'b")).toBe(`'a'\\''b'`)
+    expect(reviewRunTimeoutMs(undefined)).toBe(120_000)
+    expect(reviewRunTimeoutMs(1)).toBe(1000)
+    expect(reviewRunTimeoutMs(9999)).toBe(600_000)
   })
 })
 

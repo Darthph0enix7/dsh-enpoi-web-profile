@@ -856,7 +856,9 @@ async function surfacePending(
         reason: askLabel(pairing.alias, sessionLabel, ask),
         signal,
       })
-      decision = outcome === 'allowed-always' ? 'allowed-once' : outcome
+      // A peer answer is one-shot by contract: both standing outcomes degrade
+      // to `allowed-once` (never a peer-granted durable grant).
+      decision = outcome === 'allowed-always' || outcome === 'allowed-always-broad' ? 'allowed-once' : outcome
       record.surfaced = 'approval'
     } catch {
       // No open local turn, no answerer, or a withdrawn ask: the remote ask
