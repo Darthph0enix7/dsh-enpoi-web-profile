@@ -289,23 +289,35 @@ function renderReviewRun(_args: unknown, value: unknown): Array<{ type: 'text'; 
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
+/**
+ * Canonical output schema. Nullable fields use `oneOf` because the tools
+ * registry's supported subset rejects type arrays (a `type: [...]` schema
+ * makes `ctx.tools.register` throw `UNSUPPORTED_SCHEMA` inside the inject
+ * fiber, silently dropping the tool — the defect the first two live rounds
+ * hit).
+ */
 const REVIEW_RUN_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     runner: { type: 'string' },
     command: { type: 'string' },
-    exitCode: { type: ['number', 'null'] },
-    signal: { type: ['string', 'null'] },
+    exitCode: { oneOf: [{ type: 'number' }, { type: 'null' }] },
+    signal: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     timedOut: { type: 'boolean' },
     sandbox: {
-      type: ['object', 'null'],
-      additionalProperties: false,
-      properties: {
-        mode: { type: 'string' },
-        denied: { type: 'boolean' },
-      },
-      required: ['mode', 'denied'],
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            mode: { type: 'string' },
+            denied: { type: 'boolean' },
+          },
+          required: ['mode', 'denied'],
+        },
+        { type: 'null' },
+      ],
     },
     stdout: { type: 'string' },
     stderr: { type: 'string' },
@@ -322,18 +334,20 @@ const REVIEW_RUN_OUTPUT_SCHEMA = {
  * @param ctx - plugin context carrying `tools` and, once mounted, `shell`.
  */
 export function installReviewRunTool(ctx: Context): void {
-  ctx.inject(['shell'], () => {
-    const shell = ctx.get('shell') as ShellExecutor | undefined
-    const policyService = ctx.get('sandboxPolicy') as { resolve: (request?: { session?: unknown }) => SandboxExecutionPolicy } | undefined
+  // `tools` MUST be declared here: the Cordis property proxy refuses
+  // `ctx.tools` from a plugin that did not inject it ("cannot get property
+  // \"tools\" without inject"), and the throw silently kills this inject
+  // fiber — the tool never registers while no failure reaches the journal.
+  // Registration through the inject context is root-visible (verified against
+  // the real ToolRuntime).
+  ctx.inject(['shell', 'tools'], (scope) => {
+    const shell = scope.get('shell') as ShellExecutor | undefined
+    const policyService = scope.get('sandboxPolicy') as { resolve: (request?: { session?: unknown }) => SandboxExecutionPolicy } | undefined
     if (shell === undefined || shell.sandboxMode === undefined || policyService === undefined) {
       process.stderr.write('[enpoi-capabilities] review_run not registered: no confining executor/sandbox policy\n')
       return
     }
-    // Register on the PLUGIN context, never the inject child scope: a layer
-    // owned by the inject scope is invisible to agent scopes (it appears in no
-    // request schema even though pre-execute still vetoes the name). Mirrors
-    // enpoi-oracle's `ctx = root` registration.
-    ctx.tools.register({
+    scope.tools.register({
       name: REVIEW_RUN_TOOL,
       description: [
         'Run the workspace test suite READ-ONLY: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),',

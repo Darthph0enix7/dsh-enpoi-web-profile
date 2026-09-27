@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import ToolRuntime, { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import {
   buildReviewRunCommand, installReviewRunTool, readReviewRunnerOverride, resolveReviewInterpreter,
   reviewRunEnv, REVIEW_RUN_DEFAULT_TIMEOUT_MS, REVIEW_RUN_MAX_TIMEOUT_MS, REVIEW_RUN_SPEC_RELATIVE_PATH,
@@ -120,6 +121,40 @@ const fixerChild = {
     ownEvents: () => [{ type: 'subagent/descriptor', data: { label: 'fixer: probe', persona: 'You are the Fixer — implementation specialist.' } }],
   },
 }
+
+describe('real tools registry registration', () => {
+  it('registers against the real ToolRuntime and its output schema accepts every result shape', async () => {
+    const ctx = new Context()
+    ctx.provide('systemPrompt', {
+      context: () => {},
+      section: () => {},
+      tools: () => {},
+      getContextOrder: () => 0,
+      getSectionOrder: () => 0,
+    } as never)
+    await ctx.plugin(ToolRuntime as never)
+    const { shell } = fakeShell('workspace-write')
+    ctx.provide('shell', shell as never)
+    ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: '/ws' }) } as never)
+    await ctx.plugin({ apply: (pluginCtx: Context) => { installReviewRunTool(pluginCtx) } })
+    await ctx.fiber.await()
+    const tools = (ctx as unknown as {
+      tools: { get(name: string, scope?: unknown): { output: { schema: never } } | undefined }
+    }).tools
+    // The inject gate activates on its own fiber; wait for the registration.
+    await vi.waitFor(() => { expect(tools.get('review_run')).toBeDefined() })
+    const tool = tools.get('review_run')
+    const schema = tool!.output.schema
+    expect(validateJsonSchemaValue(schema, {
+      runner: 'pytest', command: 'python3 -m pytest -q', exitCode: 0, signal: null, timedOut: false,
+      sandbox: { mode: 'read-only', denied: false }, stdout: '771 passed', stderr: '',
+    })).toEqual([])
+    expect(validateJsonSchemaValue(schema, {
+      runner: 'pytest', command: 'x', exitCode: null, signal: 'SIGKILL', timedOut: true,
+      sandbox: null, stdout: '', stderr: '', error: 'boom',
+    })).toEqual([])
+  })
+})
 
 describe('review_run registration fence', () => {
   it('registers nothing without a confining executor or a sandbox policy service', async () => {

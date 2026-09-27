@@ -5177,17 +5177,22 @@ var REVIEW_RUN_OUTPUT_SCHEMA = {
   properties: {
     runner: { type: "string" },
     command: { type: "string" },
-    exitCode: { type: ["number", "null"] },
-    signal: { type: ["string", "null"] },
+    exitCode: { oneOf: [{ type: "number" }, { type: "null" }] },
+    signal: { oneOf: [{ type: "string" }, { type: "null" }] },
     timedOut: { type: "boolean" },
     sandbox: {
-      type: ["object", "null"],
-      additionalProperties: false,
-      properties: {
-        mode: { type: "string" },
-        denied: { type: "boolean" }
-      },
-      required: ["mode", "denied"]
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            mode: { type: "string" },
+            denied: { type: "boolean" }
+          },
+          required: ["mode", "denied"]
+        },
+        { type: "null" }
+      ]
     },
     stdout: { type: "string" },
     stderr: { type: "string" },
@@ -5196,14 +5201,14 @@ var REVIEW_RUN_OUTPUT_SCHEMA = {
   required: ["runner", "command", "exitCode", "signal", "timedOut", "sandbox", "stdout", "stderr"]
 };
 function installReviewRunTool(ctx) {
-  ctx.inject(["shell"], () => {
-    const shell = ctx.get("shell");
-    const policyService = ctx.get("sandboxPolicy");
+  ctx.inject(["shell", "tools"], (scope) => {
+    const shell = scope.get("shell");
+    const policyService = scope.get("sandboxPolicy");
     if (shell === void 0 || shell.sandboxMode === void 0 || policyService === void 0) {
       process.stderr.write("[enpoi-capabilities] review_run not registered: no confining executor/sandbox policy\n");
       return;
     }
-    ctx.tools.register({
+    scope.tools.register({
       name: REVIEW_RUN_TOOL,
       description: [
         "Run the workspace test suite READ-ONLY: a fixed runner (pytest/vitest/jest/node-test/go-test/cargo-test),",
