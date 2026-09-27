@@ -279,19 +279,48 @@ interface ReviewRunValue {
   error?: string
 }
 
-/** Render the bounded run result; the `[exit code: N]` marker mirrors the bash tool. */
-function renderReviewRun(_args: unknown, value: unknown): Array<{ type: 'text'; text: string }> {
+/** Strip ANSI SGR sequences so the summary line is stable text. */
+function stripAnsi(text: string): string {
+  return text.replace(/\u001b\[[0-9;]*m/g, '')
+}
+
+/**
+ * Extract the last pass/fail/skip tally from runner stdout (pytest's
+ * `771 passed, 110 skipped in 7.04s`, vitest's `Tests  12 passed`, …) so the
+ * rendered result carries an explicit status even when the process succeeds.
+ * @param stdout - captured runner stdout, ANSI codes allowed.
+ * @returns the bounded tally line, or `undefined` when the output has none.
+ */
+export function reviewRunSummary(stdout: string): string | undefined {
+  const lines = stripAnsi(stdout).split(/\r?\n/)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? ''
+    if (/\d+\s+(?:passed|failed|error|errors|skipped|xfailed|xpassed|deselected|warnings?)\b/.test(line)) {
+      return line.length > 200 ? `${line.slice(0, 200)}…` : line
+    }
+  }
+  return undefined
+}
+
+/**
+ * Render the bounded run result. The `[exit code: N]` marker and the summary
+ * tally are emitted on success AND failure — silence must never be the only
+ * signal that nothing failed.
+ */
+export function renderReviewRun(_args: unknown, value: unknown): Array<{ type: 'text'; text: string }> {
   const run = value as ReviewRunValue
   const lines: string[] = [`review_run ${run.runner}: ${run.command}`]
   if (run.error !== undefined) lines.push(run.error)
   if (run.stdout !== '') lines.push(run.stdout.trimEnd())
   if (run.stderr !== '') lines.push(`[stderr]\n${run.stderr.trimEnd()}`)
   if (run.sandbox?.denied === true) {
-    lines.push(`[sandbox: file access denied under ${run.sandbox.mode} mode — the run is read-only]`)
+    lines.push(`[sandbox: file access denied under ${run.sandbox.mode} mode]`)
   }
   if (run.timedOut) lines.push(`[timed out after the review-run budget]`)
-  if (run.exitCode !== null && run.exitCode !== 0) lines.push(`[exit code: ${String(run.exitCode)}]`)
+  if (run.exitCode !== null) lines.push(`[exit code: ${String(run.exitCode)}]`)
   else if (run.signal !== null) lines.push(`[killed by signal: ${run.signal}]`)
+  const summary = reviewRunSummary(run.stdout)
+  if (summary !== undefined) lines.push(`[summary: ${summary}]`)
   return [{ type: 'text', text: lines.join('\n') }]
 }
 

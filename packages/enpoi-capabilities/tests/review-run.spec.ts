@@ -1,19 +1,28 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ToolRuntime, { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import {
   buildReviewRunCommand, installReviewRunTool, readReviewRunnerOverride, resolveReviewInterpreter,
-  reviewRunEnv, REVIEW_RUN_DEFAULT_TIMEOUT_MS, REVIEW_RUN_MAX_TIMEOUT_MS, REVIEW_RUN_SPEC_RELATIVE_PATH,
-  REVIEW_RUNNERS,
+  renderReviewRun, reviewRunEnv, reviewRunSummary, REVIEW_RUN_DEFAULT_TIMEOUT_MS, REVIEW_RUN_MAX_TIMEOUT_MS,
+  REVIEW_RUN_SPEC_RELATIVE_PATH, REVIEW_RUNNERS,
 } from '../src/review-run'
 import type { ShellExecRequest, ShellExecSpec } from '@deepseek-ai/dsh-shell'
 
-/** A fresh writable workspace root for spec/venv probing. */
+/** Scratch roots created by this spec file; removed after the file finishes. */
+const scratchRoots: string[] = []
+
+afterAll(() => {
+  for (const root of scratchRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+/** A fresh writable workspace root for spec/venv probing (removed in afterAll). */
 function scratchWorkspace(): string {
-  return mkdtempSync(join(tmpdir(), 'review-run-ws-'))
+  const root = mkdtempSync(join(tmpdir(), 'review-run-ws-'))
+  scratchRoots.push(root)
+  return root
 }
 
 /** Write `.dsh/review-run.json` under the workspace root. */
@@ -153,6 +162,34 @@ describe('real tools registry registration', () => {
       runner: 'pytest', command: 'x', exitCode: null, signal: 'SIGKILL', timedOut: true,
       sandbox: null, stdout: '', stderr: '', error: 'boom',
     })).toEqual([])
+  })
+})
+
+describe('review_run rendering', () => {
+  it('prints an explicit exit status and summary on success and failure', () => {
+    const base = {
+      runner: 'pytest', command: 'python3 -m pytest -q', signal: null, timedOut: false,
+      sandbox: { mode: 'workspace-write', denied: false }, stderr: '',
+    }
+    const success = renderReviewRun(undefined, {
+      ...base, exitCode: 0,
+      stdout: '\u001b[32m\u001b[32m\u001b[1m771 passed\u001b[0m, \u001b[33m110 skipped\u001b[0m\u001b[32m in 7.04s\u001b[0m\u001b[0m',
+    })
+    expect(success[0]?.text).toContain('[exit code: 0]')
+    expect(success[0]?.text).toContain('[summary: 771 passed, 110 skipped in 7.04s]')
+    const failure = renderReviewRun(undefined, { ...base, exitCode: 1, stdout: '2 failed, 3 passed' })
+    expect(failure[0]?.text).toContain('[exit code: 1]')
+    expect(failure[0]?.text).toContain('[summary: 2 failed, 3 passed]')
+  })
+
+  it('omits the summary when the runner printed no tally', () => {
+    const rendered = renderReviewRun(undefined, {
+      runner: 'node-test', command: 'x', exitCode: 0, signal: null, timedOut: false,
+      sandbox: { mode: 'workspace-write', denied: false }, stdout: 'all clean', stderr: '',
+    })
+    expect(rendered[0]?.text).toContain('[exit code: 0]')
+    expect(rendered[0]?.text).not.toContain('[summary:')
+    expect(reviewRunSummary('all clean')).toBeUndefined()
   })
 })
 

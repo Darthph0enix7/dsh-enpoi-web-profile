@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Context, Exporter, Message } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
+import type { Exporter, Message } from '@deepseek-ai/cordis'
 import { attachLoggerSink, attachPluginLifecycle, attachSessionEvents, IncidentBus, logIncident } from '../src/capture.js'
 import { IncidentStore } from '../src/store.js'
 
@@ -37,6 +38,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   bus.dispose()
   store.close()
   rmSync(root, { recursive: true, force: true })
@@ -174,6 +176,7 @@ describe('session-event seam', () => {
 
 describe('plugin-lifecycle seam', () => {
   it('records one incident per failed fiber', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     attachPluginLifecycle(fakeCtx, bus)
     const fiber = { state: 3, name: 'enpoi-whiteboard' }
     emit('internal/status', fiber, 1)
@@ -185,6 +188,61 @@ describe('plugin-lifecycle seam', () => {
     expect(incidents[0]).toMatchObject({ kind: 'plugin-failed', severity: 'error' })
     expect(incidents[0].code).toMatch(/^D[0-9A-F]{6}$/)
     expect(incidents[0].context).toMatchObject({ plugin: 'enpoi-whiteboard' })
+    vi.restoreAllMocks()
+  })
+
+  it('makes a throwing fiber loud: journal line plus the error in the coded row', () => {
+    const written: string[] = []
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true })
+    attachPluginLifecycle(fakeCtx, bus)
+    const error = Object.assign(new Error('cannot get property "tools" without inject'), { code: 'INACTIVE_EFFECT' })
+    const fiber = { state: 3, name: 'enpoi-capabilities', _error: error }
+    emit('internal/status', fiber, 1)
+    emit('internal/status', fiber, 3)
+    emit('internal/status', fiber, 3)
+    bus.flushNow()
+    // One deduped journal line naming the fiber and its stored error.
+    expect(written.filter(line => line.includes('plugin fiber failed'))).toEqual([
+      '[enpoi-diagnostics] plugin fiber failed: enpoi-capabilities: Error: cannot get property "tools" without inject [INACTIVE_EFFECT]\n',
+    ])
+    const [incident] = store.incidents()
+    expect(incident).toMatchObject({ kind: 'plugin-failed', severity: 'error' })
+    expect(incident.message).toContain('enpoi-capabilities')
+    expect(incident.message).toContain('cannot get property "tools" without inject')
+    expect(incident.context).toMatchObject({ plugin: 'enpoi-capabilities', error: 'Error: cannot get property "tools" without inject [INACTIVE_EFFECT]' })
+    vi.restoreAllMocks()
+  })
+
+  it('reports a real throwing plugin fiber (synthetic mount) through the seam', async () => {
+    const written: string[] = []
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true })
+    const ctx = new Context()
+    const realStore = new IncidentStore(join(root, 'real.sqlite'), { cooldownMs: 60_000 })
+    const realBus = new IncidentBus(realStore, { flushMs: 5_000 })
+    try {
+      attachPluginLifecycle(ctx, realBus)
+      ctx.plugin({ name: 'boom-synthetic', apply: () => { throw new Error('kaboom') } })
+      await new Promise(resolve => setTimeout(resolve, 25))
+      realBus.flushNow()
+      expect(written).toContain('[enpoi-diagnostics] plugin fiber failed: boom-synthetic: Error: kaboom\n')
+      const [incident] = realStore.incidents()
+      expect(incident).toMatchObject({ kind: 'plugin-failed', severity: 'error' })
+      expect(incident.message).toContain('boom-synthetic')
+      expect(incident.message).toContain('kaboom')
+    } finally {
+      realBus.dispose()
+      realStore.close()
+    }
+  })
+
+  it('degrades to bounded text when the fiber stored no error', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    attachPluginLifecycle(fakeCtx, bus)
+    emit('internal/status', { state: 3, name: '' }, 1)
+    bus.flushNow()
+    const [incident] = store.incidents()
+    expect(incident.message).toContain('plugin fiber failed: unknown: no error captured')
+    vi.restoreAllMocks()
   })
 })
 

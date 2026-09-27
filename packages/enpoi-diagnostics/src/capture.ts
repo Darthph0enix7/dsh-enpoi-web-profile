@@ -388,22 +388,50 @@ export function attachSessionEvents(ctx: Context, bus: IncidentBus): void {
   ctx.on('session/event', listener as never)
 }
 
-/** Attach the plugin-lifecycle seam (`internal/status` FAILED transitions). */
+/**
+ * Render a failed fiber's stored error for the loud path. Cordis keeps it on
+ * the fiber (`_error`, the `reason` its `_reload` catch stored); it may be any
+ * thrown value, so everything degrades to bounded text and never throws.
+ * @param value - the fiber's stored failure.
+ * @returns bounded `Name: message` text (plus the stable code when present).
+ */
+function fiberFailureText(value: unknown): string {
+  if (value === undefined || value === null) return 'no error captured'
+  const code = typeof value === 'object' && value !== null && typeof (value as { code?: unknown }).code === 'string'
+    ? ` [${String((value as { code: string }).code)}]`
+    : ''
+  if (value instanceof Error) return truncate(`${value.name}: ${value.message}${code}`, 300)
+  return truncate(`${String(value)}${code}`, 300)
+}
+
+/**
+ * Attach the plugin-lifecycle seam (`internal/status` FAILED transitions).
+ *
+ * A failed fiber is never fatal — cordis contains the rejection — but it must
+ * never be invisible either. Each failure gets ONE stderr line naming the
+ * plugin/fiber and the stored error (the journal), plus one coded
+ * diagnostics-ledger row whose message carries the same reason. This is the
+ * fibre-level analogue of `tool-groups/mount-failed`.
+ */
 export function attachPluginLifecycle(ctx: Context, bus: IncidentBus): void {
   const seen = new WeakSet<object>()
-  ctx.on('internal/status', (fiber: { state?: unknown; name?: unknown }) => {
+  ctx.on('internal/status', (fiber: { state?: unknown; name?: unknown; _error?: unknown }) => {
     try {
       if (fiber === null || typeof fiber !== 'object') return
       if (fiber.state !== FIBER_STATE_FAILED) return
       if (seen.has(fiber)) return
       seen.add(fiber)
       const name = typeof fiber.name === 'string' && fiber.name !== '' ? fiber.name : 'unknown'
-      const text = `plugin failed to activate: ${name}`
+      const reason = fiberFailureText(fiber._error)
+      const text = `plugin fiber failed: ${name}: ${reason}`
+      // Journal line first: a fiber death must be visible without querying the
+      // ledger (the ledger itself may be what nobody reads during boot).
+      process.stderr.write(`[enpoi-diagnostics] ${text}\n`)
       bus.push({
         severity: 'error',
         source: 'plugin',
         kind: 'plugin-failed',
-        ...fingerprintIncident('plugin-failed', text, { plugin: name }),
+        ...fingerprintIncident('plugin-failed', text, { plugin: name, fiber: name, error: reason }),
       })
     } catch {
       bus.noteSelfFailure()
