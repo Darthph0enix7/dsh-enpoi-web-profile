@@ -31,6 +31,10 @@ import {
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
 import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
+import {
+  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf,
+  type ApprovalOutcome, type ChildAgentLike, type ParentRailQuery, type RootAskQuery, type RootHandle, type RootMode,
+} from './forwarding'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -638,7 +642,114 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }
 
-  const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: AgentLike }, next: () => Promise<{ kind: string; reason?: string }>) => {
+  // ── forwarded child approvals (doc 82 §E7, doc 55 extension) ────────────────
+  // A delegated child's approval policy is pinned `never`, so its asks used to
+  // dead-end. The forwarder resolves them through the nearest live ROOT session:
+  // rails first, then a session-scoped grant, then the root's mode — Full access
+  // standing consent or the existing human card. See forwarding.ts for why the
+  // Full access rule deliberately deviates from the field's human-only rule.
+
+  /** Live Agent slice the root walk reads (structural `ctx.get('agents')`). */
+  interface LiveAgentLike {
+    id?: string
+    session?: {
+      header?: { id?: string; parentSession?: string; cwd?: string; delegationDepth?: number; origin?: string }
+      ownEvents?: () => readonly { type?: string; data?: { label?: unknown; persona?: unknown } }[]
+    }
+  }
+
+  /** Walk the live parent chain to the nearest root Agent (bounded at 32 hops). */
+  function liveRootOf(childSessionId: string): RootHandle | undefined {
+    const agents = ctx.get('agents') as { get?: (id: string) => LiveAgentLike | undefined } | undefined
+    if (agents?.get === undefined) return undefined
+    let current = agents.get(childSessionId)
+    for (let hop = 0; hop < 33; hop += 1) {
+      if (current === undefined) return undefined
+      const header = current.session?.header
+      const parentSession = header?.parentSession
+      if (parentSession === undefined || parentSession === '') {
+        const id = typeof header?.id === 'string' && header.id !== '' ? header.id : (current.id ?? '')
+        return id === '' ? undefined : { id, agent: current }
+      }
+      current = agents.get(String(parentSession))
+    }
+    return undefined
+  }
+
+  /**
+   * The root's effective mode for a forwarded ask: Full access / no restrictions
+   * (sandbox `danger-full-access` + approval `never`) is standing consent;
+   * approval `never` without full access is unattended (no card possible);
+   * everything else is interactive.
+   */
+  function rootModeOf(root: RootHandle): RootMode | undefined {
+    const agent = root.agent as AgentLike
+    if (agent?.session === undefined) return undefined
+    const sandbox = readSandboxMode(agent) ?? 'workspace-write'
+    const approval = readApprovalPolicy(agent)?.policy
+      ?? (ctx.get('approval') as { config?: { policy?: string } } | undefined)?.config?.policy
+      ?? 'ask'
+    if (approval !== 'never') return 'interactive'
+    return sandbox === 'danger-full-access' ? 'full-access' : 'unattended'
+  }
+
+  /**
+   * The parent's own effective-policy ceiling for one rail class. The boundary
+   * ceiling is the root's sandbox scope; every other rail runs the same policy
+   * ladder under the root's role, so the operator's own deny rules and explicit
+   * allows decide. An ask or deny there means the child's card stays closed.
+   */
+  function parentAllowsRail(query: ParentRailQuery): boolean {
+    const agent = query.root.agent as AgentLike
+    if (query.rail === 'boundary') return readSandboxMode(agent) === 'danger-full-access'
+    const decision = resolvePolicy({
+      toolName: query.toolName,
+      ...query.command !== undefined ? { command: query.command } : {},
+      agent: askingAgentOf({ agent }),
+      reviewer: false,
+      config: readPermissionConfig(),
+      sandboxMode: readSandboxMode(agent),
+      mcpServerNames: readMcpServerNames() ?? [],
+    })
+    return decision.kind === 'allow'
+  }
+
+  /**
+   * Dispatch one forwarded ask as the existing approval card on the root agent.
+   * No `callId`: the parent session has no correlated tool call, so the card
+   * renders without tool detail and the child's own log keeps the call identity.
+   */
+  function requestRootApproval(query: RootAskQuery): Promise<ApprovalOutcome> {
+    const approval = ctx.get('approval') as {
+      request?: (request: Record<string, unknown>) => Promise<ApprovalOutcome>
+    } | undefined
+    if (approval?.request === undefined) {
+      return Promise.reject(new Error('the approval service is not composed'))
+    }
+    return approval.request({
+      agent: query.root.agent,
+      toolName: query.toolName,
+      reason: query.reason,
+      displayReason: query.displayReason,
+      ...query.broadAllow !== undefined ? { broadAllow: query.broadAllow } : {},
+      ...query.signal !== undefined ? { signal: query.signal } : {},
+    })
+  }
+
+  const approvalForwarding = new ChildApprovalForwarder({
+    findRoot: liveRootOf,
+    modeOf: rootModeOf,
+    parentAllowsRail,
+    askRoot: requestRootApproval,
+    report: (line: string) => process.stderr.write(`[enpoi-capabilities] ${line}\n`),
+    depthCap: () => {
+      const subagents = ctx.get('subagents') as { resolveMaxDepth?: (configured?: unknown) => number | undefined } | undefined
+      const depth = subagents?.resolveMaxDepth?.()
+      return typeof depth === 'number' && Number.isSafeInteger(depth) && depth >= 0 ? depth : 1
+    },
+  })
+
+  const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: AgentLike; signal?: AbortSignal }, next: () => Promise<{ kind: string; reason?: string }>) => {
     // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
     // before guardReason, so a disabled tool with an ask policy would otherwise
     // prompt and then deny after the user clicks allow.
@@ -665,12 +776,35 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     if (decision.kind === 'allow') return await next()
     if (decision.kind === 'deny') return { kind: 'deny', reason: decision.reason }
     // A session with approval prompts disabled (delegation pins 'never') cannot
-    // answer this ask: the approval seam auto-rejects it and the registry
-    // reports that as "the user rejected tool ...". Deny here instead, naming
-    // the real actor (the session's approval policy) and the ask reason, so the
-    // model and the transcript show why the call could never run.
+    // answer this ask itself. A delegated child's ask is forwarded through the
+    // parent (below); any other such session denies here, naming the real actor
+    // (the session's approval policy) and the ask reason, so the model and the
+    // transcript show why the call could never run.
     const approvalPolicy = readApprovalPolicy(exec.agent)
     if (approvalPolicy?.policy === 'never') {
+      // A delegated child is not dead-ended any more: forward the ask through
+      // the parent's existing machinery. The child suspends on this await and a
+      // rejection returns as its corrective tool error; rails and standing
+      // consent are decided in forwarding.ts, never here.
+      if (delegatedChildOf(exec.agent as ChildAgentLike | undefined) !== undefined) {
+        const resolution = await approvalForwarding.forward({
+          agent: exec.agent as ChildAgentLike | undefined,
+          toolName: exec.name,
+          args: exec.arguments,
+          decision,
+          ...exec.signal !== undefined ? { signal: exec.signal } : {},
+        })
+        if (resolution.kind === 'deny') return { kind: 'deny', reason: resolution.reason }
+        // The forwarded decision is approval, not the whole gate: downstream
+        // pre-execute layers (tool groups, mutation capture) still run. A
+        // downstream ask cannot be satisfied from a child's `never` session, so
+        // it fails closed rather than dead-ending in the approval service.
+        const downstream = await next()
+        if (downstream.kind === 'ask') {
+          return { kind: 'deny', reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` }
+        }
+        return downstream
+      }
       return {
         kind: 'deny',
         reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? 'delegated subagent' : 'session'} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`,
@@ -784,16 +918,22 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     // The decided event carries the APPROVAL id; the paired asked event carries
     // the exec callId our pending-proposal map is keyed by. Pair them by scan.
     let callId: string | undefined
+    let forwarded = false
     if (typeof session?.eventAt === 'function') {
       for (let seq = (event.seq ?? session.seq ?? 0); seq >= 0 && seq >= (event.seq ?? 0) - 64; seq -= 1) {
         const e = session.eventAt(seq)
         if (e?.type === 'approval/asked' && (e.data as { id?: string }).id === approvalId) {
+          const reason = (e.data as { reason?: string }).reason
+          if (typeof reason === 'string' && reason.includes(FORWARDED_ASK_MARKER)) forwarded = true
           const c = (e.data as { callId?: string }).callId
           if (c !== undefined) callId = String(c)
           break
         }
       }
     }
+    // A forwarded child ask never writes a global grant: its answer is scoped to
+    // the requester's session by the forwarder itself (forwarding.ts).
+    if (forwarded) return undefined
     if (callId === undefined) {
       // Fallback: pop the oldest pending proposal (single-approval flows).
       callId = [...pendingGrants.keys()][0]

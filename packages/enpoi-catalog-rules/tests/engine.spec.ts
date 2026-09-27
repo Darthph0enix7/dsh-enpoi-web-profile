@@ -82,7 +82,74 @@ describe('enpoi-catalog-rules resolved publish', () => {
     })
   })
 
-  it('publishes the map through settings once and republishes on a rules change', async () => {
+  it('publishes through the artifact channel and removes the persisted copy once', async () => {
+    const { apply } = await import('../src/index.ts')
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const listeners = new Map<string, (ns: unknown) => void>()
+    const doc = {
+      enpoi: {
+        catalogRules: {
+          visibility: { hide: [{ when: { zeroPrice: true } }] },
+          resolved: { stale: { state: 'hidden', reason: null, source: 'manual' } },
+        },
+        uiPreferences: { hiddenModels: {} },
+      },
+      llm: {
+        providers: {
+          p: { models: [{ id: 'free', cost: { input: 0, output: 0 } }, { id: 'paid', cost: { input: 1, output: 1 } }] },
+        },
+      },
+    }
+    const artifacts: Array<{ key: string; value: unknown }> = []
+    const writes: Array<{ ns: string; ops: Array<{ op: string; path: string[] }>; revision?: number }> = []
+    const settings = {
+      get: (ns: string) => ns === 'enpoi-orchestration' ? doc.enpoi : ns === 'llm-pi-ai' ? doc.llm : undefined,
+      describe: () => [{ ns: 'enpoi-orchestration', revision: 7 }],
+      publishArtifact: (key: string, value: unknown) => {
+        artifacts.push({ key, value })
+        return artifacts.length
+      },
+      // Applies the unset like the real seam, so the removal retry is a no-op.
+      mutate: async (ns: string, ops: Array<{ op: string; path: string[] }>, revision?: number) => {
+        writes.push({ ns, ops, revision })
+        for (const op of ops) {
+          if (op.op === 'unset') Reflect.deleteProperty(doc.enpoi.catalogRules as Record<string, unknown>, String(op.path.at(-1)))
+        }
+      },
+    }
+    const ctx = {
+      get: (ns: string) => ns === 'settings' ? settings : undefined,
+      provide: () => undefined,
+      on: (event: string, callback: (ns: unknown) => void) => {
+        listeners.set(event, callback)
+        return () => undefined
+      },
+    }
+    apply(ctx as never)
+    // The resolved map rides the artifact channel, not the configuration document.
+    expect(artifacts).toEqual([{
+      key: 'catalogRules.resolved',
+      value: { 'p/free': { state: 'hidden', reason: 'hidden by rule: zero-price', source: 'rule', rule: 'zero-price' } },
+    }])
+    // The persisted pre-artifact copy is removed once so describes stop carrying it.
+    expect(writes).toEqual([{
+      ns: 'enpoi-orchestration',
+      revision: 7,
+      ops: [{ op: 'unset', path: ['catalogRules', 'resolved'] }],
+    }])
+    // A refresh with the same decisions republishes nothing and removes nothing.
+    listeners.get('settings/document-updated')!('enpoi-orchestration')
+    expect(artifacts).toHaveLength(1)
+    expect(writes).toHaveLength(1)
+    // A rules change republishes through the same channel.
+    doc.enpoi.catalogRules = { visibility: { hide: [{ when: { zeroPrice: true } }] }, overrides: { shown: { p: ['free'] } } }
+    listeners.get('settings/updated')!('enpoi-orchestration')
+    expect(artifacts).toHaveLength(2)
+    expect(artifacts[1]!.value).toMatchObject({ 'p/free': { state: 'visible', reason: 'pinned visible (rule: zero-price)' } })
+    expect(writes).toHaveLength(1)
+  })
+
+  it('publishes through settings once and republishes on a rules change', async () => {
     const { apply } = await import('../src/index.ts')
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const listeners = new Map<string, (ns: unknown) => void>()

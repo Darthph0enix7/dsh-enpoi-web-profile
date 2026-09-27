@@ -77639,6 +77639,7 @@ var Config = Schema.object({
   endpoints: live(Schema.dict(String).default({})),
   capacityDefaults: live(Schema.any().default({}))
 });
+var SIGN_IN_REQUIRED = "sign-in required";
 var LLM_NS = "llm-pi-ai";
 function sectionOf(settings) {
   const section = readSettingsDocument(settings, LLM_NS);
@@ -77824,6 +77825,7 @@ function normalizeListingEntry(entry) {
     limit3?.output
   );
   const supported = listingSupported(row);
+  const isFree = typeof row.isFree === "boolean" ? row.isFree : void 0;
   return {
     id,
     ...displayName === void 0 || displayName.length > 120 ? {} : { name: displayName },
@@ -77833,7 +77835,8 @@ function normalizeListingEntry(entry) {
     ...supported.tools === void 0 ? {} : { tools: supported.tools },
     ...supported.reasoning === void 0 ? {} : { reasoning: supported.reasoning },
     ...listingPricing(row) === void 0 ? {} : { pricing: listingPricing(row) },
-    ...typeof row.isFree === "boolean" ? { isFree: row.isFree } : {}
+    ...isFree === void 0 ? {} : { isFree },
+    ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {}
   };
 }
 async function fetchModels(baseURL, key) {
@@ -78015,6 +78018,8 @@ function analyzeModel(route, model, fallback) {
   const costInput = typeof mDev?.cost?.input === "number" && Number.isFinite(mDev.cost.input) ? mDev.cost.input : void 0;
   const costOutput = typeof mDev?.cost?.output === "number" && Number.isFinite(mDev.cost.output) ? mDev.cost.output : void 0;
   const cost = costInput !== void 0 || costOutput !== void 0 ? { ...costInput !== void 0 ? { input: costInput } : {}, ...costOutput !== void 0 ? { output: costOutput } : {} } : void 0;
+  const gated = model.gated === true || model.isFree === false;
+  const gate = gated ? { gated: true, gateReason: model.gateReason ?? SIGN_IN_REQUIRED } : {};
   return {
     settings: {
       id: model.id,
@@ -78026,6 +78031,7 @@ function analyzeModel(route, model, fallback) {
       ...tools !== void 0 ? { tools } : {},
       ...cost !== void 0 ? { cost } : {},
       ...reasoningEfforts ? { reasoningEfforts } : {},
+      ...gate,
       ...unverified ? { unverified: true } : {}
     },
     discovered: {
@@ -78038,6 +78044,7 @@ function analyzeModel(route, model, fallback) {
       ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
       ...model.pricing === void 0 ? {} : { pricing: model.pricing },
       ...model.isFree === void 0 ? {} : { isFree: model.isFree },
+      ...gate,
       ...unverified ? { unverified: true } : {}
     }
   };
@@ -78090,6 +78097,8 @@ function stringifyComparable(models) {
       reasoning: m2.reasoningEfforts ? Object.keys(m2.reasoningEfforts).sort() : null,
       tools: m2.tools ?? null,
       cost: m2.cost ?? null,
+      gated: m2.gated ?? null,
+      gateReason: m2.gateReason ?? null,
       unverified: m2.unverified ?? null,
       source: m2.source ?? null
     }))
@@ -78127,7 +78136,9 @@ function apply(ctx, config) {
       const catalogRoute = isCatalogRoute(route);
       if (profile === void 0 && catalogRoute) continue;
       let key;
-      if (profile?.apiKeyEnv !== void 0) {
+      if (profile?.keyless === true) {
+        key = void 0;
+      } else if (profile?.apiKeyEnv !== void 0) {
         const hit = credentials === void 0 ? void 0 : await credentials.resolve(profile.apiKeyEnv);
         key = hit?.value;
       } else if (profile?.pool?.identities !== void 0 && profile.pool.identities.length > 0) {

@@ -91,7 +91,19 @@ interface LiveModel {
   pricing?: Record<string, string>
   /** Whether the listing's directory marked the model free. */
   isFree?: boolean
+  /**
+   * Whether the listing marked the model sign-in/paid-only (`isFree: false`).
+   * Aligns with the catalogue rules engine's `gated` predicate: a gated entry
+   * is dimmed by the picker with {@link gateReason} and can be excluded by a
+   * `gated: true|false` rule clause.
+   */
+  gated?: boolean
+  /** Why the model is gated, when it is; absent otherwise. */
+  gateReason?: string
 }
+
+/** The gate reason the listing's own `isFree: false` verdict earns. */
+const SIGN_IN_REQUIRED = 'sign-in required'
 
 /** The llm-pi-ai namespace (branded through the settings seam). */
 const LLM_NS = 'llm-pi-ai'
@@ -111,6 +123,8 @@ interface SettingsSeam {
 interface ProviderProfile {
   baseURL?: string
   apiKeyEnv?: string
+  /** Anonymous route: its listing is fetched without any credential, like its requests. */
+  keyless?: boolean
   models?: Array<Record<string, unknown>>
   pool?: {
     strategy?: string
@@ -430,6 +444,7 @@ export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
     limit?.output,
   )
   const supported = listingSupported(row)
+  const isFree = typeof row.isFree === 'boolean' ? row.isFree : undefined
   return {
     id,
     ...displayName === undefined || displayName.length > 120 ? {} : { name: displayName },
@@ -439,7 +454,8 @@ export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
     ...supported.tools === undefined ? {} : { tools: supported.tools },
     ...supported.reasoning === undefined ? {} : { reasoning: supported.reasoning },
     ...listingPricing(row) === undefined ? {} : { pricing: listingPricing(row) },
-    ...typeof row.isFree === 'boolean' ? { isFree: row.isFree } : {},
+    ...isFree === undefined ? {} : { isFree },
+    ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {},
   }
 }
 
@@ -488,6 +504,10 @@ export interface DiscoveredFileModel {
   reasoning?: boolean
   pricing?: Record<string, string>
   isFree?: boolean
+  /** Whether the listing marked the model sign-in/paid-only, mirroring the rules engine's `gated` entry flag. */
+  gated?: boolean
+  /** The picker-facing reason a gated model is unavailable; absent when not gated. */
+  gateReason?: string
   /** True only when neither models.dev, the installed catalog, nor the listing disclosed a capability. */
   unverified?: boolean
   source: 'discovered'
@@ -870,6 +890,14 @@ function analyzeModel(
     ? { ...(costInput !== undefined ? { input: costInput } : {}), ...(costOutput !== undefined ? { output: costOutput } : {}) }
     : undefined
 
+  // 6. Gate marker. The listing's own `isFree: false` verdict means the model
+  // is sign-in/paid-only on that gateway; both records carry the rules engine's
+  // `gated` flag so the picker dims it with the reason and a `gated` rule
+  // clause can exclude it. Models the listing did not price stay ungated:
+  // absent is "undisclosed", never a gate.
+  const gated = model.gated === true || model.isFree === false
+  const gate = gated ? { gated: true, gateReason: model.gateReason ?? SIGN_IN_REQUIRED } : {}
+
   return {
     settings: {
       id: model.id,
@@ -881,6 +909,7 @@ function analyzeModel(
       ...(tools !== undefined ? { tools } : {}),
       ...(cost !== undefined ? { cost } : {}),
       ...(reasoningEfforts ? { reasoningEfforts } : {}),
+      ...gate,
       ...(unverified ? { unverified: true } : {}),
     },
     discovered: {
@@ -893,6 +922,7 @@ function analyzeModel(
       ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
       ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
       ...(model.isFree === undefined ? {} : { isFree: model.isFree }),
+      ...gate,
       ...(unverified ? { unverified: true } : {}),
     },
   }
@@ -978,6 +1008,8 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       reasoning: m.reasoningEfforts ? Object.keys(m.reasoningEfforts as object).sort() : null,
       tools: m.tools ?? null,
       cost: m.cost ?? null,
+      gated: m.gated ?? null,
+      gateReason: m.gateReason ?? null,
       unverified: m.unverified ?? null,
       source: m.source ?? null,
     })),
@@ -1034,7 +1066,13 @@ export function apply(ctx: Context, config: Config): void {
       const catalogRoute = isCatalogRoute(route)
       if (profile === undefined && catalogRoute) continue
       let key: string | undefined
-      if (profile?.apiKeyEnv !== undefined) {
+      // A keyless route's listing is fetched anonymously: a stored, ambient, or
+      // env-provided key is never attached, exactly as its requests never send
+      // one (a gateway may reject any Authorization header on an anonymous
+      // route). BYOK on such a gateway drops `keyless` and keeps `apiKeyEnv`.
+      if (profile?.keyless === true) {
+        key = undefined
+      } else if (profile?.apiKeyEnv !== undefined) {
         const hit = credentials === undefined ? undefined : await credentials.resolve(profile.apiKeyEnv)
         key = hit?.value
       } else if (profile?.pool?.identities !== undefined && profile.pool.identities.length > 0) {

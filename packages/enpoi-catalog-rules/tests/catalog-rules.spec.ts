@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readCatalogue } from '../src/catalogue.ts'
 import {
   decideVisibility, describePredicate, diffRules, evaluatePredicate, evaluateVisibility,
   formatHiddenReason, globMatches, parseRulesDocument, resolvePrivacy, withHiddenPins,
@@ -133,6 +134,44 @@ describe('enpoi-catalog-rules visibility precedence', () => {
     // The overrides.gated map gates by provider or provider/model too.
     const byOverride = rulesOf({ overrides: { gated: { models: ['p/other'] } } })
     expect(decideVisibility(entry({ provider: 'p', id: 'other' }), byOverride, 'unknown').reason).toBe('gated')
+  })
+
+  it('renders the catalogue gate reason and lets a gated predicate exclude it', () => {
+    // The provider sync stores `gated`/`gateReason` for a listing row marked
+    // `isFree: false` (Kilo's sign-in-only models); the reason reaches the picker.
+    const signInOnly = entry({ provider: 'kilo', id: 'kilo-auto/efficient', gated: true, gateReason: 'sign-in required' })
+    expect(decideVisibility(signInOnly, rulesOf({}), 'unknown'))
+      .toMatchObject({ state: 'hidden', source: 'gated', reason: 'sign-in required' })
+    const hidePaid = rulesOf({ visibility: { hide: [{ when: { gated: true } }] } })
+    expect(evaluatePredicate(signInOnly, { gated: true }, 'unknown').matched).toBe(true)
+    expect(evaluatePredicate(entry({ provider: 'kilo', id: 'kilo-auto/free' }), { gated: true }, 'unknown'))
+      .toEqual({ matched: false, failed: 'gated' })
+    expect(evaluatePredicate(signInOnly, { gated: false }, 'unknown')).toEqual({ matched: false, failed: 'not gated' })
+    expect(hidePaid.hide).toHaveLength(1)
+  })
+
+  it('projects the sync gate flag and reason from settings model rows', () => {
+    const settings = {
+      get: (ns: string) => ns === 'llm-pi-ai'
+        ? {
+            providers: {
+              kilo: {
+                models: [
+                  { id: 'kilo-auto/efficient', name: 'Auto Efficient', isFree: false, gated: true, gateReason: 'sign-in required' },
+                  { id: 'kilo-auto/free', name: 'Auto Free', isFree: true },
+                  { id: 'hand-added' },
+                ],
+              },
+            },
+          }
+        : undefined,
+    }
+    const entries = readCatalogue(settings)
+    expect(entries.map(item => item.id)).toEqual(['kilo-auto/efficient', 'kilo-auto/free', 'hand-added'])
+    expect(entries[0]).toMatchObject({ provider: 'kilo', gated: true, gateReason: 'sign-in required' })
+    expect(entries[1]?.gated).toBeUndefined()
+    expect(entries[1]?.gateReason).toBeUndefined()
+    expect(entries[2]?.gated).toBeUndefined()
   })
 
   it('defaults to visible with a null reason', () => {

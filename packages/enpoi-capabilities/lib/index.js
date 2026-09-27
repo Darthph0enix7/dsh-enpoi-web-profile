@@ -313,7 +313,7 @@ function resolvePolicy(input) {
       }
       return {
         kind: "ask",
-        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code \u2014 approve explicitly`,
+        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code \u2014 approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead`,
         source: "scan:opaque-executor",
         grantTier: "pattern",
         pattern: command
@@ -325,7 +325,7 @@ function resolvePolicy(input) {
       }
       return {
         kind: "ask",
-        reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly",
+        reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly; to read file contents use the read tool (or grep/glob to search) instead",
         source: "scan:hidden-danger",
         grantTier: "pattern",
         pattern: command
@@ -1168,6 +1168,346 @@ function installReviewRunTool(ctx) {
   });
 }
 
+// src/forwarding.ts
+init_policy();
+import { isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "node:path";
+var FORWARDED_ASK_MARKER = "[forwarded child ask]";
+var PATH_ARG_KEYS = [
+  "file_path",
+  "filePath",
+  "path",
+  "paths",
+  "target",
+  "destination",
+  "source",
+  "file",
+  "dir",
+  "directory"
+];
+var CREDENTIAL_PATH = /(?:^|[\s/'"=@])\.env(?:\.|$|\s)|(?:^|[\s/'"=])\.ssh(?:\/|[\s'"]|$)|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b|(?:^|[\s/'"=])\.netrc\b|(?:^|[\s/'"=])\.aws(?:\/|[\s'"]|$)|(?:^|[\s/'"=])\.git-credentials\b|(?:^|[\s/'"=])known_hosts\b|(?:^|[\s/'"=])credentials(?:\.json)?(?:\s|$)|\/\.config\/gcloud\/|\/\.kube\/config\b|\/\.docker\/config\.json\b|\/\.npmrc\b/i;
+var PRIVILEGE_ESCALATORS = /* @__PURE__ */ new Set(["sudo", "su", "doas", "pkexec"]);
+var EXFILTRATORS = /* @__PURE__ */ new Set(["scp", "sftp", "ftp", "lftp", "nc", "ncat", "socat", "telnet", "sshpass"]);
+var FS_PATH_TOOLS = /* @__PURE__ */ new Set([
+  "read",
+  "read_image",
+  "read_image_file",
+  "write",
+  "edit",
+  "str_replace_editor",
+  "list_dir",
+  "delete",
+  "move",
+  "copy"
+]);
+function shortId(id) {
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+function delegatedChildOf(agent) {
+  const header = agent?.session?.header;
+  const childSessionId = typeof header?.id === "string" && header.id !== "" ? header.id : void 0;
+  const parentSessionId = typeof header?.parentSession === "string" && header.parentSession !== "" ? header.parentSession : void 0;
+  if (childSessionId === void 0 || parentSessionId === void 0) return void 0;
+  const rawDepth = header?.delegationDepth;
+  const depth = typeof rawDepth === "number" && Number.isSafeInteger(rawDepth) && rawDepth > 0 ? rawDepth : 1;
+  let label;
+  for (const event of agent?.session?.ownEvents?.() ?? []) {
+    if (event?.type !== "subagent/descriptor") continue;
+    if (typeof event.data?.label === "string" && event.data.label.trim() !== "") label = event.data.label.trim();
+    break;
+  }
+  const cwd = typeof header?.cwd === "string" && header.cwd !== "" ? header.cwd : void 0;
+  return {
+    childSessionId,
+    parentSessionId,
+    depth,
+    label: label ?? `child ${shortId(childSessionId)}`,
+    ...cwd !== void 0 ? { cwd } : {}
+  };
+}
+function pathArguments(args) {
+  if (args === void 0) return [];
+  const found = [];
+  for (const key of PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value !== "") found.push(value);
+    else if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === "string" && item !== "") found.push(item);
+    }
+  }
+  return found;
+}
+function isOutsideWorkspace(path, cwd) {
+  if (cwd === void 0 || cwd === "") return false;
+  const absolute = isAbsolute2(path) ? path : resolvePath(cwd, path);
+  const rel = relative(cwd, absolute);
+  return rel === ".." || rel.startsWith(`..${"/"}`) || isAbsolute2(rel);
+}
+function isRecursiveDelete(argv) {
+  const argv0 = argv[0];
+  if (argv0 === "rmdir") return true;
+  return argv.slice(1).some((token) => {
+    if (token === "--") return false;
+    if (token.startsWith("--")) return token === "--recursive" || token === "--force";
+    return token.startsWith("-") && /[rRf]/.test(token.slice(1));
+  });
+}
+function isHistoryRewrite(argv) {
+  const sub = argv[1];
+  if (sub === "push") {
+    return argv.slice(2).some((token) => token === "-f" || token === "--force" || token === "--force-with-lease" || token === "--force-if-includes" || token === "--mirror" || token === "--delete" || token.startsWith("--force-with-lease="));
+  }
+  if (sub === "reset") return argv.includes("--hard");
+  return sub === "filter-branch" || sub === "filter-repo";
+}
+function isRemoteTarget(token) {
+  if (token.includes("://") || token.startsWith("/") || token.startsWith("-")) return false;
+  return /^[^/][^:]*:.+/.test(token);
+}
+function isPipeToShell(command) {
+  if (/\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh(?:\s|$)/.test(command)) return true;
+  if (/\|\s*(?:python[0-9.]*|perl|ruby|node|deno|bun|php)(?:\s|$)/.test(command)) return true;
+  return /(?:ba|z|da|k)?sh\s+<\(|(?:python[0-9.]*|node)\s+<\(/.test(command);
+}
+function railOfBash(command) {
+  if (isPipeToShell(command)) return { rail: "pipe-to-shell", evidence: command.trim() };
+  const credential = CREDENTIAL_PATH.exec(command);
+  if (credential !== null) return { rail: "credentials", evidence: credential[0] };
+  for (const rawSub of splitCompoundCommand(command)) {
+    const sub = stripEnvPrefixes(rawSub).trim();
+    if (sub === "") continue;
+    const argv = sub.split(/\s+/);
+    const argv0 = argv[0] ?? "";
+    if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: "privilege-escalation", evidence: sub };
+    if ((argv0 === "rm" || argv0 === "rmdir") && isRecursiveDelete(argv)) return { rail: "recursive-delete", evidence: sub };
+    if (argv0 === "find" && /(?:^|\s)(?:-delete|-exec\s+rm\b)/.test(sub)) return { rail: "recursive-delete", evidence: sub };
+    if (argv0 === "rsync" && /(?:^|\s)--delete\b/.test(sub)) return { rail: "recursive-delete", evidence: sub };
+    if (argv0 === "git" && isHistoryRewrite(argv)) return { rail: "history-rewrite", evidence: sub };
+    if (EXFILTRATORS.has(argv0)) return { rail: "exfiltration", evidence: sub };
+    if (argv0 === "rsync" && argv.slice(1).some(isRemoteTarget)) return { rail: "exfiltration", evidence: sub };
+    if (argv0 === "curl" && argv.slice(1).some((token) => token === "-T" || token === "--upload-file" || token.startsWith("--upload-file="))) {
+      return { rail: "exfiltration", evidence: sub };
+    }
+    if (argv0 === "wget" && argv.slice(1).some((token) => token === "--post-file" || token === "--body-file")) {
+      return { rail: "exfiltration", evidence: sub };
+    }
+    if ((argv0 === "docker" || argv0 === "podman") && argv[1] === "push") return { rail: "exfiltration", evidence: sub };
+  }
+  return void 0;
+}
+function railHitOf(input) {
+  if (input.toolName === "bash") {
+    const command = typeof input.args?.command === "string" ? input.args.command : void 0;
+    return command === void 0 || command.trim() === "" ? void 0 : railOfBash(command);
+  }
+  if (!FS_PATH_TOOLS.has(input.toolName)) return void 0;
+  for (const path of pathArguments(input.args)) {
+    if (CREDENTIAL_PATH.test(path)) return { rail: "credentials", evidence: path };
+    if (isOutsideWorkspace(path, input.cwd)) return { rail: "boundary", evidence: path };
+  }
+  return void 0;
+}
+function recommendationOf(input) {
+  const paths = input.toolName === "bash" ? [] : pathArguments(input.args);
+  if (paths.length === 0) return "no filesystem path named";
+  return "inside the workspace, looks safe";
+}
+function forwardedAskReason(origin, decision, recommendation) {
+  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. Parent recommendation: ${recommendation}.`;
+}
+function forwardedAskDisplayReason(origin, decision, recommendation) {
+  return {
+    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}. ${recommendation}.`,
+    zh: `\u6765\u81EA ${origin.label} \u7684\u8F6C\u53D1\u8BF7\u6C42\uFF08\u6DF1\u5EA6 ${origin.depth}\uFF09\uFF1A${decision.reason}\u3002${recommendation}\u3002`
+  };
+}
+var ChildApprovalForwarder = class {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  grants = /* @__PURE__ */ new Map();
+  pending = /* @__PURE__ */ new Map();
+  /**
+   * Resolve one child ask through the parent. Rails run first and are never
+   * card-approvable; then an existing subtree grant; then the root's mode
+   * (standing consent / card / fail closed). A rejection is returned as a
+   * corrective deny; nothing here kills the child.
+   * @param input - the child agent, tool call, and the ask the child's policy produced.
+   * @returns the allow/deny resolution for the pre-execute listener.
+   */
+  async forward(input) {
+    const child = delegatedChildOf(input.agent);
+    if (child === void 0) {
+      this.deps.report(`deny: non-child ask for ${input.toolName} reached the child forwarder`);
+      return { kind: "deny", reason: `child approval forwarding received a non-child ask for ${input.toolName}` };
+    }
+    const root = this.deps.findRoot(child.childSessionId);
+    if (root === void 0) {
+      return this.failClosed(child.childSessionId, input.toolName, "no live parent session to forward to");
+    }
+    const origin = { ...child, rootSessionId: root.id };
+    const depthCap = this.deps.depthCap();
+    if (child.depth > depthCap) {
+      this.deps.report(`deny: ${input.toolName} from child ${shortId(child.childSessionId)} at depth ${child.depth} exceeds cap ${depthCap}`);
+      return {
+        kind: "deny",
+        reason: `approval for ${input.toolName} was denied: delegation depth ${child.depth} is past the cap ${depthCap}, so this ask is never forwarded to a human card`
+      };
+    }
+    const command = input.toolName === "bash" && typeof input.args?.command === "string" ? input.args.command : void 0;
+    const rail = railHitOf({ toolName: input.toolName, args: input.args, cwd: child.cwd });
+    if (rail !== void 0) {
+      const allowed = this.deps.parentAllowsRail({ root, toolName: input.toolName, ...command !== void 0 ? { command } : {}, rail: rail.rail });
+      this.deps.report(
+        `${allowed ? "allow" : "deny"}: rail ${rail.rail} (${rail.evidence}) from child ${shortId(child.childSessionId)} resolved through the parent's own policy`
+      );
+      if (allowed) return { kind: "allow", reason: `rail ${rail.rail}: the parent's own policy allows this action` };
+      return {
+        kind: "deny",
+        reason: `approval for ${input.toolName} was denied: ${rail.rail} (${rail.evidence}) is never approvable from a forwarded child card and the parent's own policy does not allow it`
+      };
+    }
+    const proposal = grantProposalFor(input.decision, input.toolName, command, child.label);
+    if (this.grantAllows(child.childSessionId, input.decision, proposal)) {
+      this.deps.report(`allow: ${input.toolName} absorbed by a grant scoped to child session ${shortId(child.childSessionId)}`);
+      return { kind: "allow", reason: "allowed by a standing grant scoped to this child session" };
+    }
+    const mode = this.deps.modeOf(root);
+    if (mode === "full-access") {
+      this.deps.report(
+        `allow: standing consent (root ${shortId(root.id)} is Full access / no restrictions) for ${input.toolName} from child ${shortId(child.childSessionId)}`
+      );
+      return { kind: "allow", reason: "approved by the parent session's Full access standing consent" };
+    }
+    if (mode !== "interactive") {
+      return this.failClosed(
+        child.childSessionId,
+        input.toolName,
+        mode === void 0 ? "parent session mode is unknown" : "parent runs unattended with approval prompts disabled"
+      );
+    }
+    const recommendation = recommendationOf({ toolName: input.toolName, args: input.args, cwd: child.cwd });
+    const batchKey = `${child.childSessionId}\0${input.toolName}\0${command ?? stableJson(input.args)}`;
+    const inFlight = this.pending.get(batchKey);
+    if (inFlight !== void 0) return await inFlight;
+    const run = this.askThroughCard(input, root, origin, proposal, recommendation);
+    this.pending.set(batchKey, run);
+    try {
+      return await run;
+    } finally {
+      this.pending.delete(batchKey);
+    }
+  }
+  /** Forward the ask as one root-session card and map its outcome. */
+  async askThroughCard(input, root, origin, proposal, recommendation) {
+    const reason = forwardedAskReason(origin, input.decision, recommendation);
+    let outcome;
+    try {
+      outcome = await this.deps.askRoot({
+        root,
+        toolName: input.toolName,
+        reason,
+        displayReason: forwardedAskDisplayReason(origin, input.decision, recommendation),
+        ...input.decision.broadAllow !== void 0 ? { broadAllow: input.decision.broadAllow } : {},
+        ...input.signal !== void 0 ? { signal: input.signal } : {},
+        origin
+      });
+    } catch (error) {
+      return this.failClosed(
+        origin.childSessionId,
+        input.toolName,
+        `the forwarded ask could not be delivered: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    switch (outcome) {
+      case "allowed-once":
+        this.deps.report(`allow: human approved ${input.toolName} once for child ${shortId(origin.childSessionId)}`);
+        return { kind: "allow", reason: "approved once on the forwarded parent card" };
+      case "allowed-always":
+        this.recordGrant(origin.childSessionId, proposal);
+        this.deps.report(`allow: exact-command always granted to child session ${shortId(origin.childSessionId)}`);
+        return { kind: "allow", reason: "approved with a standing grant scoped to this child session" };
+      case "allowed-always-broad": {
+        let confirm;
+        try {
+          confirm = await this.deps.askRoot({
+            root,
+            toolName: input.toolName,
+            reason: `${FORWARDED_ASK_MARKER} second confirmation: grant "${proposal.broadPattern ?? proposal.pattern ?? input.toolName}" as a standing allowance for child ${shortId(origin.childSessionId)} (${origin.label}, depth ${origin.depth})?`,
+            displayReason: {
+              en: `Confirm a broad standing grant to ${origin.label} (depth ${origin.depth}) for "${proposal.broadPattern ?? proposal.pattern ?? input.toolName}".`,
+              zh: `\u8BF7\u518D\u6B21\u786E\u8BA4\u5411 ${origin.label}\uFF08\u6DF1\u5EA6 ${origin.depth}\uFF09\u6388\u4E88 "${proposal.broadPattern ?? proposal.pattern ?? input.toolName}" \u7684\u957F\u671F\u8BB8\u53EF\u3002`
+            },
+            secondConfirmation: true,
+            ...input.signal !== void 0 ? { signal: input.signal } : {},
+            origin
+          });
+        } catch (error) {
+          return this.failClosed(
+            origin.childSessionId,
+            input.toolName,
+            `the broad-grant confirmation could not be delivered: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+        if (confirm === "allowed-once" || confirm === "allowed-always" || confirm === "allowed-always-broad") {
+          this.recordGrant(origin.childSessionId, grantProposalForOutcome(proposal, true));
+          this.deps.report(`allow: broad grant confirmed for child session ${shortId(origin.childSessionId)}`);
+          return { kind: "allow", reason: "approved with a confirmed broad grant scoped to this child session" };
+        }
+        return {
+          kind: "deny",
+          reason: `the broad standing grant for ${input.toolName} was not confirmed`
+        };
+      }
+      case "rejected":
+        this.deps.report(`deny: human rejected ${input.toolName} for child ${shortId(origin.childSessionId)}`);
+        return {
+          kind: "deny",
+          reason: `the user rejected ${input.toolName}; it required approval because: ${input.decision.reason}`
+        };
+      case "cancelled":
+        return { kind: "deny", reason: `approval for ${input.toolName} was cancelled before it was answered` };
+      case "unavailable":
+        return this.failClosed(origin.childSessionId, input.toolName, "the forwarded ask was left unanswered");
+      default:
+        return this.failClosed(origin.childSessionId, input.toolName, `unexpected approval outcome ${String(outcome)}`);
+    }
+  }
+  /** Fail closed with a quiet notification; the child's turn settles normally. */
+  failClosed(childSessionId, toolName, why) {
+    this.deps.report(`fail-closed: ${toolName} from child ${shortId(childSessionId)}: ${why}`);
+    return {
+      kind: "deny",
+      reason: `approval for ${toolName} failed closed: ${why}. Adapt the task or report the limitation instead of retrying.`
+    };
+  }
+  /** Whether an earlier forwarded "always" covers this ask for this child session. */
+  grantAllows(childSessionId, decision, proposal) {
+    const grants = this.grants.get(childSessionId);
+    if (grants === void 0) return false;
+    for (const grant of grants) {
+      if (grant.proposal.tool !== proposal.tool) continue;
+      if (grant.proposal.pattern === proposal.pattern) return true;
+      if (grant.proposal.pattern !== void 0 && grant.proposal.pattern === decision.pattern) return true;
+    }
+    return false;
+  }
+  /** Record one grant against the requester's own session (deduplicated). */
+  recordGrant(childSessionId, proposal) {
+    const grants = this.grants.get(childSessionId) ?? [];
+    if (!grants.some((grant) => grant.proposal.tool === proposal.tool && grant.proposal.pattern === proposal.pattern)) {
+      grants.push({ proposal, admittedAt: Date.now() });
+      this.grants.set(childSessionId, grants);
+    }
+  }
+};
+function stableJson(value) {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "<unserializable>";
+  }
+}
+
 // src/index.ts
 var publishedCatalog = /* @__PURE__ */ new Map();
 var name = "enpoi-capabilities";
@@ -1545,6 +1885,71 @@ function apply(ctx, config = {}) {
       return void 0;
     }
   }
+  function liveRootOf(childSessionId) {
+    const agents = ctx.get("agents");
+    if (agents?.get === void 0) return void 0;
+    let current = agents.get(childSessionId);
+    for (let hop = 0; hop < 33; hop += 1) {
+      if (current === void 0) return void 0;
+      const header = current.session?.header;
+      const parentSession = header?.parentSession;
+      if (parentSession === void 0 || parentSession === "") {
+        const id = typeof header?.id === "string" && header.id !== "" ? header.id : current.id ?? "";
+        return id === "" ? void 0 : { id, agent: current };
+      }
+      current = agents.get(String(parentSession));
+    }
+    return void 0;
+  }
+  function rootModeOf(root) {
+    const agent = root.agent;
+    if (agent?.session === void 0) return void 0;
+    const sandbox = readSandboxMode(agent) ?? "workspace-write";
+    const approval = readApprovalPolicy(agent)?.policy ?? ctx.get("approval")?.config?.policy ?? "ask";
+    if (approval !== "never") return "interactive";
+    return sandbox === "danger-full-access" ? "full-access" : "unattended";
+  }
+  function parentAllowsRail(query) {
+    const agent = query.root.agent;
+    if (query.rail === "boundary") return readSandboxMode(agent) === "danger-full-access";
+    const decision = resolvePolicy({
+      toolName: query.toolName,
+      ...query.command !== void 0 ? { command: query.command } : {},
+      agent: askingAgentOf({ agent }),
+      reviewer: false,
+      config: readPermissionConfig(),
+      sandboxMode: readSandboxMode(agent),
+      mcpServerNames: readMcpServerNames() ?? []
+    });
+    return decision.kind === "allow";
+  }
+  function requestRootApproval(query) {
+    const approval = ctx.get("approval");
+    if (approval?.request === void 0) {
+      return Promise.reject(new Error("the approval service is not composed"));
+    }
+    return approval.request({
+      agent: query.root.agent,
+      toolName: query.toolName,
+      reason: query.reason,
+      displayReason: query.displayReason,
+      ...query.broadAllow !== void 0 ? { broadAllow: query.broadAllow } : {},
+      ...query.signal !== void 0 ? { signal: query.signal } : {}
+    });
+  }
+  const approvalForwarding = new ChildApprovalForwarder({
+    findRoot: liveRootOf,
+    modeOf: rootModeOf,
+    parentAllowsRail,
+    askRoot: requestRootApproval,
+    report: (line) => process.stderr.write(`[enpoi-capabilities] ${line}
+`),
+    depthCap: () => {
+      const subagents = ctx.get("subagents");
+      const depth = subagents?.resolveMaxDepth?.();
+      return typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : 1;
+    }
+  });
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
     const state = initialCapabilitiesState(getGlobalDefaults());
     const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs());
@@ -1570,6 +1975,21 @@ function apply(ctx, config = {}) {
     if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
     const approvalPolicy = readApprovalPolicy(exec.agent);
     if (approvalPolicy?.policy === "never") {
+      if (delegatedChildOf(exec.agent) !== void 0) {
+        const resolution = await approvalForwarding.forward({
+          agent: exec.agent,
+          toolName: exec.name,
+          args: exec.arguments,
+          decision,
+          ...exec.signal !== void 0 ? { signal: exec.signal } : {}
+        });
+        if (resolution.kind === "deny") return { kind: "deny", reason: resolution.reason };
+        const downstream = await next();
+        if (downstream.kind === "ask") {
+          return { kind: "deny", reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` };
+        }
+        return downstream;
+      }
       return {
         kind: "deny",
         reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? "delegated subagent" : "session"} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`
@@ -1650,16 +2070,20 @@ function apply(ctx, config = {}) {
     const approvalId = event.data.id;
     if (approvalId === void 0) return void 0;
     let callId;
+    let forwarded = false;
     if (typeof session?.eventAt === "function") {
       for (let seq = event.seq ?? session.seq ?? 0; seq >= 0 && seq >= (event.seq ?? 0) - 64; seq -= 1) {
         const e = session.eventAt(seq);
         if (e?.type === "approval/asked" && e.data.id === approvalId) {
+          const reason = e.data.reason;
+          if (typeof reason === "string" && reason.includes(FORWARDED_ASK_MARKER)) forwarded = true;
           const c = e.data.callId;
           if (c !== void 0) callId = String(c);
           break;
         }
       }
     }
+    if (forwarded) return void 0;
     if (callId === void 0) {
       callId = [...pendingGrants.keys()][0];
     }

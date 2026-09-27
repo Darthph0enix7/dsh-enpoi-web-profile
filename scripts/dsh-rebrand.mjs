@@ -18,7 +18,10 @@
  * the guard that detects the next regression:
  *   - dist index/preview titles + the branded favicon/manifest set,
  *   - the dark boot default marker on `preview.html` (no host injection there),
- *   - the runtime `productTitle` fallback compiled into ui-layout's client.
+ *   - the runtime `productTitle` fallback compiled into ui-layout's client,
+ *   - the active skin's overlay text/background contrast (the inverted static
+ *     ramps that made the archive/revert banners dark-on-dark) through
+ *     ./dsh-token-contrast.mjs — safeguard 20 in ~/dsh-migration/50-…md.
  *
  * Usage:
  *   node scripts/dsh-rebrand.mjs            # apply (idempotent)
@@ -30,6 +33,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { contrastDrift } from './dsh-token-contrast.mjs'
 
 const HARNESS = process.env.HARNESS_ROOT ?? '/home/adam/deepseek-harness'
 const DIST = join(HARNESS, 'apps/web/dist')
@@ -174,6 +178,7 @@ if (CHECK) {
   checkPages()
   checkAssets()
   checkRuntimeTitle()
+  for (const item of contrastDrift()) drift.push(item)
   if (LIVE) await checkLive()
   for (const note of skips) console.warn(`[rebrand] warn ${note}`)
   if (drift.length > 0) {
@@ -181,7 +186,7 @@ if (CHECK) {
     for (const item of drift) console.error(`  - ${item}`)
     process.exit(1)
   }
-  console.log(`[rebrand] PASS${LIVE ? ' (live)' : ''}: Enpoi title, dark preview boot, brand assets, runtime title`)
+  console.log(`[rebrand] PASS${LIVE ? ' (live)' : ''}: Enpoi title, dark preview boot, brand assets, runtime title, overlay contrast`)
 } else {
   apply()
   console.log('[rebrand] applied; run with --check to verify')

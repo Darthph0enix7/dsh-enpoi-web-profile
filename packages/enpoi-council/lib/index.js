@@ -164,7 +164,7 @@ var COUNCIL_KEPT_TOOLS = [
   "whiteboard_unpin"
 ];
 var isKeptTool = (name2) => COUNCIL_KEPT_TOOLS.includes(name2);
-var DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS].filter((name2) => !isKeptTool(name2));
+var DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS, "bash"].filter((name2) => !isKeptTool(name2));
 function councilDenyList(registeredCouncilTools) {
   return [.../* @__PURE__ */ new Set([...DEBATER_DENIED_TOOLS, ...registeredCouncilTools.filter((id) => id !== "roundtable" && id !== "chorus")])].filter((name2) => !isKeptTool(name2));
 }
@@ -313,7 +313,9 @@ async function waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs = 9e4) {
   try {
     for (; ; ) {
       if (signal.aborted) throw new Error("council deliberation aborted");
-      if (Date.now() - started > timeoutMs) throw new Error(`council seat timed out after ${timeoutMs}ms`);
+      if (Date.now() - started > timeoutMs) {
+        throw new Error(`council seat timed out after ${timeoutMs}ms (child ${childId} never settled a turn \u2014 no assistant text and no completed turn/end observed)`);
+      }
       if (ctx.agents.get(childId) === void 0) {
         const persistence = ctx.get("sessionPersistence");
         if (persistence !== void 0) {
@@ -327,15 +329,13 @@ async function waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs = 9e4) {
           const lastUser = [...events].reverse().find((e) => e.type === "user/message");
           const since = lastUser === void 0 ? 0 : lastUser.seq;
           const messages = events.filter((e) => e.type === "assistant/message" && e.seq > since);
-          if (messages.length > 0) {
-            const extracted = messages.map((m) => {
-              const data = m.data;
-              return textOfContent(data.message?.content ?? data.content);
-            }).filter((t) => t.length > 0).join("\n").trim();
-            if (extracted.length > 0) {
-              const truncated = events.some((e) => e.type === "turn/end" && e.data?.reason?.kind === "max-tokens");
-              return { text: extracted, truncated };
-            }
+          const extracted = messages.map((m) => {
+            const data = m.data;
+            return textOfContent(data.message?.content ?? data.content);
+          }).filter((t) => t.length > 0).join("\n").trim();
+          if (extracted.length > 0) {
+            const truncated = events.some((e) => e.type === "turn/end" && e.data?.reason?.kind === "max-tokens");
+            return { text: extracted, truncated };
           }
           const turnEnd = events.find((e) => e.type === "turn/end" && e.seq > since);
           if (turnEnd !== void 0) {
@@ -346,9 +346,7 @@ async function waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs = 9e4) {
             if (reason?.kind === "aborted") {
               throw new Error(`Turn was aborted (${reason.reason?.kind ?? "cancelled"})`);
             }
-            if (reason?.kind === "completed" && messages.length === 0) {
-              return { text: "[NO_OUTPUT: seat returned empty content]", truncated: false };
-            }
+            return { text: "[NO_OUTPUT: seat settled without text content]", truncated: reason?.kind === "max-tokens" };
           }
         }
       }
@@ -20640,6 +20638,51 @@ function parseOneSheet(text) {
   return { citation, facts, confidence: placeholder ? "low" : confidence ?? "medium" };
 }
 
+// src/core/chair.ts
+var ChairOutputError = class extends Error {
+  /** The required sections that were absent or had no body text. */
+  missing;
+  constructor(missing, excerpt) {
+    super(`chair deliverable invalid \u2014 missing or empty required section(s): ${missing.join(", ")}${excerpt ? ` (got: "${excerpt}")` : ""}`);
+    this.name = "ChairOutputError";
+    this.missing = missing;
+  }
+};
+function headingKey(line) {
+  return line.trim().replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)*/, "").replace(/^#{1,6}\s*/, "").replace(/\*\*/g, "").replace(/^[_*]+|[_*]+$/g, "").replace(/\s*[:\u2014-]\s*$/, "").trim().toLowerCase();
+}
+function isHeadingLine(line) {
+  return /^\s*(?:#{1,6}\s+|[-*+]\s+\*\*|\*\*)/.test(line) || /^\s*[A-Z][^.!?]*:\s*$/.test(line);
+}
+function validateChairDeliverable(text, sections) {
+  const trimmed = text.trim();
+  if (sections.length === 0) return { ok: trimmed.length > 0, missing: [] };
+  const lines = trimmed.split(/\r?\n/);
+  const missing = [];
+  for (const section of sections) {
+    const key = headingKey(section);
+    let foundAt = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (headingKey(lines[i]) === key) {
+        foundAt = i;
+        break;
+      }
+    }
+    if (foundAt === -1) {
+      missing.push(section);
+      continue;
+    }
+    let body = "";
+    for (let i = foundAt + 1; i < lines.length; i++) {
+      if (isHeadingLine(lines[i])) break;
+      body += `${lines[i]}
+`;
+    }
+    if (!/[A-Za-z0-9]{2,}/.test(body)) missing.push(section);
+  }
+  return { ok: missing.length === 0, missing };
+}
+
 // src/core/ledger.ts
 function assertionOverlap(a, b) {
   const tokens = (s) => new Set(s.toLowerCase().replace(/[^a-z0-9äöüß\s]/gi, " ").split(/\s+/).filter((t) => t.length > 3));
@@ -20817,13 +20860,14 @@ var REFEREE_SYSTEM_BASE = [
   "You are the Referee of a high-stakes multi-agent council. You are not a debater.",
   "You manage the dispute ledger procedurally: you ADMIT proposed entries, you TOGGLE entry statuses, you issue numbered directives, you allocate the floor.",
   "You NEVER write assertions, arguments, or synthesis prose. You never introduce claims of your own.",
-  "Do not call any tools or attempt code execution. You have no external tools.",
+  "Do not call any tools and never attempt shell commands, code execution, or file reads \u2014 you have no tools and no shell. Your ONLY output channel is your reply text.",
   "Rules you must enforce:",
   "- A state flip away from `contested` requires the argument to have survived scrutiny; deny flips that rest on unverified assertions (STATUS_CHANGE_DENIED: <reason>).",
   "- An attack on another seat's crux without a `STEELMAN [<seat>]:` block is denied (STATUS_CHANGE_DENIED: missing mandatory steelman).",
   "- Out-of-scope argumentation gets a scope warning and no ledger effect.",
-  "Output STRICTLY one JSON object, no prose around it:",
-  '{"admissions":[{"kind":"idea","assertion":"...","author":"<seat>","evidenceRef":null}],',
+  "- Admission kinds must be EXACTLY the ledger kinds this council declares in the prompt (the CURRENT LEDGER line and the council name define them). Never invent kinds; an unknown kind is rejected and the entry is lost.",
+  "Output STRICTLY one JSON object as your reply text, no prose around it, never inside a tool call:",
+  '{"admissions":[{"kind":"<declared ledger kind>","assertion":"...","author":"<seat>","evidenceRef":null}],',
   ' "flips":[{"id":"I-1","to":"contested","reason":"..."}],',
   ' "directives":{"<seat>":"1. ..."},',
   ' "floor":{"active":["<seat>"],"standby":["<seat>"]},',
@@ -20833,6 +20877,7 @@ async function runRefereePass(ctx, parent, input2, ledger, signal, timeoutMs) {
   const prompt = [
     `EPOCH: ${input2.epoch}`,
     `COUNCIL: ${input2.spec.label}`,
+    `LEDGER KINDS (admission "kind" must be exactly one of these): ${input2.spec.ledgerKinds.map((k) => k.kind).join(", ")}`,
     input2.spec.scopeContract ? `SCOPE CONTRACT:
 ${input2.spec.scopeContract}` : "",
     `CURRENT LEDGER:
@@ -20847,7 +20892,7 @@ ${Object.entries(input2.previousDirectives).map(([seat, text]) => `${seat}: ${te
     input2.offlineSeats !== void 0 && input2.offlineSeats.length > 0 ? `OFFLINE SEATS (their routes failed \u2014 they produce nothing; exclude them from floor.active and issue them no directives): ${input2.offlineSeats.join(", ")}` : "",
     `SEAT OUTPUTS THIS EPOCH:
 ${input2.roundTranscript}`,
-    "Produce the referee JSON now. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch."
+    "Produce the referee JSON now as your reply text \u2014 never through a tool call. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch."
   ].filter(Boolean).join("\n\n");
   let fiber;
   try {
@@ -20873,29 +20918,39 @@ ${input2.roundTranscript}`,
   }
 }
 function parseRefereeOutput(text, spec) {
-  const empty = { admissions: [], flips: [], directives: {}, floor: { active: spec.seats.map((s) => s.id), standby: [] }, scopeWarnings: [] };
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end <= start) {
-    councilDiag("[referee] no JSON found \u2014 treating pass as no-op with full floor");
-    return empty;
+    const excerpt = text.replace(/\s+/g, " ").trim().slice(0, 240);
+    throw new RefereeOutputError(
+      `referee pass returned no JSON object (got ${text.trim().length} chars${excerpt ? `: "${excerpt}"` : ""})`
+    );
   }
   try {
     const parsed = JSON.parse(text.slice(start, end + 1));
     const seatIds = new Set(spec.seats.map((s) => s.id));
-    const kinds = new Set(spec.ledgerKinds.map((k) => k.kind));
     return {
-      admissions: (Array.isArray(parsed.admissions) ? parsed.admissions : []).filter((a) => a && typeof a.assertion === "string" && kinds.has(a.kind)).map((a) => ({ kind: a.kind, assertion: a.assertion, author: typeof a.author === "string" ? a.author : "unknown", evidenceRef: a.evidenceRef ?? null })),
+      // Unknown kinds are KEPT here so applyRefereeOutput can report each
+      // rejection; filtering them silently was the 2026-09-27 data-loss bug
+      // (a referee admitted 5 entries as "fact"/"idea"/"observation" and the
+      // roundtable ledger dropped every one without a trace).
+      admissions: (Array.isArray(parsed.admissions) ? parsed.admissions : []).filter((a) => a && typeof a.kind === "string" && a.kind.trim() !== "" && typeof a.assertion === "string").map((a) => ({ kind: a.kind, assertion: a.assertion, author: typeof a.author === "string" ? a.author : "unknown", evidenceRef: a.evidenceRef ?? null })),
       flips: (Array.isArray(parsed.flips) ? parsed.flips : []).filter((f) => f && typeof f.id === "string" && typeof f.to === "string").map((f) => ({ id: f.id, to: f.to, reason: typeof f.reason === "string" ? f.reason : "" })),
       directives: sanitizeDirectives(parsed.directives, seatIds),
       floor: sanitizeFloor(parsed.floor, spec),
       scopeWarnings: (Array.isArray(parsed.scopeWarnings) ? parsed.scopeWarnings : []).filter((w) => typeof w === "string")
     };
   } catch (err) {
-    councilDiag(`[referee] JSON parse failed: ${String(err)} \u2014 treating pass as no-op with full floor`);
-    return empty;
+    const excerpt = text.replace(/\s+/g, " ").trim().slice(0, 240);
+    throw new RefereeOutputError(`referee JSON parse failed (${err instanceof Error ? err.message : String(err)}) on "${excerpt}"`);
   }
 }
+var RefereeOutputError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RefereeOutputError";
+  }
+};
 function sanitizeDirectives(raw, seatIds) {
   const out = {};
   if (raw !== null && typeof raw === "object") {
@@ -20949,7 +21004,10 @@ function applyRefereeOutput(output2, ledger, input2, spec, roundTranscript) {
   }
   for (const adm of output2.admissions) {
     const kindSpec = input2.spec.ledgerKinds.find((k) => k.kind === adm.kind);
-    if (kindSpec === void 0) continue;
+    if (kindSpec === void 0) {
+      audit.rejected.push(`${adm.kind} admission by ${adm.author} rejected: unknown ledger kind for this council (allowed: ${input2.spec.ledgerKinds.map((k) => k.kind).join(", ")})`);
+      continue;
+    }
     const res = ledger.admit({
       kind: adm.kind,
       assertion: adm.assertion,
@@ -21018,6 +21076,15 @@ ${e.factSheet}`).join("\n\n");
 
 // src/core/engine.ts
 var MAX_SEAT_OUTPUT_CHARS = 6e3;
+var MAX_REFEREE_NOTES = 12;
+var MAX_REFEREE_NOTE_CHARS = 320;
+var MAX_REFEREE_RECORD_CHARS = 2400;
+var CouncilHandoffError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CouncilHandoffError";
+  }
+};
 async function runCouncil(ctx, parent, opts) {
   const { spec, query, params, signal } = opts;
   const maxRounds = opts.maxRoundsOverride !== void 0 ? Math.min(12, Math.max(1, opts.maxRoundsOverride)) : params.defaultMaxRounds;
@@ -21034,6 +21101,13 @@ async function runCouncil(ctx, parent, opts) {
   let directives = {};
   let floor = { active: spec.seats.map((s) => s.id), standby: [] };
   let briefStall = "";
+  const refereeNotes = [];
+  const noteReferee = (note) => {
+    const clipped = note.replace(/\s+/g, " ").trim().slice(0, MAX_REFEREE_NOTE_CHARS);
+    if (clipped.length === 0) return;
+    refereeNotes.push(clipped);
+    if (refereeNotes.length > MAX_REFEREE_NOTES) refereeNotes.shift();
+  };
   const emitRound = (epoch, extra) => {
     try {
       opts.onRound?.({ epoch, audit: extra });
@@ -21088,7 +21162,7 @@ ${spec.scopeContract}` : "",
       spec.opening === "blind" ? "BLIND FORMULATION: You are formulating INDEPENDENTLY \u2014 you cannot see the other seats. State your position in your own voice." : "",
       spec.forestMode ? "Propose ideas as SPROUT: <title> | <rationale> lines (one per idea)." : spec.ledgerKinds.some((k) => k.kind === "crux") ? "Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line." : "",
       "If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary \u2014 conclude your arguments conditionally.",
-      "IMPORTANT: the run_code tool is NON-FUNCTIONAL in this council \u2014 calling it only wastes your turn. Never invoke it; argue directly or request facts with NEED_EVIDENCE.",
+      "IMPORTANT: this council provides NO shell and NO file tools (run_code is non-functional; bash/read/grep/glob are denied). Never attempt commands or file reads \u2014 argue directly, or request facts with NEED_EVIDENCE.",
       "PROTOCOL LINE FORMATS (the council parses these mechanically \u2014 always exactly these, one line each, no markdown, no headings around them):",
       "  NEED_EVIDENCE(target: <area>, question: <what to verify>)",
       "  PROPOSE_CRUX: <assertion>",
@@ -21142,6 +21216,7 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
           const msg = err instanceof Error ? err.message : String(err);
           councilDiag(`ingest referee unavailable: ${msg} \u2014 no-op ingest`);
           audit.push(`ingest: referee unavailable (${msg}) \u2014 proceeding without admission`);
+          noteReferee(`ingest: referee unavailable (${msg})`);
           ingest = {
             output: { admissions: [], flips: [], directives: {}, floor: { active: spec.seats.map((s) => s.id), standby: [] }, scopeWarnings: [] },
             applied: { admissions: [], flips: [], rejected: [`ingest unavailable: ${msg}`] }
@@ -21150,6 +21225,9 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
       }
       directives = ingest.output.directives;
       floor = ingest.output.floor;
+      if (ingest.applied.rejected.length > 0) {
+        noteReferee(`ingest rejected ${ingest.applied.rejected.length} ruling(s): ${ingest.applied.rejected.slice(0, 4).join("; ")}`);
+      }
       trackFlipRun(runtime, ledger.flipsInEpoch(1) + ingest.applied.admissions.length, false);
       emitRound(1, { flips: ledger.flipsInEpoch(1), admissions: ingest.applied.admissions.length, applied: ingest.applied, phase: "ingest" });
       audit.push(`ingest: ${ingest.applied.admissions.length} admission(s)`);
@@ -21193,7 +21271,7 @@ ${vault.render(seatVault)}` : "",
             directives[seat.id] ? `REFEREE DIRECTIVE TO YOU:
 ${directives[seat.id]}` : "",
             isChallenge ? "The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw \u2014 with evidence \u2014 or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else." : buildEpochInstructions(spec),
-            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. The run_code tool is non-functional here \u2014 never call it.",
+            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. This council has no shell and no file tools (run_code, bash, read/grep/glob are all denied here) \u2014 never attempt them.",
             "PROTOCOL LINE FORMATS (mechanically parsed \u2014 one line each, exactly): NEED_EVIDENCE(target: <area>, question: <what>) and PROPOSE_CRUX: <assertion>. Never reformat or decorate them \u2014 variants are dropped."
           ].filter(Boolean).join("\n\n");
         },
@@ -21248,6 +21326,12 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
           const msg = err instanceof Error ? err.message : String(err);
           councilDiag(`[epoch ${epoch}] referee unavailable: ${msg}`);
           audit.push(`epoch ${epoch}: referee unavailable (${msg}) \u2014 epoch treated as non-material`);
+          noteReferee(`epoch ${epoch}: referee pass failed twice (${msg})`);
+          if (err instanceof RefereeOutputError) {
+            stopReason = `referee handoff failed at epoch ${epoch}: ${msg}`;
+            emitRound(epoch, { phase: "referee-handoff-failed", error: msg, flips: 0, admissions: 0, offline: [...deadSeats] });
+            break;
+          }
           directives = {};
           floor = { active: spec.seats.map((s) => s.id).filter((id) => !deadSeats.has(id)), standby: [] };
           trackFlipRun(runtime, 0, isChallenge);
@@ -21270,6 +21354,12 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
       }
       directives = referee.output.directives;
       floor = referee.output.floor;
+      if (referee.applied.rejected.length > 0) {
+        noteReferee(`epoch ${epoch} rejected ${referee.applied.rejected.length} ruling(s): ${referee.applied.rejected.slice(0, 4).join("; ")}`);
+      }
+      if (referee.output.scopeWarnings.length > 0) {
+        noteReferee(`epoch ${epoch} scope warnings: ${referee.output.scopeWarnings.slice(0, 3).join("; ")}`);
+      }
       const flips = ledger.flipsInEpoch(epoch);
       const admissions = referee.applied.admissions.length;
       const material = flips + admissions;
@@ -21306,6 +21396,27 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
         audit.push(`epoch ${epoch}: stagnation \u2192 final challenge at epoch ${epoch + 1}`);
       }
     }
+    if (signal.aborted) throw new Error("council deliberation aborted");
+    if (ledger.state().entries.length === 0 && vault.all().length === 0) {
+      const record2 = refereeNotes.length > 0 ? ` Referee record: ${refereeNotes.slice(-4).join(" | ")}` : "";
+      throw new CouncilHandoffError(
+        `council produced no material for synthesis: the dispute ledger is empty and no evidence was collected (stop: ${stopReason}).${record2}`
+      );
+    }
+    const chairBudgetMs = params.debaterTimeoutMs;
+    try {
+      parent.session.append("council/round", {
+        epoch,
+        council: spec.id,
+        phase: "synthesis",
+        budgetMs: chairBudgetMs,
+        refereeNotes: refereeNotes.length
+      });
+    } catch (err) {
+      councilDiag(`synthesis append failed: ${String(err)}`);
+    }
+    audit.push(`synthesis: chair budget ${Math.round(chairBudgetMs / 1e3)}s, ${refereeNotes.length} referee note(s)`);
+    const refereeRecord = refereeNotes.join("\n").slice(0, MAX_REFEREE_RECORD_CHARS);
     let deliverable;
     try {
       deliverable = await runChair(ctx, parent, spec, {
@@ -21313,29 +21424,32 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
         ledger,
         vault,
         transcriptNote: briefStall,
+        refereeRecord,
         signal,
-        timeoutMs: params.debaterTimeoutMs,
+        timeoutMs: chairBudgetMs,
         chairTemplate: opts.chairTemplate
       });
     } catch (firstErr) {
       if (signal.aborted) throw firstErr;
       const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
       councilDiag(`chair pass failed (${firstMsg}) \u2014 retrying once`);
+      audit.push(`chair attempt 1 failed (${firstMsg})`);
       try {
         deliverable = await runChair(ctx, parent, spec, {
           query,
           ledger,
           vault,
           transcriptNote: briefStall,
+          refereeRecord,
           signal,
-          timeoutMs: params.debaterTimeoutMs,
+          timeoutMs: chairBudgetMs,
           chairTemplate: opts.chairTemplate
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         councilDiag(`chair unavailable: ${msg} \u2014 mechanical fallback`);
         audit.push(`chair unavailable (${msg}) \u2014 mechanical compilation`);
-        deliverable = { text: mechanicalDeliverable(spec, ledger, vault, query, stopReason), tokens: 0 };
+        deliverable = { text: mechanicalDeliverable(spec, ledger, vault, query, stopReason, msg), tokens: 0 };
       }
     }
     totalTokens += deliverable.tokens;
@@ -21521,19 +21635,23 @@ async function runChair(ctx, parent, spec, input2) {
 ${ledgerText}`,
     `EVIDENCE VAULT:
 ${evidenceText}`,
+    input2.refereeRecord ? `REFEREE RECORD (rejections/failures the ledger cannot show \u2014 report them, do not invent around them):
+${input2.refereeRecord}` : "",
     input2.transcriptNote ? `NOTE: some evidence requests failed (${input2.transcriptNote}) \u2014 reflect uncertainty where it matters.` : "",
     `Compile the final ${spec.label} deliverable with EXACTLY these sections: ${sections}.`,
     "Zero data loss: every ledger entry and its disposition must be reflected. Falsified paths appear with their refutations. Dissents are preserved verbatim in spirit.",
+    "Every required section must carry real content from the ledger, the vault, or the referee record. If a section has nothing to report, say exactly why \u2014 never pad with an empty template.",
     "Output the deliverable document only \u2014 no meta commentary."
   ].filter(Boolean).join("\n\n");
-  const persona = input2.chairTemplate?.systemPrompt ?? `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools.`;
+  const persona = input2.chairTemplate?.systemPrompt ?? `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools: you have no shell and no file access, and searching the filesystem for missing data is forbidden \u2014 report what the ledger and vault contain.`;
   const prompt = input2.chairTemplate === void 0 ? defaultPrompt : fillChairTemplate(input2.chairTemplate.userPromptTemplate, {
     label: spec.label,
     query: input2.query,
     ledger: ledgerText,
     evidence: evidenceText,
     sections,
-    note: input2.transcriptNote
+    note: input2.transcriptNote,
+    referee: input2.refereeRecord ?? ""
   });
   const denyTools = seatDenyList(ctx);
   let fiber;
@@ -21546,6 +21664,11 @@ ${evidenceText}`,
       denyTools
     }, input2.signal);
     const chairTurn = await waitForSeatTurnDetailed(ctx, fiber.childId, input2.signal, input2.timeoutMs);
+    const validation = validateChairDeliverable(chairTurn.text, spec.deliverableSections);
+    if (!validation.ok) {
+      const excerpt = chairTurn.text.replace(/\s+/g, " ").trim().slice(0, 160);
+      throw new ChairOutputError(validation.missing, excerpt);
+    }
     return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) };
   } finally {
     if (fiber !== void 0) {
@@ -21559,7 +21682,7 @@ ${evidenceText}`,
 function fillChairTemplate(template, vars) {
   return template.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (match, name2) => vars[name2] ?? match);
 }
-function mechanicalDeliverable(spec, ledger, vault, query, stopReason) {
+function mechanicalDeliverable(spec, ledger, vault, query, stopReason, failure2) {
   const s = ledger.state();
   const sections = spec.deliverableSections;
   const lines = [
@@ -21567,6 +21690,7 @@ function mechanicalDeliverable(spec, ledger, vault, query, stopReason) {
     "",
     `Query: ${query}`,
     `Stop: ${stopReason}`,
+    ...failure2 !== void 0 && failure2.trim() !== "" ? [`Compilation note: chair failure reported \u2014 ${failure2.replace(/\s+/g, " ").trim()}`] : [],
     "",
     "## Ledger Dispositions",
     ...s.entries.map((e) => `- **${e.id}** (${e.kind}, ${e.status}) \u2014 ${e.assertion}${e.evidenceRef ? ` [evidence: ${e.evidenceRef}]` : ""}`),

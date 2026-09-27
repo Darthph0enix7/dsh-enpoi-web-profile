@@ -172,13 +172,28 @@
   --dsw-alias-state-error-secondary: #f58a95;
   --dsw-alias-state-success-primary: #CBE77D;
   --dsw-alias-state-success-secondary: #d6ee9a;
-  --dsw-alias-state-success-tertiary: #5a6f2e;
+  /* Upstream pairs a bright success ink with a near-black green ground; this
+     skin's lighter ground left the trajectory success/context chips at
+     3.8-4.1:1. Darkened until the worst pair (the 68% success/label mix used
+     by .tagContext/.contextGreen) clears 4.5:1 with margin. */
+  --dsw-alias-state-success-tertiary: #4a5c26;
   --dsw-alias-state-warn-label: #F3B75F;
   --dsw-alias-state-warn-primary: #F3B75F;
   --dsw-alias-state-warn-secondary: #f7cb8b;
-  --dsw-alias-state-warn-tertiary: #7a5220;
+  /* Same story as the success ground: warn-label on #7a5220 measured 3.85:1
+     on the trajectory tool chips and the pool cooling pill. */
+  --dsw-alias-state-warn-tertiary: #674317;
   --dsw-alias-toast-bg: rgba(20, 26, 42, 0.92);
+  /* Upstream paints the toast dark in BOTH base themes and inks it with
+     --dsw-static-neutral-bluish-00, which upstream defines as white. This
+     skin inverts the static ramps (00 is the darkest navy), so the inherited
+     label resolved to #071321 — dark ink on the dark toast (1.1:1, the
+     unreadable archive/revert banners). Pin the label to the theme's ink. */
+  --dsw-alias-toast-label: #F8F3F5;
   --dsw-alias-tooltip-bg: rgba(20, 26, 42, 0.92);
+  /* The menu ground's upstream light value is near-white while this skin is
+     dark-only; both base modes use the night glass like the other floats. */
+  --dsw-menu-surface-fill: var(--dsw-alias-bg-overlay);
   --dsw-specific-bubble-highlight: #1f3a56;
   --dsw-specific-bubble: #1d334f;
   --dsw-specific-input-major: rgba(13, 22, 39, 0.5);

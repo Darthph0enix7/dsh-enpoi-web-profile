@@ -10,11 +10,14 @@
  *   ctx.get('catalogRules').expandSelector(selector) // group selector → links
  *   ctx.get('catalogRules').previewRulesChange(raw)  // before/after edit diff
  *
- * Rules are evaluated fresh on every settings update; the engine writes only
+ * Rules are evaluated fresh on every settings update; the engine publishes only
  * its derived `catalogRules.resolved` decision map (never the rules document)
- * and never deletes catalogue entries (hide ≠ delete). All warnings go to
- * stderr — this harness's logger drops info/warn, so stderr is the observable
- * channel.
+ * and never deletes catalogue entries (hide ≠ delete). On a host that serves
+ * the settings artifact channel the map is published there instead of into the
+ * configuration document, so publishing it costs no document revision, profile
+ * write, Loader reload, or whole-document fan-out; a pre-artifact host keeps
+ * the legacy document write. All warnings go to stderr — this harness's logger
+ * drops info/warn, so stderr is the observable channel.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -48,6 +51,15 @@ interface SettingsPublisher {
   /** Descriptor set carrying each namespace's current revision. */
   describe?: () => ReadonlyArray<{ ns: string; revision?: number }>
 }
+
+/** The derived-artifact seam the resolved map moves to when the host serves it (0.1.8+). */
+interface SettingsArtifacts {
+  /** Publish a derived value beside the configuration document; revision moves only when it changes. */
+  publishArtifact?: (key: string, value: unknown) => number
+}
+
+/** Artifact name the picker reads `catalogRules.resolved` under. */
+const RESOLVED_ARTIFACT = 'catalogRules.resolved'
 
 /** The service contract consumers call through `ctx.get('catalogRules')`. */
 export interface CatalogRulesService {
@@ -176,22 +188,33 @@ export function apply(ctx: Context): void {
     }
   }
   /**
-   * Publish the compact resolved map the picker reads under
-   * `catalogRules.resolved`. Reads stay the only input to the engine; this is
-   * the one derived write, skipped when the document already carries the same
-   * map (a write's own settings update refreshes the engine but republishes
-   * nothing, so the loop terminates).
+   * Publish the compact resolved map the picker reads. The map is derived, so
+   * on a host that serves the settings artifact channel it is published there
+   * (`settings.publishArtifact`) and never enters the configuration document;
+   * that removes the 100 KB-class document write and the whole-document
+   * re-read it forced on every client. A host without the channel keeps the
+   * legacy document write under `catalogRules.resolved`. Both paths skip when
+   * the map has not moved, and reads stay the only input to the engine.
    */
   let lastPublished: string | undefined
-  const publishResolved = async (): Promise<void> => {
-    const writer = ctx.get('settings') as SettingsPublisher | undefined
+  const publishResolved = (): void => {
+    const next = buildResolvedVisibility(engine.visibility().decisions)
+    const serialized = JSON.stringify(next)
+    if (serialized === lastPublished) return
+    const writer = ctx.get('settings') as (SettingsPublisher & SettingsArtifacts) | undefined
+    if (writer?.publishArtifact !== undefined) {
+      lastPublished = serialized
+      writer.publishArtifact(RESOLVED_ARTIFACT, next)
+      return
+    }
+    void publishResolvedDocument(writer, next, serialized)
+  }
+  /** Legacy document publisher for hosts without the artifact channel. */
+  const publishResolvedDocument = async (writer: SettingsPublisher | undefined, next: unknown, serialized: string): Promise<void> => {
     if (writer?.mutate === undefined) return
     const document = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const rules = document?.catalogRules
     const current = isRecord(rules) ? rules.resolved : undefined
-    const next = buildResolvedVisibility(engine.visibility().decisions)
-    const serialized = JSON.stringify(next)
-    if (serialized === lastPublished) return
     if (JSON.stringify(current ?? null) === serialized) {
       lastPublished = serialized
       return
@@ -214,14 +237,38 @@ export function apply(ctx: Context): void {
       }
     }
   }
+  /**
+   * Remove the persisted map the pre-artifact publisher wrote into
+   * `enpoi-orchestration`. It is derived data now riding the artifact channel;
+   * leaving it in user config would keep every describe (and every client read)
+   * carrying its bytes. Runs at mount and again on every settings event, so a
+   * refused removal (a nested HMR transaction, a revision conflict) retries
+   * until it lands; the check is a document read once the map is gone.
+   */
+  let removalWarned = false
+  const removeDocumentMap = (): void => {
+    const writer = ctx.get('settings') as (SettingsPublisher & SettingsArtifacts) | undefined
+    if (writer?.publishArtifact === undefined || writer.mutate === undefined) return
+    const document = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const rules = document?.catalogRules
+    if (!isRecord(rules) || rules.resolved === undefined) return
+    const revision = writer.describe?.().find(entry => entry.ns === ORCH_NS)?.revision
+    void writer.mutate(ORCH_NS, [{ op: 'unset', path: ['catalogRules', 'resolved'] }], revision).catch((error: unknown) => {
+      if (removalWarned) return
+      removalWarned = true
+      process.stderr.write(`[enpoi-catalog-rules] resolved map removal failed: ${error instanceof Error ? error.message : String(error)}\n`)
+    })
+  }
   ctx.provide('catalogRules', engine)
   emitWarnings()
-  void publishResolved()
+  removeDocumentMap()
+  publishResolved()
   const onNamespaceChange = ((ns: unknown) => {
     if (String(ns) !== ORCH_NS && String(ns) !== 'llm-pi-ai') return
     engine.refresh()
     emitWarnings()
-    void publishResolved()
+    removeDocumentMap()
+    publishResolved()
   }) as (...args: unknown[]) => unknown
   ctx.on('settings/document-updated', onNamespaceChange)
   ctx.on('settings/updated', onNamespaceChange)

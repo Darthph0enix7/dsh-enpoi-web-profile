@@ -45,6 +45,12 @@ export interface CatalogEntry {
   cost?: CatalogCost
   /** Client-side gating (unavailable from this client, e.g. a plan wall). */
   gated?: boolean
+  /**
+   * Why the entry is gated, when the catalogue knows (e.g. `sign-in required`
+   * from the provider sync's `isFree: false` verdict). The picker renders it;
+   * a gate with no known reason falls back to `gated`.
+   */
+  gateReason?: string
 }
 
 /** Effective training policy for one provider/model. */
@@ -589,7 +595,10 @@ export function decideVisibility(entry: CatalogEntry, rules: ParsedRules, privac
     return { provider: entry.provider, model: entry.id, state: 'visible', source: 'manual', reason: 'pinned visible' }
   }
   if (gated) {
-    return { provider: entry.provider, model: entry.id, state: 'hidden', source: 'gated', reason: 'gated' }
+    return {
+      provider: entry.provider, model: entry.id, state: 'hidden', source: 'gated',
+      reason: entry.gateReason ?? 'gated',
+    }
   }
   if (hit !== undefined) {
     return { provider: entry.provider, model: entry.id, state: 'hidden', source: 'rule', reason: `hidden by rule: ${ruleText(hit)}`, rule: ruleText(hit) }

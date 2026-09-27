@@ -16,7 +16,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   COUNCIL_DENIED_TOOLS,
   DEBATER_DENIED_TOOLS,
-  councilDiag,
   disposeSeatFibers,
   startSeatFiber,
   waitForSeatTurn,
@@ -80,13 +79,14 @@ const REFEREE_SYSTEM_BASE = [
   'You are the Referee of a high-stakes multi-agent council. You are not a debater.',
   'You manage the dispute ledger procedurally: you ADMIT proposed entries, you TOGGLE entry statuses, you issue numbered directives, you allocate the floor.',
   'You NEVER write assertions, arguments, or synthesis prose. You never introduce claims of your own.',
-  'Do not call any tools or attempt code execution. You have no external tools.',
+  'Do not call any tools and never attempt shell commands, code execution, or file reads — you have no tools and no shell. Your ONLY output channel is your reply text.',
   'Rules you must enforce:',
   '- A state flip away from `contested` requires the argument to have survived scrutiny; deny flips that rest on unverified assertions (STATUS_CHANGE_DENIED: <reason>).',
   '- An attack on another seat\'s crux without a `STEELMAN [<seat>]:` block is denied (STATUS_CHANGE_DENIED: missing mandatory steelman).',
   '- Out-of-scope argumentation gets a scope warning and no ledger effect.',
-  'Output STRICTLY one JSON object, no prose around it:',
-  '{"admissions":[{"kind":"idea","assertion":"...","author":"<seat>","evidenceRef":null}],',
+  '- Admission kinds must be EXACTLY the ledger kinds this council declares in the prompt (the CURRENT LEDGER line and the council name define them). Never invent kinds; an unknown kind is rejected and the entry is lost.',
+  'Output STRICTLY one JSON object as your reply text, no prose around it, never inside a tool call:',
+  '{"admissions":[{"kind":"<declared ledger kind>","assertion":"...","author":"<seat>","evidenceRef":null}],',
   ' "flips":[{"id":"I-1","to":"contested","reason":"..."}],',
   ' "directives":{"<seat>":"1. ..."},',
   ' "floor":{"active":["<seat>"],"standby":["<seat>"]},',
@@ -120,6 +120,7 @@ export async function runRefereePass(
   const prompt = [
     `EPOCH: ${input.epoch}`,
     `COUNCIL: ${input.spec.label}`,
+    `LEDGER KINDS (admission "kind" must be exactly one of these): ${input.spec.ledgerKinds.map(k => k.kind).join(', ')}`,
     input.spec.scopeContract ? `SCOPE CONTRACT:\n${input.spec.scopeContract}` : '',
     `CURRENT LEDGER:\n${input.ledgerText}`,
     input.vaultDeltaText ? `NEW EVIDENCE THIS EPOCH:\n${input.vaultDeltaText}` : '',
@@ -133,7 +134,7 @@ export async function runRefereePass(
       ? `OFFLINE SEATS (their routes failed — they produce nothing; exclude them from floor.active and issue them no directives): ${input.offlineSeats.join(', ')}`
       : '',
     `SEAT OUTPUTS THIS EPOCH:\n${input.roundTranscript}`,
-    'Produce the referee JSON now. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch.',
+    'Produce the referee JSON now as your reply text — never through a tool call. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch.',
   ].filter(Boolean).join('\n\n')
 
   let fiber: { childId: string } | undefined
@@ -156,22 +157,39 @@ export async function runRefereePass(
   }
 }
 
-/** Parse the referee's JSON tolerantly (find the outermost object). */
+/** Parse the referee's JSON tolerantly (find the outermost object).
+ *
+ * A pass with NO JSON object at all is a HARD handoff failure: the referee's
+ * structured output is the only input to ledger mutations, so silently
+ * treating it as a no-op drops the epoch's adjudication on the floor and
+ * sends the chair a stale ledger. The caller retries once and then reports
+ * the failure with this reason (2026-09-27: an epoch-2 referee emitted its
+ * JSON inside a bash heredoc, the fiber capture read only assistant text,
+ * and the run proceeded to a chair that compiled an empty ledger).
+ * @param text - the referee turn's extracted assistant text.
+ * @param spec - the council spec (seat ids, ledger kinds).
+ * @returns the sanitized referee output.
+ * @throws {RefereeOutputError} when the turn contains no JSON object.
+ */
 export function parseRefereeOutput(text: string, spec: CouncilSpec): RefereeOutput {
-  const empty: RefereeOutput = { admissions: [], flips: [], directives: {}, floor: { active: spec.seats.map(s => s.id), standby: [] }, scopeWarnings: [] }
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start === -1 || end <= start) {
-    councilDiag('[referee] no JSON found — treating pass as no-op with full floor')
-    return empty
+    const excerpt = text.replace(/\s+/g, ' ').trim().slice(0, 240)
+    throw new RefereeOutputError(
+      `referee pass returned no JSON object (got ${text.trim().length} chars${excerpt ? `: "${excerpt}"` : ''})`,
+    )
   }
   try {
     const parsed = JSON.parse(text.slice(start, end + 1)) as Partial<RefereeOutput>
     const seatIds = new Set(spec.seats.map(s => s.id))
-    const kinds = new Set(spec.ledgerKinds.map(k => k.kind))
     return {
+      // Unknown kinds are KEPT here so applyRefereeOutput can report each
+      // rejection; filtering them silently was the 2026-09-27 data-loss bug
+      // (a referee admitted 5 entries as "fact"/"idea"/"observation" and the
+      // roundtable ledger dropped every one without a trace).
       admissions: (Array.isArray(parsed.admissions) ? parsed.admissions : [])
-        .filter(a => a && typeof a.assertion === 'string' && kinds.has(a.kind))
+        .filter(a => a && typeof a.kind === 'string' && a.kind.trim() !== '' && typeof a.assertion === 'string')
         .map(a => ({ kind: a.kind, assertion: a.assertion, author: typeof a.author === 'string' ? a.author : 'unknown', evidenceRef: a.evidenceRef ?? null })),
       flips: (Array.isArray(parsed.flips) ? parsed.flips : [])
         .filter(f => f && typeof f.id === 'string' && typeof f.to === 'string')
@@ -181,8 +199,16 @@ export function parseRefereeOutput(text: string, spec: CouncilSpec): RefereeOutp
       scopeWarnings: (Array.isArray(parsed.scopeWarnings) ? parsed.scopeWarnings : []).filter(w => typeof w === 'string'),
     }
   } catch (err) {
-    councilDiag(`[referee] JSON parse failed: ${String(err)} — treating pass as no-op with full floor`)
-    return empty
+    const excerpt = text.replace(/\s+/g, ' ').trim().slice(0, 240)
+    throw new RefereeOutputError(`referee JSON parse failed (${err instanceof Error ? err.message : String(err)}) on "${excerpt}"`)
+  }
+}
+
+/** A referee pass whose structured output could not be captured or parsed. */
+export class RefereeOutputError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RefereeOutputError'
   }
 }
 
@@ -262,7 +288,13 @@ export function applyRefereeOutput(
 
   for (const adm of output.admissions) {
     const kindSpec = input.spec.ledgerKinds.find(k => k.kind === adm.kind)
-    if (kindSpec === undefined) continue
+    if (kindSpec === undefined) {
+      // Reported, never silent: an admission in a kind this council's ledger
+      // does not define is a referee protocol error, and the chair prompt
+      // carries the rejection through the REFEREE RECORD.
+      audit.rejected.push(`${adm.kind} admission by ${adm.author} rejected: unknown ledger kind for this council (allowed: ${input.spec.ledgerKinds.map(k => k.kind).join(', ')})`)
+      continue
+    }
     const res = ledger.admit({
       kind: adm.kind,
       assertion: adm.assertion,       // verbatim — procedural admission

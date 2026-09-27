@@ -3,9 +3,13 @@
 Dynamic rule/filter engine for the synced model catalogue (doc 82 §E5). Rules
 are **data** in `enpoi-orchestration.catalogRules`; the engine reads them plus
 the hourly-synced `llm-pi-ai` catalogue and provides the `catalogRules` service.
-It writes only the derived `catalogRules.resolved` decision map the picker
+It publishes only the derived `catalogRules.resolved` decision map the picker
 reads (never the rules document) and never deletes catalogue entries —
-hide ≠ delete.
+hide ≠ delete. The map rides the settings **artifact channel** on a host that
+serves it, so publishing it costs no document revision, profile write, Loader
+reload, or whole-document fan-out; on mount the engine also removes the
+persisted pre-artifact copy from `enpoi-orchestration` so describes stop
+carrying it. A pre-artifact host keeps the legacy document write.
 
 ## Document
 

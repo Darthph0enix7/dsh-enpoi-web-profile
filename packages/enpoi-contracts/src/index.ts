@@ -245,7 +245,7 @@ export const ORCHESTRATION_NAMESPACE = 'enpoi-orchestration'
 export interface SettingsDocumentReader {
   /** Pre-0.1.7 seam: one registered namespace's resolved value. */
   get?: (ns: string) => unknown
-  /** 0.1.7+ optional narrow seam: one namespace without projecting the full descriptor set. */
+  /** 0.1.7+ optional narrow seam: one namespace's descriptor instead of the full set. */
   describeNamespace?: (ns: string) => { ns: string; value?: unknown } | undefined
   /** 0.1.7+ seam: one descriptor per configurable entry, carrying the resolved projected value. */
   describe?: () => ReadonlyArray<{ ns: string; value?: unknown }>

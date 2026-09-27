@@ -236,3 +236,55 @@ a {
 [data-presented-files-row] [data-presented-file]:hover {
   background: var(--dsw-alias-bg-layer-2);
 }
+
+/* ── enpoi: state-pill legibility (frozen 2026-09-27) ──────────────────────
+   Upstream's dark theme maps --dsw-alias-state-error-primary AND -secondary
+   onto red-400, so the pool error pill rendered error-primary ink on an
+   error-secondary ground — 1.21:1 in this skin (red on red). Repaint it in
+   the same shape as the other state pills: the error ink over a dimmed error
+   ground (>= 5:1 over the night glass). The matching trajectory chips are
+   fixed at the token level in skin.css (their success/warn tertiary grounds
+   were lightened too far); dsh-token-contrast.mjs gates both. */
+[class*="poolPillError"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* ── enpoi: badge legibility (frozen 2026-09-27) ──────────────────────────
+   Four module-level pairings the token map cannot reach:
+   - agent-preset .brokenBadge: error-primary fill with --dsw-alias-bg-layer-3
+     as ink; the skin's layer tokens are translucent dark, 2.24:1.
+   - ui-primitives solid tag: label-primary fill, same dark layer as ink (the
+     layer token is an upstream light-mode inversion this dark skin cannot
+     share), 2.85:1.
+   - composer .badge: sidebar-accent fill with button-info-fill ink, 3.10:1.
+   - RevertTray .badgeError: upstream raw reds on the dark glass, 4.11:1.
+   The two error pills take the poolPillError shape (dim error ground + error
+   ink); the solid tag and the accent badge keep their fills and take the
+   skin's dark ink tokens. dsh-token-contrast.mjs gates all four. */
+[class*="brokenBadge"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+[data-tone='solid'] {
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
+[class*="optionLine"] > [class*="badge"] {
+  color: var(--dsw-alias-brand-primary-invert);
+}
+
+[class*="badgeError"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Menu material: this skin deliberately does NOT define
+   --dsw-menu-backdrop-filter. ui-theme owns it (gradient-shadow-text.css,
+   injected at runtime — the live body computes blur(40px) saturate(150%)),
+   and this file's [role="menu"]/[role="listbox"]/[role="dialog"] rule layers
+   the skin's 30px/145% glass on top. dsh-token-contrast.mjs asserts the
+   upstream definition stays present, because MenuSurface.module.css consumes
+   it and menus lose their blur if it ever vanishes. */
+

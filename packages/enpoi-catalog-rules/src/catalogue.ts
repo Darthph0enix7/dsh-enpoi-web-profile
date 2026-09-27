@@ -42,6 +42,12 @@ function parseModel(provider: string, raw: unknown): CatalogEntry | undefined {
         ...(optionalNumber(raw.cost.output) !== undefined ? { output: optionalNumber(raw.cost.output)! } : {}),
       }
     : undefined
+  // The provider sync stamps `gated`/`gateReason` on a model its listing marked
+  // sign-in/paid-only (`isFree: false`). The gate flag feeds the rules engine's
+  // `gated` predicate and decision; the reason is the picker's dim string.
+  const gateReason = raw.gated === true && typeof raw.gateReason === 'string' && raw.gateReason.trim() !== ''
+    ? raw.gateReason.trim()
+    : undefined
   return {
     provider,
     id,
@@ -52,6 +58,8 @@ function parseModel(provider: string, raw: unknown): CatalogEntry | undefined {
     ...(reasoning !== undefined ? { reasoning } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...(cost !== undefined && Object.keys(cost).length > 0 ? { cost } : {}),
+    ...(raw.gated === true ? { gated: true } : {}),
+    ...(gateReason === undefined ? {} : { gateReason }),
   }
 }
 

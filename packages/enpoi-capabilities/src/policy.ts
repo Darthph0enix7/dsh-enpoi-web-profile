@@ -619,7 +619,7 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
       }
       return {
         kind: 'ask',
-        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code — approve explicitly`,
+        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code — approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead`,
         source: 'scan:opaque-executor',
         grantTier: 'pattern',
         pattern: command,
@@ -634,7 +634,7 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
       }
       return {
         kind: 'ask',
-        reason: 'command embeds a shell expansion or wrapper containing a destructive verb — approve explicitly',
+        reason: 'command embeds a shell expansion or wrapper containing a destructive verb — approve explicitly; to read file contents use the read tool (or grep/glob to search) instead',
         source: 'scan:hidden-danger',
         grantTier: 'pattern',
         pattern: command,

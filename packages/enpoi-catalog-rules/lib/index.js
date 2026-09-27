@@ -324,7 +324,13 @@ function decideVisibility(entry, rules, privacy) {
     return { provider: entry.provider, model: entry.id, state: "visible", source: "manual", reason: "pinned visible" };
   }
   if (gated) {
-    return { provider: entry.provider, model: entry.id, state: "hidden", source: "gated", reason: "gated" };
+    return {
+      provider: entry.provider,
+      model: entry.id,
+      state: "hidden",
+      source: "gated",
+      reason: entry.gateReason ?? "gated"
+    };
   }
   if (hit !== void 0) {
     return { provider: entry.provider, model: entry.id, state: "hidden", source: "rule", reason: `hidden by rule: ${ruleText(hit)}`, rule: ruleText(hit) };
@@ -496,6 +502,7 @@ function parseModel(provider, raw) {
     ...optionalNumber(raw.cost.input) !== void 0 ? { input: optionalNumber(raw.cost.input) } : {},
     ...optionalNumber(raw.cost.output) !== void 0 ? { output: optionalNumber(raw.cost.output) } : {}
   } : void 0;
+  const gateReason = raw.gated === true && typeof raw.gateReason === "string" && raw.gateReason.trim() !== "" ? raw.gateReason.trim() : void 0;
   return {
     provider,
     id,
@@ -505,7 +512,9 @@ function parseModel(provider, raw) {
     ...input !== void 0 ? { input } : {},
     ...reasoning !== void 0 ? { reasoning } : {},
     ...tools !== void 0 ? { tools } : {},
-    ...cost !== void 0 && Object.keys(cost).length > 0 ? { cost } : {}
+    ...cost !== void 0 && Object.keys(cost).length > 0 ? { cost } : {},
+    ...raw.gated === true ? { gated: true } : {},
+    ...gateReason === void 0 ? {} : { gateReason }
   };
 }
 function readCatalogue(settings) {
@@ -533,6 +542,7 @@ function readCatalogue(settings) {
 var name = "enpoi-catalog-rules";
 var inject = ["settings"];
 var ORCH_NS = "enpoi-orchestration";
+var RESOLVED_ARTIFACT = "catalogRules.resolved";
 var CatalogRulesEngine = class {
   /**
    * @param readRules - reads the raw `catalogRules` value (ctx-bound in production).
@@ -621,15 +631,23 @@ function apply(ctx) {
     }
   };
   let lastPublished;
-  const publishResolved = async () => {
+  const publishResolved = () => {
+    const next = buildResolvedVisibility(engine.visibility().decisions);
+    const serialized = JSON.stringify(next);
+    if (serialized === lastPublished) return;
     const writer = ctx.get("settings");
+    if (writer?.publishArtifact !== void 0) {
+      lastPublished = serialized;
+      writer.publishArtifact(RESOLVED_ARTIFACT, next);
+      return;
+    }
+    void publishResolvedDocument(writer, next, serialized);
+  };
+  const publishResolvedDocument = async (writer, next, serialized) => {
     if (writer?.mutate === void 0) return;
     const document = readOrchestrationDocument(ctx.get("settings"));
     const rules = document?.catalogRules;
     const current = isRecord(rules) ? rules.resolved : void 0;
-    const next = buildResolvedVisibility(engine.visibility().decisions);
-    const serialized = JSON.stringify(next);
-    if (serialized === lastPublished) return;
     if (JSON.stringify(current ?? null) === serialized) {
       lastPublished = serialized;
       return;
@@ -650,14 +668,31 @@ function apply(ctx) {
       }
     }
   };
+  let removalWarned = false;
+  const removeDocumentMap = () => {
+    const writer = ctx.get("settings");
+    if (writer?.publishArtifact === void 0 || writer.mutate === void 0) return;
+    const document = readOrchestrationDocument(ctx.get("settings"));
+    const rules = document?.catalogRules;
+    if (!isRecord(rules) || rules.resolved === void 0) return;
+    const revision = writer.describe?.().find((entry) => entry.ns === ORCH_NS)?.revision;
+    void writer.mutate(ORCH_NS, [{ op: "unset", path: ["catalogRules", "resolved"] }], revision).catch((error) => {
+      if (removalWarned) return;
+      removalWarned = true;
+      process.stderr.write(`[enpoi-catalog-rules] resolved map removal failed: ${error instanceof Error ? error.message : String(error)}
+`);
+    });
+  };
   ctx.provide("catalogRules", engine);
   emitWarnings();
-  void publishResolved();
+  removeDocumentMap();
+  publishResolved();
   const onNamespaceChange = ((ns) => {
     if (String(ns) !== ORCH_NS && String(ns) !== "llm-pi-ai") return;
     engine.refresh();
     emitWarnings();
-    void publishResolved();
+    removeDocumentMap();
+    publishResolved();
   });
   ctx.on("settings/document-updated", onNamespaceChange);
   ctx.on("settings/updated", onNamespaceChange);

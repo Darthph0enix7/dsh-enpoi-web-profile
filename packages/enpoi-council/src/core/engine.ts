@@ -27,10 +27,11 @@ import {
 } from './fiber.ts'
 import { EvidenceQueue, extractEvidenceRequests, serviceEvidenceQueue } from './broker.ts'
 import { councilDenyList } from './fiber.ts'
+import { ChairOutputError, validateChairDeliverable } from './chair.ts'
 import { loadCouncilRegistry } from '../registry.ts'
 import { Ledger } from './ledger.ts'
 import { afterChallenge, evaluate, initialRuntime, trackFlipRun, type StoppingRuntime } from './stopping.ts'
-import { extractProposals, runRefereePass } from './referee.ts'
+import { RefereeOutputError, extractProposals, runRefereePass } from './referee.ts'
 import type { CouncilParams } from './spec.ts'
 import type { CouncilSpec, DeclarativeCouncilSpec } from './spec.ts'
 import { EvidenceVault } from './vault.ts'
@@ -69,6 +70,22 @@ export interface RunCouncilOptions {
 }
 
 const MAX_SEAT_OUTPUT_CHARS = 6000
+const MAX_REFEREE_NOTES = 12
+const MAX_REFEREE_NOTE_CHARS = 320
+const MAX_REFEREE_RECORD_CHARS = 2400
+
+/**
+ * A required council input is missing at a handoff point: the run stops with
+ * this reason instead of proceeding to synthesize from nothing or flailing
+ * (2026-09-27: a 2-round roundtable with a lost referee output forwarded a
+ * six-section document whose every body said "no data").
+ */
+export class CouncilHandoffError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CouncilHandoffError'
+  }
+}
 
 export async function runCouncil(
   ctx: Context,
@@ -96,6 +113,15 @@ export async function runCouncil(
   let directives: Record<string, string> = {}
   let floor = { active: spec.seats.map(s => s.id), standby: [] as string[] }
   let briefStall = ''
+  /** Bounded referee record: rejections/parse failures the ledger cannot show.
+   * It rides into the chair prompt so lost adjudication is VISIBLE at synthesis. */
+  const refereeNotes: string[] = []
+  const noteReferee = (note: string): void => {
+    const clipped = note.replace(/\s+/g, ' ').trim().slice(0, MAX_REFEREE_NOTE_CHARS)
+    if (clipped.length === 0) return
+    refereeNotes.push(clipped)
+    if (refereeNotes.length > MAX_REFEREE_NOTES) refereeNotes.shift()
+  }
 
   const emitRound = (epoch: number, extra: Record<string, unknown>) => {
     try {
@@ -159,7 +185,7 @@ export async function runCouncil(
         ? 'Propose ideas as SPROUT: <title> | <rationale> lines (one per idea).'
         : (spec.ledgerKinds.some(k => k.kind === 'crux') ? 'Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line.' : ''),
       'If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary — conclude your arguments conditionally.',
-      'IMPORTANT: the run_code tool is NON-FUNCTIONAL in this council — calling it only wastes your turn. Never invoke it; argue directly or request facts with NEED_EVIDENCE.',
+      'IMPORTANT: this council provides NO shell and NO file tools (run_code is non-functional; bash/read/grep/glob are denied). Never attempt commands or file reads — argue directly, or request facts with NEED_EVIDENCE.',
       'PROTOCOL LINE FORMATS (the council parses these mechanically — always exactly these, one line each, no markdown, no headings around them):',
       '  NEED_EVIDENCE(target: <area>, question: <what to verify>)',
       '  PROPOSE_CRUX: <assertion>',
@@ -217,6 +243,7 @@ export async function runCouncil(
           const msg = err instanceof Error ? err.message : String(err)
           councilDiag(`ingest referee unavailable: ${msg} — no-op ingest`)
           audit.push(`ingest: referee unavailable (${msg}) — proceeding without admission`)
+          noteReferee(`ingest: referee unavailable (${msg})`)
           ingest = {
             output: { admissions: [], flips: [], directives: {}, floor: { active: spec.seats.map(s => s.id), standby: [] }, scopeWarnings: [] },
             applied: { admissions: [], flips: [], rejected: [`ingest unavailable: ${msg}`] },
@@ -225,6 +252,9 @@ export async function runCouncil(
       }
       directives = ingest.output.directives
       floor = ingest.output.floor
+      if (ingest.applied.rejected.length > 0) {
+        noteReferee(`ingest rejected ${ingest.applied.rejected.length} ruling(s): ${ingest.applied.rejected.slice(0, 4).join('; ')}`)
+      }
       trackFlipRun(runtime, ledger.flipsInEpoch(1) + ingest.applied.admissions.length, false)
       emitRound(1, { flips: ledger.flipsInEpoch(1), admissions: ingest.applied.admissions.length, applied: ingest.applied, phase: 'ingest' })
       audit.push(`ingest: ${ingest.applied.admissions.length} admission(s)`)
@@ -273,7 +303,7 @@ export async function runCouncil(
           isChallenge
             ? 'The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw — with evidence — or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else.'
             : buildEpochInstructions(spec),
-          'NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. The run_code tool is non-functional here — never call it.',
+          'NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. This council has no shell and no file tools (run_code, bash, read/grep/glob are all denied here) — never attempt them.',
           'PROTOCOL LINE FORMATS (mechanically parsed — one line each, exactly): NEED_EVIDENCE(target: <area>, question: <what>) and PROPOSE_CRUX: <assertion>. Never reformat or decorate them — variants are dropped.',
         ].filter(Boolean).join('\n\n')
         },
@@ -333,6 +363,17 @@ export async function runCouncil(
           const msg = err instanceof Error ? err.message : String(err)
           councilDiag(`[epoch ${epoch}] referee unavailable: ${msg}`)
           audit.push(`epoch ${epoch}: referee unavailable (${msg}) — epoch treated as non-material`)
+          noteReferee(`epoch ${epoch}: referee pass failed twice (${msg})`)
+          // A LOST referee output is a handoff failure, not a degraded epoch:
+          // continuing would deliberate against a stale ledger with the epoch's
+          // adjudication silently dropped. Stop the loop with the reason; the
+          // chair prompt carries it in the REFEREE RECORD, and an empty ledger
+          // fails loud at synthesis instead of producing an empty deliverable.
+          if (err instanceof RefereeOutputError) {
+            stopReason = `referee handoff failed at epoch ${epoch}: ${msg}`
+            emitRound(epoch, { phase: 'referee-handoff-failed', error: msg, flips: 0, admissions: 0, offline: [...deadSeats] })
+            break
+          }
           directives = {}
           floor = { active: spec.seats.map(s => s.id).filter(id => !deadSeats.has(id)), standby: [] }
           trackFlipRun(runtime, 0, isChallenge)
@@ -358,6 +399,12 @@ export async function runCouncil(
       }
       directives = referee.output.directives
       floor = referee.output.floor
+      if (referee.applied.rejected.length > 0) {
+        noteReferee(`epoch ${epoch} rejected ${referee.applied.rejected.length} ruling(s): ${referee.applied.rejected.slice(0, 4).join('; ')}`)
+      }
+      if (referee.output.scopeWarnings.length > 0) {
+        noteReferee(`epoch ${epoch} scope warnings: ${referee.output.scopeWarnings.slice(0, 3).join('; ')}`)
+      }
 
       // 4. Engine diff — materiality is ENGINE-computed (referee cannot lie).
       // Debate materiality = status flips; ideation materiality = admissions
@@ -406,29 +453,56 @@ export async function runCouncil(
     }
 
     // ── Chair synthesis ─────────────────────────────────────────────────
-    // Resilient: one retry; a persistently dead chair falls back to a
-    // deterministic mechanical compilation of the ledger — the run NEVER
-    // dies after the deliberation already happened.
+    // Fail-loud handoff check FIRST: the chair's required inputs are the
+    // dispute ledger and the evidence vault. With both empty there is nothing
+    // to compile — a synthesized document would be a vacuous success
+    // (2026-09-27: a lost referee output produced exactly that, forwarded as a
+    // clean result). Stop with the reason instead.
+    if (signal.aborted) throw new Error('council deliberation aborted')
+    if (ledger.state().entries.length === 0 && vault.all().length === 0) {
+      const record = refereeNotes.length > 0 ? ` Referee record: ${refereeNotes.slice(-4).join(' | ')}` : ''
+      throw new CouncilHandoffError(
+        `council produced no material for synthesis: the dispute ledger is empty and no evidence was collected`
+        + ` (stop: ${stopReason}).${record}`,
+      )
+    }
+
+    // Visible, bounded synthesis budget: the chair gets one event + one
+    // timeout; a flail ends with this reason instead of a silent respawn.
+    const chairBudgetMs = params.debaterTimeoutMs
+    try {
+      parent.session.append('council/round', {
+        epoch, council: spec.id, phase: 'synthesis', budgetMs: chairBudgetMs, refereeNotes: refereeNotes.length,
+      })
+    } catch (err) { councilDiag(`synthesis append failed: ${String(err)}`) }
+    audit.push(`synthesis: chair budget ${Math.round(chairBudgetMs / 1000)}s, ${refereeNotes.length} referee note(s)`)
+
+    const refereeRecord = refereeNotes.join('\n').slice(0, MAX_REFEREE_RECORD_CHARS)
+    // Resilient: one retry; a persistently dead OR invalid chair falls back to
+    // a deterministic mechanical compilation of the ledger — the run NEVER
+    // dies after the deliberation already happened, and the fallback reports
+    // the failure instead of forwarding an unvalidated answer.
     let deliverable
     try {
       deliverable = await runChair(ctx, parent, spec, {
-        query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
+        query, ledger, vault, transcriptNote: briefStall, refereeRecord, signal, timeoutMs: chairBudgetMs,
         chairTemplate: opts.chairTemplate,
       })
     } catch (firstErr) {
       if (signal.aborted) throw firstErr
       const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
       councilDiag(`chair pass failed (${firstMsg}) — retrying once`)
+      audit.push(`chair attempt 1 failed (${firstMsg})`)
       try {
         deliverable = await runChair(ctx, parent, spec, {
-          query, ledger, vault, transcriptNote: briefStall, signal, timeoutMs: params.debaterTimeoutMs,
+          query, ledger, vault, transcriptNote: briefStall, refereeRecord, signal, timeoutMs: chairBudgetMs,
           chairTemplate: opts.chairTemplate,
         })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         councilDiag(`chair unavailable: ${msg} — mechanical fallback`)
         audit.push(`chair unavailable (${msg}) — mechanical compilation`)
-        deliverable = { text: mechanicalDeliverable(spec, ledger, vault, query, stopReason), tokens: 0 }
+        deliverable = { text: mechanicalDeliverable(spec, ledger, vault, query, stopReason, msg), tokens: 0 }
       }
     }
     totalTokens += deliverable.tokens
@@ -673,6 +747,8 @@ async function runChair(
     ledger: Ledger
     vault: EvidenceVault
     transcriptNote: string
+    /** Bounded record of referee rejections/failures the ledger cannot show. */
+    refereeRecord?: string
     signal: AbortSignal
     timeoutMs: number
     chairTemplate?: DeclarativeCouncilSpec['chairTemplate']
@@ -686,13 +762,15 @@ async function runChair(
     `QUERY: ${input.query}`,
     `FINAL LEDGER:\n${ledgerText}`,
     `EVIDENCE VAULT:\n${evidenceText}`,
+    input.refereeRecord ? `REFEREE RECORD (rejections/failures the ledger cannot show — report them, do not invent around them):\n${input.refereeRecord}` : '',
     input.transcriptNote ? `NOTE: some evidence requests failed (${input.transcriptNote}) — reflect uncertainty where it matters.` : '',
     `Compile the final ${spec.label} deliverable with EXACTLY these sections: ${sections}.`,
     'Zero data loss: every ledger entry and its disposition must be reflected. Falsified paths appear with their refutations. Dissents are preserved verbatim in spirit.',
+    'Every required section must carry real content from the ledger, the vault, or the referee record. If a section has nothing to report, say exactly why — never pad with an empty template.',
     'Output the deliverable document only — no meta commentary.',
   ].filter(Boolean).join('\n\n')
   const persona = input.chairTemplate?.systemPrompt
-    ?? `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools.`
+    ?? `You are the Chair of the ${spec.label} council. You compile the final deliverable from the dispute ledger with zero data loss. You write only the deliverable document. Do not call any tools: you have no shell and no file access, and searching the filesystem for missing data is forbidden — report what the ledger and vault contain.`
   const prompt = input.chairTemplate === undefined
     ? defaultPrompt
     : fillChairTemplate(input.chairTemplate.userPromptTemplate, {
@@ -702,6 +780,7 @@ async function runChair(
       evidence: evidenceText,
       sections,
       note: input.transcriptNote,
+      referee: input.refereeRecord ?? '',
     })
 
   const denyTools = seatDenyList(ctx)
@@ -715,6 +794,14 @@ async function runChair(
       denyTools,
     }, input.signal)
     const chairTurn = await waitForSeatTurnDetailed(ctx, fiber.childId, input.signal, input.timeoutMs)
+    // Structured output validation: a chair answer missing a required section
+    // (or carrying an empty one) is a REPORTED failure — retried by the engine,
+    // then replaced by the mechanical compilation. It is never forwarded as-is.
+    const validation = validateChairDeliverable(chairTurn.text, spec.deliverableSections)
+    if (!validation.ok) {
+      const excerpt = chairTurn.text.replace(/\s+/g, ' ').trim().slice(0, 160)
+      throw new ChairOutputError(validation.missing, excerpt)
+    }
     return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) }
   } finally {
     if (fiber !== undefined) {
@@ -725,7 +812,8 @@ async function runChair(
 
 /**
  * Substitute the documented chair-template placeholders (`{{label}}`,
- * `{{query}}`, `{{ledger}}`, `{{evidence}}`, `{{sections}}`, `{{note}}`).
+ * `{{query}}`, `{{ledger}}`, `{{evidence}}`, `{{sections}}`, `{{note}}`,
+ * `{{referee}}`).
  * Unknown placeholders stay verbatim; a template without placeholders is used
  * as-is.
  * @param template - the registered `chairTemplate.userPromptTemplate`.
@@ -742,7 +830,7 @@ function fillChairTemplate(template: string, vars: Record<string, string>): stri
  * summary, and the stopping reason. Worse prose than the Chair, but NOTHING
  * is lost — the run always returns a deliverable.
  */
-function mechanicalDeliverable(spec: CouncilSpec, ledger: Ledger, vault: EvidenceVault, query: string, stopReason: string): string {
+function mechanicalDeliverable(spec: CouncilSpec, ledger: Ledger, vault: EvidenceVault, query: string, stopReason: string, failure?: string): string {
   const s = ledger.state()
   const sections = spec.deliverableSections
   const lines: string[] = [
@@ -750,6 +838,7 @@ function mechanicalDeliverable(spec: CouncilSpec, ledger: Ledger, vault: Evidenc
     '',
     `Query: ${query}`,
     `Stop: ${stopReason}`,
+    ...(failure !== undefined && failure.trim() !== '' ? [`Compilation note: chair failure reported — ${failure.replace(/\s+/g, ' ').trim()}`] : []),
     '',
     '## Ledger Dispositions',
     ...s.entries.map(e => `- **${e.id}** (${e.kind}, ${e.status}) — ${e.assertion}${e.evidenceRef ? ` [evidence: ${e.evidenceRef}]` : ''}`),

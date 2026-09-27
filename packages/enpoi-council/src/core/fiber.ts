@@ -127,7 +127,14 @@ export const COUNCIL_KEPT_TOOLS = [
 
 const isKeptTool = (name: string): boolean => (COUNCIL_KEPT_TOOLS as readonly string[]).includes(name)
 
-export const DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS].filter(name => !isKeptTool(name))
+// Deliberation tier (seats, referee, chair) additionally loses ALL retrieval
+// tools AND `bash`. The operator-observed failure (2026-09-27): a referee
+// emitted its JSON through a `cat <<JSON` bash heredoc — the fiber result
+// capture reads assistant text only, so the pass was silently lost — and a
+// chair spent ~3 minutes shelling around for a ledger that never existed.
+// Neither role has any legitimate shell need; their only fact ingress is the
+// NEED_EVIDENCE broker. The broker tier keeps the research surface.
+export const DEBATER_DENIED_TOOLS = [...COUNCIL_DENIED_TOOLS, ...RETRIEVAL_TOOLS, 'bash'].filter(name => !isKeptTool(name))
 
 /**
  * The deny list for one fiber: the base list plus every REGISTERED council's
@@ -444,7 +451,9 @@ export async function waitForSeatTurnDetailed(
   try {
     for (;;) {
       if (signal.aborted) throw new Error('council deliberation aborted')
-      if (Date.now() - started > timeoutMs) throw new Error(`council seat timed out after ${timeoutMs}ms`)
+      if (Date.now() - started > timeoutMs) {
+        throw new Error(`council seat timed out after ${timeoutMs}ms (child ${childId} never settled a turn — no assistant text and no completed turn/end observed)`)
+      }
       if (ctx.agents.get(childId as SessionId) === undefined) {
         const persistence = ctx.get('sessionPersistence') as SessionPersistence | undefined
         if (persistence !== undefined) {
@@ -458,23 +467,27 @@ export async function waitForSeatTurnDetailed(
           const lastUser = [...events].reverse().find(e => e.type === 'user/message')
           const since = lastUser === undefined ? 0 : lastUser.seq
           const messages = events.filter(e => e.type === 'assistant/message' && e.seq > since)
-          if (messages.length > 0) {
-            const extracted = messages
-              .map(m => {
-                const data = m.data as { message?: { content?: unknown }; content?: unknown }
-                return textOfContent(data.message?.content ?? data.content)
-              })
-              .filter(t => t.length > 0)
-              .join('\n')
-              .trim()
-            if (extracted.length > 0) {
-              // Truncation flag: the LAST turn/end before this read may be
-              // max-tokens even though text exists (text-first, then cut).
-              const truncated = events.some(e => e.type === 'turn/end'
-                && (e.data as { reason?: { kind?: string } })?.reason?.kind === 'max-tokens')
-              return { text: extracted, truncated }
-            }
+          const extracted = messages
+            .map(m => {
+              const data = m.data as { message?: { content?: unknown }; content?: unknown }
+              return textOfContent(data.message?.content ?? data.content)
+            })
+            .filter(t => t.length > 0)
+            .join('\n')
+            .trim()
+          if (extracted.length > 0) {
+            // Truncation flag: the LAST turn/end before this read may be
+            // max-tokens even though text exists (text-first, then cut).
+            const truncated = events.some(e => e.type === 'turn/end'
+              && (e.data as { reason?: { kind?: string } })?.reason?.kind === 'max-tokens')
+            return { text: extracted, truncated }
           }
+          // The turn settled with no usable text (reasoning-only or whitespace
+          // assistant blocks). Report it IMMEDIATELY with a reason instead of
+          // spinning to the deadline — a settled child is never "still working".
+          // The operator-observed failure: a chair emitted 34 steps of
+          // reasoning + tool calls and no text, the wait kept polling for 90s
+          // past its completed turn/end, then the fail-safe respawned it.
           const turnEnd = events.find(e => e.type === 'turn/end' && e.seq > since)
           if (turnEnd !== undefined) {
             const reason = (turnEnd.data as { reason?: { kind?: string; error?: { message?: string }; failure?: { message?: string }; reason?: { kind?: string } } })?.reason
@@ -484,9 +497,7 @@ export async function waitForSeatTurnDetailed(
             if (reason?.kind === 'aborted') {
               throw new Error(`Turn was aborted (${reason.reason?.kind ?? 'cancelled'})`)
             }
-            if (reason?.kind === 'completed' && messages.length === 0) {
-              return { text: '[NO_OUTPUT: seat returned empty content]', truncated: false }
-            }
+            return { text: '[NO_OUTPUT: seat settled without text content]', truncated: reason?.kind === 'max-tokens' }
           }
         }
       }

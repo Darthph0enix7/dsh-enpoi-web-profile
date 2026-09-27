@@ -77,6 +77,15 @@ describe('listing normalization', () => {
     expect(normalizeListingEntry({ id: 'x', supported_parameters: ['temperature'] }))
       .toMatchObject({ id: 'x', tools: false, reasoning: false })
   })
+
+  it('marks a listing-marked non-free model gated with the sign-in reason', () => {
+    // The Kilo listing carries `isFree` per row: 18 free, 376 sign-in/paid-only.
+    const paid = normalizeListingEntry({ id: 'kilo-auto/efficient', isFree: false })
+    expect(paid).toMatchObject({ id: 'kilo-auto/efficient', isFree: false, gated: true, gateReason: 'sign-in required' })
+    // A free model is not gated; an undisclosed price is not a gate either.
+    expect(normalizeListingEntry({ id: 'kilo-auto/free', isFree: true })).toEqual({ id: 'kilo-auto/free', isFree: true })
+    expect(normalizeListingEntry({ id: 'mystery' })).toEqual({ id: 'mystery' })
+  })
 })
 
 describe('discovered-cache records', () => {
@@ -86,6 +95,19 @@ describe('discovered-cache records', () => {
     const [known] = mergeDiscoveredModels('kilo', [{ id: 'vendor/model:free', input: ['text', 'image'], tools: true }], undefined)
     expect(known).toMatchObject({ input: ['text', 'image'], tools: true })
     expect(known?.unverified).toBeUndefined()
+  })
+
+  it('persists the gate flag and reason through the discovered and configured records', () => {
+    const [discovered] = mergeDiscoveredModels('kilo', [{ id: 'kilo-auto/efficient', isFree: false }], undefined)
+    expect(discovered).toMatchObject({ id: 'kilo-auto/efficient', isFree: false, gated: true, gateReason: 'sign-in required' })
+    expect(discovered?.gated).toBe(true)
+    const merge = mergeConfiguredModels(
+      'kilo',
+      [{ id: 'kilo-auto/efficient', name: 'Auto Efficient', contextWindow: 1_000_000, maxTokens: 65_536 }],
+      [{ id: 'kilo-auto/efficient', isFree: false }],
+      undefined,
+    )
+    expect(merge.models[0]).toMatchObject({ id: 'kilo-auto/efficient', gated: true, gateReason: 'sign-in required' })
   })
 
   it('is idempotent: an unchanged listing keeps every discoveredAt and fetchedAt', () => {

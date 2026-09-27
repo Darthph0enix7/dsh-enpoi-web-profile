@@ -8,6 +8,7 @@ import {
   councilDenyList,
   estimateTokens,
   textOfContent,
+  waitForSeatTurnDetailed,
 } from '../src/core/fiber.ts'
 import { extractEvidenceRequests, parseFactSheet } from '../src/core/broker.ts'
 import { extractProposals, parseRefereeOutput } from '../src/core/referee.ts'
@@ -28,13 +29,17 @@ describe('evidence fencing (doc 54 §6, Oracle amendment #2)', () => {
   })
 
   it('anti-leak core is intact in both tiers', () => {
-    // bash and memory_search are now ENABLED for seats (operator default:
-    // seats may run analysis commands and search their own memory).
-    for (const t of ['send_message', 'subagent', 'edit', 'write', 'memory_save']) {
+    // Seats/referee/chair may NOT run shell commands (2026-09-27: a referee
+    // emitted its JSON through a bash heredoc and the pass was lost; a chair
+    // spent ~3 minutes shelling for a ledger that never existed). The broker
+    // tier keeps the research surface; memory_search stays available.
+    for (const t of ['send_message', 'subagent', 'edit', 'write', 'memory_save', 'bash']) {
       expect(DEBATER_DENIED_TOOLS).toContain(t)
+    }
+    for (const t of ['send_message', 'subagent', 'edit', 'write', 'memory_save']) {
       expect(COUNCIL_DENIED_TOOLS).toContain(t)
     }
-    expect(DEBATER_DENIED_TOOLS).not.toContain('bash')
+    expect(COUNCIL_DENIED_TOOLS).not.toContain('bash')       // broker keeps its research surface
     expect(COUNCIL_DENIED_TOOLS).not.toContain('memory_search')
     expect(DEBATER_DENIED_TOOLS).not.toContain('memory_search')
   })
@@ -105,7 +110,9 @@ describe('referee output handling', () => {
       scopeWarnings: ['drift detected'],
     })
     const out = parseRefereeOutput(raw, ROUNDTABLE_SPEC)
-    expect(out.admissions).toHaveLength(1)
+    // Unknown kinds are KEPT so applyRefereeOutput can report them — silently
+    // dropping them emptied the ledger in the 2026-09-27 run.
+    expect(out.admissions).toHaveLength(2)
     expect(out.flips).toHaveLength(1)
     expect(out.directives).toEqual({ skeptic: '1. do x' })
     expect(out.floor.active).toEqual(['skeptic'])
@@ -113,10 +120,55 @@ describe('referee output handling', () => {
     expect(out.scopeWarnings).toHaveLength(1)
   })
 
-  it('degrades to a no-op pass with full floor on unparseable output', () => {
-    const out = parseRefereeOutput('I refuse to emit JSON.', ROUNDTABLE_SPEC)
-    expect(out.admissions).toHaveLength(0)
-    expect(out.floor.active).toHaveLength(ROUNDTABLE_SPEC.seats.length)
+  it('reports unknown admission kinds as rejections instead of dropping them', async () => {
+    const { applyRefereeOutput } = await import('../src/core/referee.ts')
+    const { Ledger } = await import('../src/core/ledger.ts')
+    const output = parseRefereeOutput(JSON.stringify({
+      admissions: [
+        { kind: 'fact', assertion: 'raw-socket block is a diagnostic limitation', author: 'skeptic' },
+        { kind: 'crux', assertion: 'a real crux', author: 'architect' },
+      ],
+      flips: [], directives: {}, floor: { active: ['skeptic', 'architect', 'pragmatist'], standby: [] }, scopeWarnings: [],
+    }), ROUNDTABLE_SPEC)
+    const ledger = new Ledger()
+    const applied = applyRefereeOutput(output, ledger, {
+      spec: ROUNDTABLE_SPEC, ledgerText: '', roundTranscript: '', vaultDeltaText: '', epoch: 1, previousDirectives: {},
+    }, ROUNDTABLE_SPEC, '')
+    expect(applied.admissions).toHaveLength(1)
+    expect(applied.rejected.join(' ')).toMatch(/unknown ledger kind/)
+    expect(ledger.state().entries).toHaveLength(1)
+  })
+
+  it('fails loud when the referee turn carries no JSON object at all', async () => {
+    const { RefereeOutputError } = await import('../src/core/referee.ts')
+    expect(() => parseRefereeOutput('Referee JSON produced for EPOCH 2. Summary of rulings: admitted 5 entries.', ROUNDTABLE_SPEC))
+      .toThrow(RefereeOutputError)
+    expect(() => parseRefereeOutput('I refuse to emit JSON.', ROUNDTABLE_SPEC))
+      .toThrow(/no JSON object/)
+  })
+})
+
+describe('chair deliverable validation (never forward an unshaped answer)', () => {
+  it('accepts a document with every required section and body text', async () => {
+    const { validateChairDeliverable } = await import('../src/core/chair.ts')
+    const doc = [
+      '# Decision', '', 'Adopt the lease design.', '',
+      '## Options Considered', '', '- Row-update lease (chosen).', '',
+      '## Evidence', '', 'src/core/queue.py:142.', '',
+      '## Established Invariants', '', '- Bounded staleness.', '',
+      '## Binding Dissents', '', 'None.', '',
+      '## Action Items', '', '- Ship it.',
+    ].join('\n')
+    expect(validateChairDeliverable(doc, ROUNDTABLE_SPEC.deliverableSections)).toEqual({ ok: true, missing: [] })
+  })
+
+  it('flags missing sections and empty bodies', async () => {
+    const { validateChairDeliverable } = await import('../src/core/chair.ts')
+    const missing = validateChairDeliverable('# Decision\n\nAdopt X.\n\n## Evidence\n\n', ROUNDTABLE_SPEC.deliverableSections)
+    expect(missing.ok).toBe(false)
+    expect(missing.missing).toContain('Options Considered')
+    expect(missing.missing).toContain('Evidence')      // heading present, body empty
+    expect(missing.missing).toContain('Action Items')
   })
 })
 
@@ -222,5 +274,53 @@ describe('tolerant protocol extraction (natural model styles)', () => {
     expect(out).toHaveLength(3)
     expect(out[0].kind).toBe('crux')
     expect(out[2].assertion).toContain('plain dash')
+  })
+})
+
+describe('fiber turn settlement (a flail ends with a reason)', () => {
+  /** A ctx whose child session serves one scripted event list. */
+  function turnCtx(events: unknown[]) {
+    return {
+      agents: { get: () => undefined },
+      get: (ns: string) => ns === 'sessionPersistence'
+        ? {
+            open: async () => ({
+              read: async () => ({ events }),
+              close: async () => undefined,
+            }),
+          }
+        : undefined,
+    }
+  }
+
+  it('returns NO_OUTPUT immediately when the turn settled with reasoning-only content', async () => {
+    const ctx = turnCtx([
+      { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'prompt' }] } },
+      { type: 'assistant/message', seq: 2, data: { message: { content: [{ type: 'reasoning', text: 'private planning' }, { type: 'text', text: '\n\n' }] } } },
+      { type: 'turn/end', seq: 3, data: { reason: { kind: 'completed' } } },
+    ])
+    const turn = await waitForSeatTurnDetailed(ctx as never, 'child-empty', new AbortController().signal, 2000)
+    expect(turn.text).toContain('NO_OUTPUT')
+    expect(turn.truncated).toBe(false)
+  })
+
+  it('still returns real text from a completed turn', async () => {
+    const ctx = turnCtx([
+      { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'prompt' }] } },
+      { type: 'assistant/message', seq: 2, data: { message: { content: [{ type: 'text', text: 'the deliverable' }] } } },
+      { type: 'turn/end', seq: 3, data: { reason: { kind: 'completed' } } },
+    ])
+    const turn = await waitForSeatTurnDetailed(ctx as never, 'child-text', new AbortController().signal, 2000)
+    expect(turn.text).toBe('the deliverable')
+  })
+
+  it('keeps polling while the child is still working (no turn/end yet)', async () => {
+    const events: unknown[] = [
+      { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'prompt' }] } },
+      { type: 'assistant/message', seq: 2, data: { message: { content: [{ type: 'reasoning', text: 'working' }] } } },
+    ]
+    const ctx = turnCtx(events)
+    await expect(waitForSeatTurnDetailed(ctx as never, 'child-working', new AbortController().signal, 400))
+      .rejects.toThrow(/timed out after 400ms .*never settled a turn/)
   })
 })

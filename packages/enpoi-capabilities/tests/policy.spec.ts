@@ -171,6 +171,11 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'bash script.sh', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'bash', command: 'python -c "import os; os.remove(\'x\')"', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'bash', command: 'sh -c "ls"', config: EMPTY }).kind).toBe('ask')
+    // The denial names the supported alternative (2026-09-27: a child used
+    // python3 -c to read a JSON file and lost its turn to the auto-deny).
+    const py = resolvePolicy({ toolName: 'bash', command: 'python3 -c "print(1)"', config: EMPTY })
+    expect(py.kind).toBe('ask')
+    expect(py.reason).toContain('read, grep, or glob')
     // plain interpreter invocations of a file are ordinary work
     expect(resolvePolicy({ toolName: 'bash', command: 'python script.py --flag', config: EMPTY }).kind).toBe('allow')
     // an Always-allow grant pins the exact command

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 
-import { runCouncil } from '../src/core/engine.ts'
+import { runCouncil, CouncilHandoffError } from '../src/core/engine.ts'
 import { ROUNDTABLE_SPEC } from '../src/profiles/roundtable.ts'
 import { CHORUS_SPEC } from '../src/profiles/chorus.ts'
 import type { CouncilParams } from '../src/core/spec.ts'
@@ -126,7 +126,14 @@ const ARGUE = 'I maintain my position on C-1; the write volumes in this deployme
 const NEED = 'I accept the framing so far, but I need the real write pattern before conceding.\nNEED_EVIDENCE(target: queue scheduler, question: does claim_next use a database lock or a transactional row update?)'
 const CONCUR = 'CONCUR [C-2] WITH skeptic: the operational-surface argument is sound and I withdraw my preference.'
 const SHEET = 'CITATION: src/core/queue.py:142\nFACTS: claim_next acquires a transactional row update with a 5s lease; no separate lock file.\nCONFIDENCE: high'
-const CHAIR = '# Decision\n\nAdopt the transactional lease design (C-1 invariant). C-2 dissolved by operational analysis.\n\n## Established Invariants\n- Lease-based claims with bounded staleness.\n\n## Binding Dissents\nNone.'
+const CHAIR = [
+  '# Decision', '', 'Adopt the transactional lease design (C-1 invariant). C-2 dissolved by operational analysis.', '',
+  '## Options Considered', '', '- Transactional row-update lease (adopted).', '- Redis coordination (rejected: operational surface).', '',
+  '## Evidence', '', 'src/core/queue.py:142 — claim_next acquires a transactional row update with a 5s lease.', '',
+  '## Established Invariants', '', '- Lease-based claims with bounded staleness.', '',
+  '## Binding Dissents', '', 'None.', '',
+  '## Action Items', '', '- Ship the lease design.',
+].join('\n')
 
 function refereeJson(o: { admissions?: Array<{ kind: string; assertion: string; author: string }>; flips?: Array<{ id: string; to: string; reason: string }>; floor?: { active: string[]; standby: string[] }; directives?: Record<string, string> }): string {
   return JSON.stringify({
@@ -331,7 +338,14 @@ describe('council engine — scripted full runs', () => {
       refereeJson({ admissions: [{ kind: 'idea', assertion: 'One last radical direction', author: 'visionary' }] }),
       'SPROUT: consolidation | fusing the harvest threads.', 'SPROUT: c2 | thread.', 'SPROUT: c3 | thread.',
       refereeJson({}),                                         // consolidation referee → terminate unconditionally
-      '# Harvest\n\nGems with lineage and clusters.',
+      [
+        '# Harvest', '',
+        '## Spotlight Gems (with lineage)', '', '• GEM: Ambient dock — lineage: I-1.', '',
+        '## Thematic Clusters', '', '- Ambient surfaces (I-1, I-2).', '',
+        '## Concept Catalog', '', '- I-1 Ambient dock; I-2 Fleet glance strip.', '',
+        '## Buildable Now vs Moonshots', '', '- Buildable now: task pulse header. Moonshot: ambient dock.', '',
+        '## Open Questions', '', '- Where does the fleet state live?',
+      ].join('\n'),
     ]
     const { ctx, parent } = makeCtx(script)
     const result = await runCouncil(ctx, parent, {
@@ -451,26 +465,73 @@ describe('auto-continue on output-token truncation', () => {
 
 
 describe('degraded-mode fallbacks (never lose a finished debate)', () => {
-  it('referee unavailable for the whole run: epochs are non-material, run still delivers', async () => {
+  it('referee unavailable for the whole run: the empty ledger fails loud with the referee record', async () => {
     // Referee failures never consume script reads. Flow: blind(3) → ingest fails
-    // → epoch2(3) → fails → epoch3(3) → fails → run=2 → challenge(3) → fails → terminate.
+    // → epoch2(3) → fails → empty-ledger guard terminates → handoff check.
     const script = [
       BLIND, BLIND, BLIND,
       ARGUE, ARGUE, ARGUE,   // epoch 2: the only deliberation epoch (guard fires)
-      CHAIR,
+      CHAIR,                 // never consumed — synthesis is refused before the chair
     ]
     const { ctx, parent } = makeCtx(script, { failSeatIds: ['referee'] })
-    const result = await runCouncil(ctx, parent, {
+    const err = await runCouncil(ctx, parent, {
       spec: ROUNDTABLE_SPEC,
       query: 'q',
       params: BASE_PARAMS,
       signal: new AbortController().signal,
+    }).catch((e: unknown) => e)
+    // 2026-09-27 contract: a run with no material NEVER forwards an empty
+    // deliverable. It stops with the reason and the lost-referee record.
+    expect(err).toBeInstanceOf(CouncilHandoffError)
+    expect((err as Error).message).toMatch(/produced no material for synthesis/)
+    expect((err as Error).message).toMatch(/referee unavailable/)
+  })
+
+  it('a referee pass with prose instead of JSON stops the loop and fails loud', async () => {
+    const PROSE = 'Referee JSON produced for EPOCH 2. Summary of rulings: admitted 5 entries, no flips.'
+    const script = [
+      BLIND, BLIND, BLIND,
+      PROSE, PROSE,          // ingest referee: throws twice (no JSON) → no-op ingest
+      ARGUE, ARGUE, ARGUE,   // epoch 2 seats
+      PROSE, PROSE,          // epoch-2 referee: throws twice → handoff failure
+    ]
+    const { ctx, parent, appends } = makeCtx(script)
+    const err = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      signal: new AbortController().signal,
+    }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(CouncilHandoffError)
+    expect((err as Error).message).toMatch(/referee handoff failed at epoch 2/)
+    expect((err as Error).message).toMatch(/no JSON object/)
+    // The failure is visible on the event stream, not just in the log.
+    const handoff = appends.find(a => a.type === 'council/round' && (a.data as { phase?: string }).phase === 'referee-handoff-failed')
+    expect(handoff).toBeDefined()
+  })
+
+  it('an unshaped chair answer is retried, then replaced by a reported mechanical compilation', async () => {
+    const script = [
+      BLIND, BLIND, BLIND,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'A dispute about lease TTLs.', author: 'skeptic' }] }),
+      'A stub answer with no required sections at all.',
+      'Another stub answer, still unshaped.',
+    ]
+    const { ctx, parent, appends } = makeCtx(script)
+    const result = await runCouncil(ctx, parent, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: { ...BASE_PARAMS, runDeadlineMs: 0 },
+      signal: new AbortController().signal,
     })
-    // With a dead referee nothing is ever admitted, so the empty-ledger guard
-    // terminates fast and loud — that IS the degraded-mode contract (no hang,
-    // no crash, deliverable still produced).
-    expect(result.stopReason).toBe('no ledger entries were ever admitted')
-    expect(result.deliverable).toContain('Decision')
+    expect(result.deliverable).toContain('mechanical compilation')
+    expect(result.deliverable).toContain('chair failure reported')
+    expect(result.deliverable).toContain('C-1')
+    expect(result.audit.join(' ')).toMatch(/chair attempt 1 failed .*missing or empty required section/)
+    // Visible bounded budget: the synthesis event carries the chair timeout.
+    const synthesis = appends.find(a => a.type === 'council/round' && (a.data as { phase?: string }).phase === 'synthesis')
+    expect(synthesis).toBeDefined()
+    expect((synthesis!.data as { budgetMs?: number }).budgetMs).toBe(BASE_PARAMS.debaterTimeoutMs)
   })
 
   it('chair unavailable: mechanical compilation preserves every ledger entry', async () => {
