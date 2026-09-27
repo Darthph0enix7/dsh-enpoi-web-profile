@@ -21,6 +21,10 @@ import { describe, expect, it } from 'vitest'
  *    free tier in other harnesses" (anomalyco/opencode#49621) — so a
  *    settings rewrite that resurrects the links must fail here. The
  *    `scripts/disable-free-tier.mjs` repair is idempotent on the same text.
+ *
+ * 3. Every enabled chain is checked link-by-link for `opencode/*-free` at any
+ *    indentation, and every `chain:` reference anywhere in the patch must name
+ *    a declared, enabled group — a seat naming a disabled chain fails.
  */
 
 const PATCH = readFileSync(new URL('../../../cordis.patch.yml', import.meta.url), 'utf8')
@@ -56,6 +60,17 @@ function chainBlocks(source: string): Array<{ id: string; body: string }> {
   }))
 }
 
+/** Whether one chain block declares itself retired. */
+function chainDisabled(body: string): boolean {
+  return /^[ \t]*disabled:[ \t]*true[ \t]*$/m.test(body)
+}
+
+/** Every `- provider:` / `model:` link pair in one chain block, at any indentation. */
+function chainLinks(body: string): Array<{ provider: string; model: string }> {
+  return [...body.matchAll(/^[ \t]*- provider: (\S+)\n[ \t]*model: (\S+)/gm)]
+    .map(match => ({ provider: match[1]!, model: match[2]! }))
+}
+
 describe('web profile patch advertisement guard', () => {
   it('presents every tool-presentation row as native (run_code is not advertised)', () => {
     const rows = PATCH.split('- id: tool-presentation').slice(1)
@@ -78,20 +93,35 @@ describe('web profile patch advertisement guard', () => {
   })
 
   it('keeps every default seat and enabled chain off the gated opencode free tier', () => {
+    const chains = chainBlocks(PATCH)
+    const declared = new Map(chains.map(chain => [chain.id, chain]))
+
     // The default seat: paid route only, no chain fallback into free links.
     const seat = rowAfter(PATCH, 'agent-default-model')
     expect(seat).not.toMatch(/^\s+chain:/m)
     expect(seat).not.toMatch(/model: .*-free/)
 
-    // An enabled group must not link a gated model; disabled groups may keep
-    // their dead links visible (the `free` chain above is the only one).
-    for (const { id, body } of chainBlocks(PATCH)) {
-      if (/^        disabled: true$/m.test(body)) continue
-      expect(body, `enabled chain "${id}" must not link a gated free model`)
-        .not.toMatch(/^ {10}- provider: opencode$\n {12}model: .*-free$/m)
+    // No enabled group may link a gated model, at any indentation; disabled
+    // groups may keep their dead links visible (the `free` chain is the only one).
+    for (const { id, body } of chains) {
+      if (chainDisabled(body)) continue
+      for (const { provider, model } of chainLinks(body)) {
+        expect(
+          provider !== 'opencode' || !model.endsWith('-free'),
+          `enabled chain "${id}" must not link gated free model ${provider}/${model}`,
+        ).toBe(true)
+      }
     }
 
-    // No seat fallback anywhere may reference the retired chain by id.
-    expect(PATCH).not.toMatch(/^ {4,8}chain: free$/m)
+    // Every `chain:` reference (any seat, any depth) must name a declared,
+    // enabled group; a disabled or missing target cannot route.
+    for (const match of PATCH.matchAll(/^[ \t]*chain:[ \t]*(\S+?)[ \t]*(?:#.*)?$/gm)) {
+      const id = match[1]!.replace(/^["']|["']$/g, '')
+      const target = declared.get(id)
+      expect(
+        target !== undefined && !chainDisabled(target.body),
+        `chain reference "${id}" must name a declared, enabled group`,
+      ).toBe(true)
+    }
   })
 })

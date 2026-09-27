@@ -7,6 +7,7 @@
 set -u
 PROFILE_ROOT="${1:-$HOME/.dsh/profiles/web}"
 cd "$PROFILE_ROOT/packages" || exit 1
+ERRDIR="$(mktemp -d "${TMPDIR:-/tmp}/dsh-profile-build.XXXXXX")" || exit 1
 
 fail=0
 for dir in enpoi-*/; do
@@ -15,12 +16,13 @@ for dir in enpoi-*/; do
   if pnpm --dir "$pkg" exec esbuild src/index.ts \
       --bundle --format=esm --platform=node --target=node22 \
       --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* \
-      --outfile=lib/index.js --log-level=warning 2>"/tmp/opencode/build-$pkg.err"; then
+      --outfile=lib/index.js --log-level=warning 2>"$ERRDIR/build-$pkg.err"; then
     echo "OK   $pkg  ($(du -h "$pkg/lib/index.js" | cut -f1))"
   else
-    echo "FAIL $pkg  — see /tmp/opencode/build-$pkg.err"
-    sed -n '1,5p' "/tmp/opencode/build-$pkg.err"
+    echo "FAIL $pkg  — see $ERRDIR/build-$pkg.err"
+    sed -n '1,5p' "$ERRDIR/build-$pkg.err"
     fail=1
   fi
 done
+[ "$fail" = 0 ] && rm -rf "$ERRDIR"
 exit $fail

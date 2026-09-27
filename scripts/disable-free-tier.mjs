@@ -108,22 +108,26 @@ if (seatBody !== beforeSeat) {
 
 if (text !== original) writeFileSync(PATCH, text)
 
-// Verify the invariant on the final document, not on the intent.
+// Verify the invariant on the final document, not on the intent. The checks
+// accept any indentation, so a nested seat cannot slip past the guard in
+// packages/enpoi-capabilities/tests/profile-patch.spec.ts.
 const final = readFileSync(PATCH, 'utf8')
 const failures = []
-for (const chain of chainBlocks(final)) {
-  const enabled = !/^        disabled: true$/m.test(chain.body)
-  if (!enabled) continue
-  for (const link of chain.body.matchAll(/\n {10}- provider: (\S+)\n {12}model: (\S+)/g)) {
+const finalChains = chainBlocks(final)
+const finalDeclared = new Map(finalChains.map(chain => [chain.id, chain]))
+for (const chain of finalChains) {
+  if (/^[ \t]*disabled:[ \t]*true[ \t]*$/m.test(chain.body)) continue
+  for (const link of chain.body.matchAll(/^[ \t]*- provider: (\S+)\n[ \t]*model: (\S+)/gm)) {
     if (link[1] === 'opencode' && link[2].endsWith('-free')) {
       failures.push(`enabled chain ${chain.id} links gated free model ${link[2]}`)
     }
   }
 }
-for (const reference of final.matchAll(/^ {4,8}chain: (\S+)$/gm)) {
-  const target = chainBlocks(final).find(chain => chain.id === reference[1])
-  if (reference[1] === FREE_CHAIN || (target !== undefined && !/^        disabled: true$/m.test(target.body))) {
-    failures.push(`a seat still references chain ${reference[1]}`)
+for (const reference of final.matchAll(/^[ \t]*chain:[ \t]*(\S+?)[ \t]*(?:#.*)?$/gm)) {
+  const id = reference[1].replace(/^["']|["']$/g, '')
+  const target = finalDeclared.get(id)
+  if (target === undefined || /^[ \t]*disabled:[ \t]*true[ \t]*$/m.test(target.body)) {
+    failures.push(`a config still references unusable chain ${id}`)
   }
 }
 const finalSeat = final.slice(final.indexOf('\n- id: agent-default-model\n'))
