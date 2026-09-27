@@ -9,6 +9,7 @@ import {
   discoveredCachePath,
   fetchModels,
   isCatalogRoute,
+  mergeConfiguredModels,
   mergeDiscoveredModels,
   mergeDiscoveredRoute,
   normalizeListingEntry,
@@ -110,6 +111,38 @@ describe('discovered-cache records', () => {
     writeDiscoveredRoute('kilo', mergeDiscoveredRoute(record, 'https://kilo.test', mergeDiscoveredModels('kilo', [{ id: 'a' }], undefined), 9999))
     expect(readFileSync(discoveredCachePath(), 'utf8')).toBe(first)
     expect(JSON.parse(first).routes.kilo).toMatchObject({ fetchedAt: 1234, models: [{ id: 'a', source: 'discovered', discoveredAt: 1234 }] })
+  })
+})
+
+describe('configured-model merge', () => {
+  it('keeps a configured model the listing omits, marked with its provenance', () => {
+    const configured = [
+      { id: 'hand-added', name: 'Hand Added Model', contextWindow: 111_111, maxTokens: 222 },
+      { id: 'advertised', name: 'Stale Hand Name', contextWindow: 1, maxTokens: 1 },
+    ]
+    const merge = mergeConfiguredModels('kilo', configured, [{ id: 'advertised', input: ['text'], tools: true }], undefined)
+    expect(merge.unadvertised).toEqual(['hand-added'])
+    expect(merge.models.map(model => model.id)).toEqual(['hand-added', 'advertised'])
+    expect(merge.models[0]).toMatchObject({
+      id: 'hand-added', name: 'Hand Added Model', contextWindow: 111_111, maxTokens: 222, source: 'configured',
+    })
+    // The advertised entry was refreshed from the listing, and lost no provenance it never had.
+    expect(merge.models[1]).toMatchObject({ id: 'advertised', tools: true })
+    expect(merge.models[1]!.source).toBeUndefined()
+  })
+
+  it('appends live entries the configuration does not name, after the configured ones', () => {
+    const merge = mergeConfiguredModels('kilo', [{ id: 'kept' }], [{ id: 'kept' }, { id: 'new-one' }], undefined)
+    expect(merge.unadvertised).toEqual([])
+    expect(merge.models.map(model => model.id)).toEqual(['kept', 'new-one'])
+  })
+
+  it('keeps malformed configured rows and dedupes repeated ids', () => {
+    const merge = mergeConfiguredModels('kilo', [{ name: 'No id' }, { id: 'dup' }, { id: 'dup' }], [], undefined)
+    expect(merge.models).toHaveLength(2)
+    expect(merge.models[0]).toEqual({ name: 'No id' })
+    expect(merge.models[1]).toMatchObject({ id: 'dup', source: 'configured' })
+    expect(merge.unadvertised).toEqual(['dup'])
   })
 })
 

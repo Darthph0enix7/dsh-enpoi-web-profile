@@ -78042,13 +78042,37 @@ function analyzeModel(route, model, fallback) {
     }
   };
 }
-function mergeModels(route, live2, capacities) {
-  const enriched = [];
+function mergeConfiguredModels(route, configured, live2, capacities) {
+  const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
-    const fallback = fallbackFor(capacities, route, model.id);
-    enriched.push(analyzeModel(route, model, fallback).settings);
+    if (advertised.has(model.id)) continue;
+    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id)).settings);
   }
-  return enriched;
+  const models = [];
+  const unadvertised = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of configured ?? []) {
+    const id = typeof entry.id === "string" && entry.id !== "" ? entry.id : void 0;
+    if (id === void 0) {
+      models.push(entry);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const fresh = advertised.get(id);
+    if (fresh !== void 0) {
+      models.push(fresh);
+      continue;
+    }
+    models.push({ ...entry, source: "configured" });
+    unadvertised.push(id);
+  }
+  for (const [id, entry] of advertised) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    models.push(entry);
+  }
+  return { models, unadvertised };
 }
 function mergeDiscoveredModels(route, live2, capacities) {
   return live2.map((model) => {
@@ -78066,7 +78090,8 @@ function stringifyComparable(models) {
       reasoning: m2.reasoningEfforts ? Object.keys(m2.reasoningEfforts).sort() : null,
       tools: m2.tools ?? null,
       cost: m2.cost ?? null,
-      unverified: m2.unverified ?? null
+      unverified: m2.unverified ?? null,
+      source: m2.source ?? null
     }))
   );
 }
@@ -78091,6 +78116,7 @@ function apply(ctx, config) {
     const credentials = ctx.get("credentials");
     const revision = () => settings.describe().find((entry) => entry.ns === LLM_NS)?.revision;
     const routes = [.../* @__PURE__ */ new Set([...Object.keys(section.providers), ...Object.keys(endpoints)])];
+    const unadvertised = [];
     for (const route of routes) {
       const profile = section.providers[route];
       const baseURL = endpoints[route] ?? profile?.baseURL;
@@ -78114,16 +78140,17 @@ function apply(ctx, config) {
       try {
         const live2 = await fetchModels(baseURL, key);
         if (profile !== void 0) {
-          const merged = mergeModels(route, live2, capacities);
+          const merge = mergeConfiguredModels(route, profile.models, live2, capacities);
+          unadvertised.push(...merge.unadvertised.map((id) => `${route}/${id}`));
           const before = stringifyComparable(profile.models);
-          const after = stringifyComparable(merged);
+          const after = stringifyComparable(merge.models);
           if (before === after) {
             logger.debug(`route ${route}: ${String(live2.length)} live models, no change`);
           } else {
             for (let attempt = 0; ; attempt++) {
               try {
-                await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", route, "models"], value: merged }], revision());
-                logger.info(`route ${route}: catalog refreshed & enriched from models.dev \u2014 ${String(live2.length)} live models`);
+                await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", route, "models"], value: merge.models }], revision());
+                logger.info(`route ${route}: catalog merged & enriched from models.dev \u2014 ${String(live2.length)} live models (${String(merge.unadvertised.length)} configured kept)`);
                 break;
               } catch (error) {
                 const conflict = error;
@@ -78156,6 +78183,12 @@ function apply(ctx, config) {
         logger.warn(describeSyncFailure(route, error));
       }
     }
+    if (unadvertised.length > 0) {
+      process.stderr.write(
+        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their endpoint this pass \u2014 kept with source: "configured": ${unadvertised.join(", ")}
+`
+      );
+    }
   }
   const delay = value(config.syncDelayMs) ?? 2e3;
   const interval = value(config.intervalMs) ?? 36e5;
@@ -78184,6 +78217,7 @@ export {
   fetchModels,
   inject,
   isCatalogRoute,
+  mergeConfiguredModels,
   mergeDiscoveredModels,
   mergeDiscoveredRoute,
   name,

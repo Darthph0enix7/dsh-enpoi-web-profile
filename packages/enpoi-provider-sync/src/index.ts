@@ -16,6 +16,8 @@
  * - Tool-calling and price metadata (models.dev `tool_call` / `cost`) consumed
  *   by the dynamic catalogue rules (dsh-enpoi-catalog-rules predicates).
  * - Live hot-swap into runtime memory without restarting the server.
+ * - A configured model the endpoint does not advertise is KEPT, stamped
+ *   `source: 'configured'`, instead of being dropped on the next pass.
  *
  * @module dsh-enpoi-provider-sync
  */
@@ -896,18 +898,62 @@ function analyzeModel(
   }
 }
 
-/** Merge a live listing into the route's current entries, enriching every model. */
-function mergeModels(
+/** One route's merged model list plus the configured ids the listing omitted. */
+export interface ConfiguredMerge {
+  /** Configured entries first (updated in place), then newly advertised entries. */
+  models: Array<Record<string, unknown>>
+  /** Configured ids the live listing did not advertise this pass. */
+  unadvertised: string[]
+}
+
+/**
+ * Merge a live listing into a route's configured `models` instead of
+ * replacing them wholesale: an advertised id is refreshed from the listing,
+ * an id the listing omits is kept exactly as configured and stamped
+ * `source: 'configured'` so a hand-added model survives every pass, and a
+ * live id the configuration does not name is appended.
+ * @param route - provider route key, for models.dev scoping.
+ * @param configured - the route's current `models` array, when any.
+ * @param live - normalized live listing entries.
+ * @param capacities - the route's capacity fallbacks.
+ * @returns the merged list and the configured ids nothing advertised.
+ */
+export function mergeConfiguredModels(
   route: string,
+  configured: Array<Record<string, unknown>> | undefined,
   live: LiveModel[],
   capacities: Record<string, RouteCapacity> | undefined,
-): Array<Record<string, unknown>> {
-  const enriched: Array<Record<string, unknown>> = []
+): ConfiguredMerge {
+  const advertised = new Map<string, Record<string, unknown>>()
   for (const model of live) {
-    const fallback = fallbackFor(capacities, route, model.id)
-    enriched.push(analyzeModel(route, model, fallback).settings)
+    if (advertised.has(model.id)) continue
+    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id)).settings)
   }
-  return enriched
+  const models: Array<Record<string, unknown>> = []
+  const unadvertised: string[] = []
+  const seen = new Set<string>()
+  for (const entry of configured ?? []) {
+    const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined
+    if (id === undefined) {
+      models.push(entry)
+      continue
+    }
+    if (seen.has(id)) continue
+    seen.add(id)
+    const fresh = advertised.get(id)
+    if (fresh !== undefined) {
+      models.push(fresh)
+      continue
+    }
+    models.push({ ...entry, source: 'configured' })
+    unadvertised.push(id)
+  }
+  for (const [id, entry] of advertised) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    models.push(entry)
+  }
+  return { models, unadvertised }
 }
 
 /** Merge a live listing into the discovered-cache records, without provenance stamps. */
@@ -933,6 +979,7 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       tools: m.tools ?? null,
       cost: m.cost ?? null,
       unverified: m.unverified ?? null,
+      source: m.source ?? null,
     })),
   )
 }
@@ -971,6 +1018,8 @@ export function apply(ctx: Context, config: Config): void {
     // models. A catalog-less route is never written to settings unless it is
     // configured; the cache is its only home.
     const routes = [...new Set([...Object.keys(section.providers), ...Object.keys(endpoints)])]
+    /** Configured ids no endpoint advertised this pass, warned once at the end. */
+    const unadvertised: string[] = []
 
     for (const route of routes) {
       const profile: ProviderProfile | undefined = section.providers[route]
@@ -1002,16 +1051,17 @@ export function apply(ctx: Context, config: Config): void {
       try {
         const live = await fetchModels(baseURL, key)
         if (profile !== undefined) {
-          const merged = mergeModels(route, live, capacities)
+          const merge = mergeConfiguredModels(route, profile.models, live, capacities)
+          unadvertised.push(...merge.unadvertised.map(id => `${route}/${id}`))
           const before = stringifyComparable(profile.models)
-          const after = stringifyComparable(merged)
+          const after = stringifyComparable(merge.models)
           if (before === after) {
             logger.debug(`route ${route}: ${String(live.length)} live models, no change`)
           } else {
             for (let attempt = 0; ; attempt++) {
               try {
-                await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', route, 'models'], value: merged }], revision())
-                logger.info(`route ${route}: catalog refreshed & enriched from models.dev — ${String(live.length)} live models`)
+                await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', route, 'models'], value: merge.models }], revision())
+                logger.info(`route ${route}: catalog merged & enriched from models.dev — ${String(live.length)} live models (${String(merge.unadvertised.length)} configured kept)`)
                 break
               } catch (error) {
                 const conflict = error as Partial<SettingsConflictError>
@@ -1047,6 +1097,13 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         logger.warn(describeSyncFailure(route, error))
       }
+    }
+    // One line per pass, not one per entry: the operator needs to know the
+    // working set is no longer purely endpoint-derived, without a wall of lines.
+    if (unadvertised.length > 0) {
+      process.stderr.write(
+        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their endpoint this pass — kept with source: "configured": ${unadvertised.join(', ')}\n`,
+      )
     }
   }
 

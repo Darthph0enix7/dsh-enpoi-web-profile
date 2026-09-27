@@ -10,16 +10,17 @@
  *   ctx.get('catalogRules').expandSelector(selector) // group selector → links
  *   ctx.get('catalogRules').previewRulesChange(raw)  // before/after edit diff
  *
- * Rules are evaluated fresh on every settings update; the engine never writes
- * settings and never deletes catalogue entries (hide ≠ delete). All warnings
- * go to stderr — this harness's logger drops info/warn, so stderr is the
- * observable channel.
+ * Rules are evaluated fresh on every settings update; the engine writes only
+ * its derived `catalogRules.resolved` decision map (never the rules document)
+ * and never deletes catalogue entries (hide ≠ delete). All warnings go to
+ * stderr — this harness's logger drops info/warn, so stderr is the observable
+ * channel.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
-  diffRules, evaluateVisibility, isGated, isRecord, parseRulesDocument, resolvePrivacy, withHiddenPins,
+  buildResolvedVisibility, diffRules, evaluateVisibility, isGated, isRecord, parseRulesDocument, resolvePrivacy, withHiddenPins,
   type CatalogEntry, type ParsedRules, type RulesDiff, type VisibilityDecision, type VisibilityReport,
 } from './rules.ts'
 import { expandSelector, parseGroupSelector, type GroupSelector, type SelectorExpansion } from './selectors.ts'
@@ -32,6 +33,21 @@ export const inject = ['settings']
 
 /** Namespace that owns `catalogRules` (declared by enpoi-capabilities). */
 const ORCH_NS = 'enpoi-orchestration'
+
+/** One settings set-operation; structural subset of the settings seam. */
+interface SettingsPathOp {
+  op: 'set'
+  path: string[]
+  value?: unknown
+}
+
+/** The settings write seam the resolved-map publisher probes for. */
+interface SettingsPublisher {
+  /** Revision-fenced namespace write (0.1.7+). */
+  mutate?: (ns: string, ops: readonly SettingsPathOp[], expectedRevision?: number) => Promise<void>
+  /** Descriptor set carrying each namespace's current revision. */
+  describe?: () => ReadonlyArray<{ ns: string; revision?: number }>
+}
 
 /** The service contract consumers call through `ctx.get('catalogRules')`. */
 export interface CatalogRulesService {
@@ -159,12 +175,53 @@ export function apply(ctx: Context): void {
       process.stderr.write(`[enpoi-catalog-rules] ${warning}\n`)
     }
   }
+  /**
+   * Publish the compact resolved map the picker reads under
+   * `catalogRules.resolved`. Reads stay the only input to the engine; this is
+   * the one derived write, skipped when the document already carries the same
+   * map (a write's own settings update refreshes the engine but republishes
+   * nothing, so the loop terminates).
+   */
+  let lastPublished: string | undefined
+  const publishResolved = async (): Promise<void> => {
+    const writer = ctx.get('settings') as SettingsPublisher | undefined
+    if (writer?.mutate === undefined) return
+    const document = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const rules = document?.catalogRules
+    const current = isRecord(rules) ? rules.resolved : undefined
+    const next = buildResolvedVisibility(engine.visibility().decisions)
+    const serialized = JSON.stringify(next)
+    if (serialized === lastPublished) return
+    if (JSON.stringify(current ?? null) === serialized) {
+      lastPublished = serialized
+      return
+    }
+    const revision = writer.describe?.().find(entry => entry.ns === ORCH_NS)?.revision
+    // Claim the map before the first await so a settings event raised by this
+    // very write cannot queue a duplicate publish.
+    lastPublished = serialized
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await writer.mutate(ORCH_NS, [{ op: 'set', path: ['catalogRules', 'resolved'], value: next }], revision)
+        return
+      } catch (error) {
+        const conflict = error as { code?: string }
+        if ((conflict?.code === 'SETTINGS_CONFLICT' || conflict?.code === 'settings/conflict') && attempt < 2) continue
+        // A refused write must not block a later attempt after the next change.
+        lastPublished = undefined
+        process.stderr.write(`[enpoi-catalog-rules] resolved map publish failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        return
+      }
+    }
+  }
   ctx.provide('catalogRules', engine)
   emitWarnings()
+  void publishResolved()
   const onNamespaceChange = ((ns: unknown) => {
     if (String(ns) !== ORCH_NS && String(ns) !== 'llm-pi-ai') return
     engine.refresh()
     emitWarnings()
+    void publishResolved()
   }) as (...args: unknown[]) => unknown
   ctx.on('settings/document-updated', onNamespaceChange)
   ctx.on('settings/updated', onNamespaceChange)
@@ -172,9 +229,10 @@ export function apply(ctx: Context): void {
 }
 
 export {
-  diffRules, evaluateVisibility, formatHiddenReason, parseRulesDocument, resolvePrivacy, withHiddenPins,
+  buildResolvedVisibility, diffRules, evaluateVisibility, formatHiddenReason, parseRulesDocument, resolvePrivacy, withHiddenPins,
   type CatalogEntry, type CatalogPredicate, type HideRule, type ModelOverrides, type ParsedRules,
-  type PrivacyOverrides, type PrivacyVerdict, type RulesDiff, type VisibilityDecision, type VisibilityReport,
+  type PrivacyOverrides, type PrivacyVerdict, type ResolvedVisibilityEntry, type RulesDiff,
+  type VisibilityDecision, type VisibilityReport,
 } from './rules.ts'
 export { expandSelector, parseGroupSelector, type GroupSelector, type SelectorExpansion, type SelectorMatch } from './selectors.ts'
 export { readCatalogue } from './catalogue.ts'

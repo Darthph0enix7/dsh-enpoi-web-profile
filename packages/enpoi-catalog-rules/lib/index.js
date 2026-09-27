@@ -334,6 +334,20 @@ function decideVisibility(entry, rules, privacy) {
 function formatHiddenReason(decision) {
   return decision.state === "hidden" ? decision.reason : null;
 }
+function buildResolvedVisibility(decisions) {
+  const resolved = {};
+  for (const decision of [...decisions].sort((left, right) => `${left.provider}/${left.model}`.localeCompare(`${right.provider}/${right.model}`))) {
+    if (decision.state === "visible" && decision.source !== "manual") continue;
+    resolved[`${decision.provider}/${decision.model}`] = {
+      state: decision.state,
+      reason: decision.reason,
+      source: decision.source,
+      ...decision.rule !== void 0 ? { rule: decision.rule } : {},
+      ...decision.overriddenRule !== void 0 ? { overriddenRule: decision.overriddenRule } : {}
+    };
+  }
+  return resolved;
+}
 function evaluateVisibility(entries, rules) {
   const decisions = [];
   for (const entry of entries) {
@@ -606,12 +620,44 @@ function apply(ctx) {
 `);
     }
   };
+  let lastPublished;
+  const publishResolved = async () => {
+    const writer = ctx.get("settings");
+    if (writer?.mutate === void 0) return;
+    const document = readOrchestrationDocument(ctx.get("settings"));
+    const rules = document?.catalogRules;
+    const current = isRecord(rules) ? rules.resolved : void 0;
+    const next = buildResolvedVisibility(engine.visibility().decisions);
+    const serialized = JSON.stringify(next);
+    if (serialized === lastPublished) return;
+    if (JSON.stringify(current ?? null) === serialized) {
+      lastPublished = serialized;
+      return;
+    }
+    const revision = writer.describe?.().find((entry) => entry.ns === ORCH_NS)?.revision;
+    lastPublished = serialized;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await writer.mutate(ORCH_NS, [{ op: "set", path: ["catalogRules", "resolved"], value: next }], revision);
+        return;
+      } catch (error) {
+        const conflict = error;
+        if ((conflict?.code === "SETTINGS_CONFLICT" || conflict?.code === "settings/conflict") && attempt < 2) continue;
+        lastPublished = void 0;
+        process.stderr.write(`[enpoi-catalog-rules] resolved map publish failed: ${error instanceof Error ? error.message : String(error)}
+`);
+        return;
+      }
+    }
+  };
   ctx.provide("catalogRules", engine);
   emitWarnings();
+  void publishResolved();
   const onNamespaceChange = ((ns) => {
     if (String(ns) !== ORCH_NS && String(ns) !== "llm-pi-ai") return;
     engine.refresh();
     emitWarnings();
+    void publishResolved();
   });
   ctx.on("settings/document-updated", onNamespaceChange);
   ctx.on("settings/updated", onNamespaceChange);
@@ -620,6 +666,7 @@ function apply(ctx) {
 export {
   CatalogRulesEngine,
   apply,
+  buildResolvedVisibility,
   diffRules,
   evaluateVisibility,
   expandSelector,

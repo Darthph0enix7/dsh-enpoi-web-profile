@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790538869277
+        checkedAt: 1790540232685
     personas:
       oracle:
         provider: opencode-go
@@ -140,6 +140,2936 @@
         attempts: 2
         onCut: failover
         disabled: true
+    catalogRules:
+      resolved:
+        antigravity/claude-opus-4-6-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/claude-sonnet-4-6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-2.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-2.5-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-2.5-flash-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-2.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3-flash-agent:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.1-flash-image:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.1-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.1-pro-high:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.1-pro-low:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.5-flash-extra-low:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.5-flash-low:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.6-flash-high:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.6-flash-low:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.6-flash-medium:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.6-flash-tiered:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        antigravity/gemini-3.7-flash-tiered:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/agnes-2.0-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/aion-2.0:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/aion-3.0:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/aion-3.0-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/aion-rp-llama-3.1-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/allam-2-7b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/aya-expanse-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/aya-vision-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/bazaarlink-auto:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/claude-haiku-4-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/claude-opus-4-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/claude-sonnet-4-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/codestral:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/codestral-2508:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-a:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-a-2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-a-reasoning:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-a-translate:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-a-vision:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-r:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-r-2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/command-r7b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/cydonia-24b-v4.3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/deepseek-r1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/deepseek-r1-distill-qwen-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/deepseek-v3.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/deepseek-v4-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/deepseek-v4-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/diffusiongemma-26b-a4b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/free-router:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/fusion:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-2.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-2.5-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-3-flash-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-3.1-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-3.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-3.5-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemini-3.6-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemma-4-26b-a4b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemma-4-26b-a4b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemma-4-26b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemma-4-31b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemma-4-31b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gemma-sea-lion-v4-27b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/glm-4.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/glm-4.6v-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/glm-4.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/glm-4.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/glm-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gpt-oss-120b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gpt-oss-20b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/gpt-oss-safeguard-20b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/granite-4.0-h-micro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/inkling:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/ising-calibration-1.5-31b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/kilo-auto:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/kimi-k2.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/kimi-k2.7-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/leanstral-1.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.1-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.1-8b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.2-11b-vision:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.2-1b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.2-3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.2-90b-vision:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.3-70b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.3-70b-fp8-fast:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-3.3-70b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-4-maverick:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-4-scout:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-guard-3-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-prompt-guard-2-22m:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-prompt-guard-2-86m:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/llama-sea-lion-v3-70b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mimo-v2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mimo-v2.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/minimax-m2.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/minimax-m3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/ministral-14b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/ministral-3-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-7b-instruct-v0.3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-large-3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-medium-3.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-nemo:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-small-3.1-24b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-small-3.2-24b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/mistral-small-4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/moondream-3.1-9b-a2b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-120b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-nano-30b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-nano-30b-reasoning:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-nano-omni-reasoning:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-super:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-super-120b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-ultra:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3-ultra-550b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/nemotron-3.5-content-safety:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/north-mini-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/poolside-laguna-s-2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/poolside-laguna-xs-2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen-sea-lion-v4-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen-sea-lion-v4.5-27b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen2.5-coder-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen2.5-vl-72b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-14b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-30b-a3b-fp8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-coder-30b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-coder-480b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-coder-next:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3-vl-235b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3.5-397b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3.5-397b-a17b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3.6-27b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3guard-gen-0.6b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwen3guard-gen-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/qwq-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        freellmapi/step-3.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/aisingapore/Gemma-SEA-LION-v4-27B-IT:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/aisingapore/Qwen-SEA-LION-v4-32B-IT:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/alpindale/WizardLM-2-8x22B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/baidu/ERNIE-4.5-VL-424B-A47B-Base-PT:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/aya-expanse-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/aya-vision-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/c4ai-command-a-03-2025:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/c4ai-command-r-08-2024:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/c4ai-command-r7b-12-2024:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/command-a-reasoning-08-2025:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/command-a-translate-08-2025:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/tiny-aya-earth:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/tiny-aya-fire:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/tiny-aya-global:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/CohereLabs/tiny-aya-water:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-R1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-R1-0528:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-R1-Distill-Llama-70B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-R1-Distill-Llama-8B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V3-0324:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V3.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V3.1-Terminus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V3.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V3.2-Exp:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V4-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V4-Flash-0731:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V4-Pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V4-Pro-0813:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/deepseek-ai/DeepSeek-V4.1-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/google/gemma-3-12b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/google/gemma-3-27b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/google/gemma-3-4b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/google/gemma-4-26B-A4B-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/google/gemma-4-31B-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/ibm-granite/granite-4.2-30b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/ibm-granite/granite-4.2-3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/ibm-granite/granite-4.2-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/inclusionAI/Ling-3.0-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/inclusionAI/Ling-3.0-flash-Fin:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/inclusionAI/Ling-3.0-flash-VL:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/meta-llama/Llama-3.1-8B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/meta-llama/Llama-3.3-70B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/meta-llama/Llama-4-Scout-17B-16E-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/meta-llama/Llama-Guard-4-12B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/meta-models/Muse-Glimmer-30B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/microsoft/phi-4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/MiniMaxAI/MiniMax-M1-80k:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/MiniMaxAI/MiniMax-M2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/MiniMaxAI/MiniMax-M2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/MiniMaxAI/MiniMax-M2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/MiniMaxAI/MiniMax-M2.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/MiniMaxAI/MiniMax-M3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/moonshotai/Kimi-K2-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/moonshotai/Kimi-K2-Instruct-0905:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/moonshotai/Kimi-K2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/moonshotai/Kimi-K2.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/moonshotai/Kimi-K2.7-Code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/moonshotai/Kimi-K3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/NousResearch/Hermes-3-Llama-3.1-70B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/openai/gpt-oss-120b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/openai/gpt-oss-20b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/openai/gpt-oss-safeguard-20b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/prism-ml/Ternary-Bonsai-27B-AWQ-4bit:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/prism-ml/Ternary-Bonsai-27B-gguf:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen2.5-72B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen2.5-Coder-32B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen2.5-Coder-3B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen2.5-Coder-7B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen2.5-VL-72B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-14B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-235B-A22B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-235B-A22B-Instruct-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-235B-A22B-Thinking-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-30B-A3B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-32B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-4B-Instruct-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-4B-Thinking-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-8B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-Coder-30B-A3B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-Coder-480B-A35B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-Coder-Next:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-Next-80B-A3B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-VL-235B-A22B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-VL-235B-A22B-Thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3-VL-30B-A3B-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.5-122B-A10B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.5-27B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.5-35B-A3B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.5-397B-A17B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.5-9B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.6-27B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.6-35B-A3B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.8-2.4T-A95B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Qwen/Qwen3.8-27B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Sao10K/L3-8B-Lunaris-v1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/Sao10K/L3-8B-Stheno-v3.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/speakleash/Bielik-11B-v3.0-Instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/stepfun-ai/Step-3.5-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/stepfun-ai/Step-3.7-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/swiss-ai/Apertus-70B-Instruct-2509:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/swiss-ai/Apertus-8B-Instruct-2509:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/swiss-ai/Apertus-v1.5-70B:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/tencent/Hy3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/tencent/Hy4-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/thinkingmachines/Inkling:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/thinkingmachines/Inkling-Small:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/XiaomiMiMo/MiMo-V2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/XiaomiMiMo/MiMo-V2.5-Pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/AutoGLM-Phone-9B-Multilingual:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4-32B-0414:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.5-Air:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.5V:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.5V-FP8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.6V:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.6V-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.6V-FP8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-4.7-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.1-FP8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.2-FP8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.3-BF16:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.3-Flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        huggingface/zai-org/GLM-5.3-Flash-BF16:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2.1-highspeed:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2.5-highspeed:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        minimax/MiniMax-M2.7-highspeed:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/deepseek-v4-flash-vision-exp:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/deepseek-v4-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/glm-5.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/glm-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/glm-5.3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/glm-5.3-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/gpt-5.6-luna:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/grok-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/hy3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/hy4-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/kimi-k2.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/kimi-k2.7-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/kimi-k3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/longcat-2.0:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/mimo-v2.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/minimax-m2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/minimax-m2.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/minimax-m3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/muse-spark-1.2-contributor:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/qwen3.6-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/qwen3.7-max:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/qwen3.7-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/qwen3.8-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode-go/qwen3.8-max:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/big-pickle:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-fable-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-fable-5-1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-haiku-4-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-opus-4-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-opus-4-6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-opus-4-7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-opus-4-8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-opus-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-sonnet-4-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-sonnet-4-6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/claude-sonnet-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/deepseek-v4-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/deepseek-v4-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gemini-3-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gemini-3.1-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gemini-3.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gemini-3.5-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gemini-3.6-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gemini-3.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/glm-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/glm-5.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/glm-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5-nano:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.1-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.1-codex-max:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.1-codex-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.2-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.3-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.3-codex-spark:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.4-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.4-nano:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.4-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.6-luna:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.6-sol:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/gpt-5.6-terra:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/grok-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/grok-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/grok-build-0.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/kimi-k2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/kimi-k2.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/kimi-k2.7-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/kimi-k3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/minimax-m2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/minimax-m2.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/minimax-m3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/muse-spark-1.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/nemotron-3-ultra-free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/qwen3.5-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        opencode/qwen3.6-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~anthropic/claude-fable-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~anthropic/claude-haiku-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~anthropic/claude-opus-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~anthropic/claude-sonnet-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~deepseek/deepseek-v4-flash-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~google/gemini-flash-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~google/gemini-pro-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~moonshotai/kimi-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~openai/gpt-mini-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~x-ai/grok-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/~z-ai/glm-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/aion-labs/aion-2.0:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/aion-labs/aion-3.0:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/aion-labs/aion-3.0-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/aion-labs/aion-rp-llama-3.1-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/amazon/nova-2-lite-v1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/amazon/nova-lite-v1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/amazon/nova-micro-v1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/amazon/nova-premier-v1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/amazon/nova-pro-v1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthracite-org/magnum-v4-72b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-fable-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-fable-5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-haiku-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-haiku-4.5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.1:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.6:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.7:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.8:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-4.8:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-opus-5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-4.5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-4.6:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/anthropic/claude-sonnet-5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/arcee-ai/trinity-large-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/baidu/ernie-4.5-vl-424b-a47b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance-seed/seed-1.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance-seed/seed-1.6-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance-seed/seed-2-1-turbo:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance-seed/seed-2.0-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance-seed/seed-2.0-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance-seed/seed-2.0-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/bytedance/ui-tars-1.5-7b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/cohere/command-a:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/cohere/command-r-08-2024:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/cohere/command-r-plus-08-2024:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/cohere/command-r7b-12-2024:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/cohere/north-mini-code:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-chat:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-chat-v3-0324:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-chat-v3.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-r1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-r1-0528:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-r1-distill-llama-70b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v3.1-terminus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v3.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v3.2-exp:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v4-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v4-flash-0731:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v4-flash-vision-exp:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v4-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/deepseek/deepseek-v4-pro-0813:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/dots-studio/dots-3-note-preview:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-flash-image:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-flash-lite:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-flash:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-pro-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-2.5-pro:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3-flash-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3-flash-preview:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3-pro-image:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3-pro-image-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-flash-image:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-flash-image-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-flash-lite-image:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-flash-lite-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-flash-lite:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-pro-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-pro-preview-customtools:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.1-pro-preview:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.5-flash-lite:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.5-flash-lite:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.5-flash:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.6-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.6-flash:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemini-3.7-flash:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-2-27b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-3-12b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-3-27b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-3-4b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-4-26b-a4b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-4-26b-a4b-it:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-4-31b-it:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/gemma-4-31b-it:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/lyria-3-clip-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/google/lyria-3-pro-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/gryphe/mythomax-l2-13b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/ibm-granite/granite-4.0-h-micro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/inception/mercury-2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/inclusionai/ling-3.0-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/inclusionai/ling-3.0-flash-fin:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/kwaipilot/kat-coder-pro-v2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/liquid/lfm-2.5-2.6b:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mancer/weaver:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meituan/longcat-2.0:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-3.1-70b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-3.1-8b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-3.2-1b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-3.2-3b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-3.3-70b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-4-maverick:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-4-scout:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta-llama/llama-guard-4-12b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta/muse-glimmer-30b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta/muse-spark-1.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta/muse-spark-1.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/meta/muse-spark-1.2-contributor:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/microsoft/phi-4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/microsoft/wizardlm-2-8x22b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-01:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m2-her:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m2.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/minimax/minimax-m3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/codestral-2508:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/codestral-2508:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/devstral-2512:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/ministral-14b-2512:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/ministral-3b-2512:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/ministral-8b-2512:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/ministral-8b-2512:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-large:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-large-2407:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-large-2512:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-large-2512:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-medium-3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-medium-3-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-medium-3-5:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-medium-3.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-medium-3.1:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-nemo:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-saba:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-small-24b-instruct-2501:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-small-2603:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-small-2603:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-small-3.1-24b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mistral-small-3.2-24b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/mixtral-8x22b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/mistralai/voxtral-small-24b-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k2-0905:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k2-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k2.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k2.7-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/moonshotai/kimi-k3:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/morph/morph-v3-fast:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/morph/morph-v3-large:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nousresearch/hermes-3-llama-3.1-405b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nousresearch/hermes-3-llama-3.1-70b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nousresearch/hermes-4-405b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3-nano-30b-a3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3-super-120b-a12b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3-super-120b-a12b:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3-ultra-550b-a55b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3-ultra-550b-a55b:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3.5-content-safety:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3.5-lightning:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/nvidia/nemotron-3.5-lightning:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-3.5-turbo:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-3.5-turbo-0613:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-3.5-turbo-16k:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-3.5-turbo-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4-turbo:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4.1-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4.1-nano:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4o:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4o-2024-05-13:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4o-2024-08-06:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4o-2024-11-20:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4o-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-4o-mini-2024-07-18:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5-image:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5-image-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5-nano:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.1-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.1-codex-max:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.1-codex-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.2-chat:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.2-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.2-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.3-codex:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.4-image-2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.4-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.4-nano:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.4-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.6-luna:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.6-luna-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.6-sol:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.6-sol-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.6-terra:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-5.6-terra-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-audio:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-audio-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-chat-latest:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-oss-120b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-oss-120b:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-oss-20b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-oss-20b:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/gpt-oss-safeguard-20b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o1-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o3-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o3-mini-high:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o3-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o4-mini:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openai/o4-mini-high:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openrouter/auto:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openrouter/auto-beta:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openrouter/bodybuilder:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openrouter/free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openrouter/fusion:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/openrouter/pareto-code:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/perceptron/perceptron-mk1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/perplexity/sonar:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/perplexity/sonar-deep-research:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/perplexity/sonar-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/perplexity/sonar-pro-search:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/perplexity/sonar-reasoning-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/poolside/laguna-s-2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/poolside/laguna-s-2.1:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/poolside/laguna-xs-2.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/poolside/laguna-xs-2.1:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen-2.5-72b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen-2.5-7b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen-2.5-coder-32b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen-plus-2025-07-28:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen2.5-vl-72b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-14b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-235b-a22b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-235b-a22b-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-235b-a22b-thinking-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-30b-a3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-30b-a3b-instruct-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-30b-a3b-thinking-2507:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-32b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-coder:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-coder-30b-a3b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-coder-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-coder-next:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-coder-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-max:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-max-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-next-80b-a3b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-next-80b-a3b-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-235b-a22b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-235b-a22b-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-30b-a3b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-30b-a3b-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-32b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-8b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3-vl-8b-thinking:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-122b-a10b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-27b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-35b-a3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-397b-a17b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-9b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-flash-02-23:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-plus-02-15:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.5-plus-20260420:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.6-27b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.6-35b-a3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.6-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.6-max-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.6-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.7-max:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.7-plus:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.8-2.4t-a95b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.8-27b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/qwen/qwen3.8-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/rekaai/reka-edge:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/rekaai/reka-flash-3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/relace/relace-apply-3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/relace/relace-search:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/sakana/fugu-ultra:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/sakana/sakana-namazu:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/sao10k/l3-lunaris-8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/sao10k/l3.1-euryale-70b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/sao10k/l3.3-euryale-70b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/stepfun/step-3.5-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/stepfun/step-3.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hunyuan-a13b-instruct:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hy-mt2-1.8b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hy-mt2-30b-a3b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hy-mt2-7b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hy3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hy3-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/tencent/hy4-preview:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thedrummer/cydonia-24b-v4.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thedrummer/skyfall-36b-v2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thedrummer/unslopnemo-12b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thinkingmachines/inkling:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thinkingmachines/inkling-small:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thinkingmachines/inkling-small:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/thinkingmachines/inkling:free:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/undi95/remm-slerp-l2-13b:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/upstage/solar-pro-3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/upstage/solar-pro4:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/writer/palmyra-x5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/x-ai/grok-4.20:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/x-ai/grok-4.20-multi-agent:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/x-ai/grok-4.3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/x-ai/grok-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/x-ai/grok-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/x-ai/grok-build-0.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/xiaomi/mimo-v2.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/xiaomi/mimo-v2.5-pro:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.5-air:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.5v:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.6:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.6v:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.7:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-4.7-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5-turbo:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5.1:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5.2:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5.3:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5.3-flash:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5.3-flash:batch:
+          state: hidden
+          reason: hidden manually
+          source: manual
+        openrouter/z-ai/glm-5v-turbo:
+          state: hidden
+          reason: hidden manually
+          source: manual
     parameters:
       council:
         maxDebateTokens: 180000
@@ -2026,8 +4956,8 @@
         api: anthropic-messages
         baseURL: http://100.122.163.25:8082
         models:
-          - id: gemini-3.1-pro-high
-            name: Gemini 3.1 Pro Preview
+          - id: gemini-3.5-flash-low
+            name: Gemini 3.5 Flash
             contextWindow: 1048576
             maxTokens: 65536
             input:
@@ -2036,102 +4966,10 @@
             reasoning: true
             tools: true
             cost:
-              input: 2
-              output: 12
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.6-flash-medium
-            name: Gemini 3.6 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.75
-              output: 3.75
+              input: 1.5
+              output: 9
             reasoningEfforts:
               minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.7-flash-tiered
-            name: Gemini 3.7 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.75
-              output: 3.75
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.5-flash-extra-low
-            name: Gemini 3.5 Flash Extra Low
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-            unverified: true
-          - id: gemini-3.5-flash-lite
-            name: Gemini 3.5 Flash Lite
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 2.5
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-2.5-flash-thinking
-            name: Gemini 2.5 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 2.5
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: gemini-pro-agent
-            name: Gemini Pro Latest
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 2
-              output: 12
-            reasoningEfforts:
               low: low
               medium: medium
               high: high
@@ -2154,38 +4992,23 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: gemini-3.5-flash-low
-            name: Gemini 3.5 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
+          - id: claude-opus-4-6-thinking
+            name: Claude Opus 4.6
+            contextWindow: 1000000
+            maxTokens: 128000
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 1.5
-              output: 9
+              input: 5
+              output: 25
             reasoningEfforts:
-              minimal: minimal
               low: low
               medium: medium
               high: high
-          - id: gemini-3.1-flash-image
-            name: Nano Banana 2
-            contextWindow: 131072
-            maxTokens: 32768
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: false
-            cost:
-              input: 0.5
-              output: 60
-            reasoningEfforts:
-              minimal: minimal
-              high: high
+              max: max
           - id: gemini-3.8-flash-tiered
             name: Gemini 3.8 Flash
             contextWindow: 1048576
@@ -2202,6 +5025,41 @@
               low: low
               medium: medium
               high: high
+          - id: gemini-pro-agent
+            name: Gemini Pro Latest
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 2
+              output: 12
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-2.5-flash-thinking
+            name: Gemini 2.5 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.3
+              output: 2.5
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
           - id: gemini-3.6-flash-low
             name: Gemini 3.6 Flash
             contextWindow: 1048576
@@ -2238,24 +5096,22 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: gemini-3-flash-agent
-            name: Gemini 3 Flash Preview
-            contextWindow: 1048576
-            maxTokens: 65536
+          - id: gemini-3.1-flash-image
+            name: Nano Banana 2
+            contextWindow: 131072
+            maxTokens: 32768
             input:
               - text
               - image
             reasoning: true
-            tools: true
+            tools: false
             cost:
               input: 0.5
-              output: 3
+              output: 60
             reasoningEfforts:
               minimal: minimal
-              low: low
-              medium: medium
               high: high
-          - id: gemini-3.1-pro-low
+          - id: gemini-3.1-pro-high
             name: Gemini 3.1 Pro Preview
             contextWindow: 1048576
             maxTokens: 65536
@@ -2271,24 +5127,7 @@
               low: low
               medium: medium
               high: high
-          - id: claude-opus-4-6-thinking
-            name: Claude Opus 4.6
-            contextWindow: 1000000
-            maxTokens: 128000
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 5
-              output: 25
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              max: max
-          - id: gemini-3.6-flash-high
+          - id: gemini-3.6-flash-medium
             name: Gemini 3.6 Flash
             contextWindow: 1048576
             maxTokens: 65536
@@ -2300,57 +5139,6 @@
             cost:
               input: 0.75
               output: 3.75
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: claude-sonnet-4-6
-            name: Claude Sonnet 4.6
-            contextWindow: 1000000
-            maxTokens: 128000
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 3
-              output: 15
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              max: max
-          - id: gemini-3.6-flash-tiered
-            name: Gemini 3.6 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.75
-              output: 3.75
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3-flash
-            name: Gemini 3 Flash Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.5
-              output: 3
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -2375,6 +5163,65 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: gemini-3.5-flash-extra-low
+            name: Gemini 3.5 Flash Extra Low
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: false
+            unverified: true
+          - id: gemini-3.6-flash-tiered
+            name: Gemini 3.6 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.75
+              output: 3.75
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3-flash-agent
+            name: Gemini 3 Flash Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.5
+              output: 3
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: claude-sonnet-4-6
+            name: Claude Sonnet 4.6
+            contextWindow: 1000000
+            maxTokens: 128000
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 3
+              output: 15
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              max: max
           - id: gemini-3.1-flash-lite
             name: Gemini 3.1 Flash Lite
             contextWindow: 1048576
@@ -2387,6 +5234,89 @@
             cost:
               input: 0.25
               output: 1.5
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3-flash
+            name: Gemini 3 Flash Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.5
+              output: 3
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.7-flash-tiered
+            name: Gemini 3.7 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.75
+              output: 3.75
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.1-pro-low
+            name: Gemini 3.1 Pro Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 2
+              output: 12
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.5-flash-lite
+            name: Gemini 3.5 Flash Lite
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.3
+              output: 2.5
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.6-flash-high
+            name: Gemini 3.6 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.75
+              output: 3.75
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -5834,7 +8764,7 @@
           - id: z-ai/glm-5.3
             name: GLM-5.3
             contextWindow: 1310720
-            maxTokens: 943717
+            maxTokens: 131072
             input:
               - text
             reasoning: true
@@ -12162,13 +15092,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: prism-ml/Ternary-Bonsai-27B-gguf
-            name: Prism Ml/Ternary Bonsai 27B Gguf
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
           - id: meta-models/Muse-Glimmer-30B
             name: Meta Models/Muse Glimmer 30B
             contextWindow: 262144
@@ -12176,6 +15099,13 @@
             input:
               - text
               - image
+            reasoning: false
+          - id: prism-ml/Ternary-Bonsai-27B-gguf
+            name: Prism Ml/Ternary Bonsai 27B Gguf
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
             reasoning: false
           - id: openai/gpt-oss-120b
             name: GPT OSS 120B
@@ -12295,6 +15225,17 @@
               low: low
               medium: medium
               high: high
+          - id: Qwen/Qwen3-Coder-Next
+            name: Qwen3-Coder-Next
+            contextWindow: 262144
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.2
+              output: 1.5
           - id: google/gemma-3-4b-it
             name: Gemma 3 4B IT
             contextWindow: 131072
@@ -12307,17 +15248,6 @@
             cost:
               input: 0.05
               output: 0.1
-          - id: Qwen/Qwen3-Coder-Next
-            name: Qwen3-Coder-Next
-            contextWindow: 262144
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.2
-              output: 1.5
           - id: deepseek-ai/DeepSeek-V4-Flash
             name: DeepSeek V4 Flash
             contextWindow: 1048576
@@ -12349,24 +15279,6 @@
               output: 2.501
             reasoningEfforts:
               high: high
-          - id: zai-org/GLM-5.2
-            name: GLM-5.2
-            contextWindow: 262144
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 1.4
-              output: 4.4
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
           - id: Qwen/Qwen3.6-27B
             name: Qwen3.6 27B
             contextWindow: 262144
@@ -12379,6 +15291,24 @@
             cost:
               input: 0.47
               output: 3.19
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-5.2
+            name: GLM-5.2
+            contextWindow: 262144
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 1.4
+              output: 4.4
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -12404,35 +15334,18 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: deepseek-ai/DeepSeek-V4-Pro
-            name: DeepSeek V4 Pro
-            contextWindow: 1048576
-            maxTokens: 393216
+          - id: swiss-ai/Apertus-v1.5-70B
+            name: Apertus v1.5 70B
+            contextWindow: 100000
+            maxTokens: 8192
             input:
               - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.435
-              output: 0.87
-            reasoningEfforts:
-              high: high
-              minimal: minimal
-              low: low
-              medium: medium
-              xhigh: xhigh
-              max: max
-          - id: Qwen/Qwen3-Coder-30B-A3B-Instruct
-            name: Qwen3-Coder 30B-A3B Instruct
-            contextWindow: 262144
-            maxTokens: 65536
-            input:
-              - text
+              - image
             reasoning: false
             tools: true
             cost:
-              input: 0.07
-              output: 0.26
+              input: 0.87
+              output: 3.1
           - id: thinkingmachines/Inkling
             name: Inkling
             contextWindow: 1048576
@@ -12450,6 +15363,35 @@
               medium: medium
               high: high
               minimal: minimal
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen3-Coder-30B-A3B-Instruct
+            name: Qwen3-Coder 30B-A3B Instruct
+            contextWindow: 262144
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.07
+              output: 0.26
+          - id: deepseek-ai/DeepSeek-V4-Pro
+            name: DeepSeek V4 Pro
+            contextWindow: 1048576
+            maxTokens: 393216
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.435
+              output: 0.87
+            reasoningEfforts:
+              high: high
+              minimal: minimal
+              low: low
+              medium: medium
               xhigh: xhigh
               max: max
           - id: MiniMaxAI/MiniMax-M3
@@ -12471,24 +15413,33 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-4.7-Flash
-            name: GLM-4.7-Flash
-            contextWindow: 200000
-            maxTokens: 128000
+          - id: Qwen/Qwen3-4B-Instruct-2507
+            name: Qwen3 4B Instruct
+            contextWindow: 32768
+            maxTokens: 32768
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0
-              output: 0
+              input: 0.2
+              output: 0.2
             reasoningEfforts:
-              minimal: minimal
               low: low
               medium: medium
               high: high
-              xhigh: xhigh
-              max: max
+          - id: Qwen/Qwen3-VL-30B-A3B-Instruct
+            name: Qwen3-VL 30B-A3B Instruct
+            contextWindow: 16384
+            maxTokens: 8192
+            input:
+              - text
+              - image
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.15
+              output: 0.55
           - id: XiaomiMiMo/MiMo-V2.5-Pro
             name: MiMo-V2.5-Pro
             contextWindow: 1048576
@@ -12507,33 +15458,24 @@
               xhigh: xhigh
               minimal: minimal
               max: max
-          - id: Qwen/Qwen3-VL-30B-A3B-Instruct
-            name: Qwen3-VL 30B-A3B Instruct
-            contextWindow: 16384
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.15
-              output: 0.55
-          - id: Qwen/Qwen3-4B-Instruct-2507
-            name: Qwen3 4B Instruct
-            contextWindow: 32768
-            maxTokens: 32768
+          - id: zai-org/GLM-4.7-Flash
+            name: GLM-4.7-Flash
+            contextWindow: 200000
+            maxTokens: 128000
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0.2
-              output: 0.2
+              input: 0
+              output: 0
             reasoningEfforts:
+              minimal: minimal
               low: low
               medium: medium
               high: high
+              xhigh: xhigh
+              max: max
           - id: thinkingmachines/Inkling-Small
             name: Inkling Small
             contextWindow: 524288
@@ -12564,6 +15506,17 @@
             cost:
               input: 0.06
               output: 0.2
+          - id: microsoft/phi-4
+            name: "Microsoft: Phi 4"
+            contextWindow: 16384
+            maxTokens: 14745
+            input:
+              - text
+            reasoning: false
+            tools: false
+            cost:
+              input: 0.07
+              output: 0.14
           - id: inclusionAI/Ling-3.0-flash-Fin
             name: "inclusionAI: Ling 3.0 Flash Fin"
             contextWindow: 262144
@@ -12577,17 +15530,6 @@
               output: 0.18
             reasoningEfforts:
               high: high
-          - id: microsoft/phi-4
-            name: "Microsoft: Phi 4"
-            contextWindow: 16384
-            maxTokens: 14745
-            input:
-              - text
-            reasoning: false
-            tools: false
-            cost:
-              input: 0.07
-              output: 0.14
           - id: Qwen/Qwen3.5-27B
             name: Qwen3.5 27B
             contextWindow: 262144
@@ -12655,24 +15597,6 @@
             cost:
               input: 0.59
               output: 0.79
-          - id: Sao10K/L3-8B-Stheno-v3.2
-            name: Sao10K Stheno 8b
-            contextWindow: 16384
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            tools: false
-            cost:
-              input: 0.2006
-              output: 0.2006
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
           - id: deepseek-ai/DeepSeek-V3.2
             name: DeepSeek-V3.2
             contextWindow: 163840
@@ -12738,55 +15662,17 @@
             cost:
               input: 0.67
               output: 0.67
-          - id: google/gemma-3-27b-it
-            name: Gemma 3 27B IT
+          - id: zai-org/GLM-4.5-Air
+            name: GLM-4.5-Air
             contextWindow: 131072
-            maxTokens: 131072
-            input:
-              - text
-              - image
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.08
-              output: 0.16
-          - id: deepseek-ai/DeepSeek-V4-Pro-0813
-            name: DeepSeek V4 Pro 0813
-            contextWindow: 1000000
-            maxTokens: 384000
+            maxTokens: 98304
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 1.32
-              output: 3.96
-            reasoningEfforts:
-              low: low
-              high: high
-              max: max
-              minimal: minimal
-              medium: medium
-              xhigh: xhigh
-          - id: Qwen/Qwen2.5-Coder-7B-Instruct
-            name: "Qwen: Qwen 2.5 Coder 7B Instruct"
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3.5-35B-A3B
-            name: Qwen3.5 35B-A3B
-            contextWindow: 262144
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.25
-              output: 2
+              input: 0.13
+              output: 0.85
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -12812,33 +15698,17 @@
               medium: medium
               xhigh: xhigh
               max: max
-          - id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-            name: Nemotron 3.5 Lightning 30B A3B
-            contextWindow: 8192
-            maxTokens: 4096
+          - id: Sao10K/L3-8B-Stheno-v3.2
+            name: Sao10K Stheno 8b
+            contextWindow: 16384
+            maxTokens: 8192
             input:
               - text
             reasoning: true
-            tools: true
+            tools: false
             cost:
-              input: 0.5
-              output: 0.5
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-          - id: zai-org/GLM-4.5-Air
-            name: GLM-4.5-Air
-            contextWindow: 131072
-            maxTokens: 98304
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.13
-              output: 0.85
+              input: 0.2006
+              output: 0.2006
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -12846,8 +15716,8 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
-            name: Deepseek AI/DeepSeek R1 Distill Qwen 7B
+          - id: zai-org/GLM-5.3-BF16
+            name: Zai Org/GLM 5.3 BF16
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -12878,8 +15748,80 @@
               medium: medium
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-5.3-BF16
-            name: Zai Org/GLM 5.3 BF16
+          - id: google/gemma-3-27b-it
+            name: Gemma 3 27B IT
+            contextWindow: 131072
+            maxTokens: 131072
+            input:
+              - text
+              - image
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.08
+              output: 0.16
+          - id: Qwen/Qwen3.5-35B-A3B
+            name: Qwen3.5 35B-A3B
+            contextWindow: 262144
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.25
+              output: 2
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen2.5-Coder-7B-Instruct
+            name: "Qwen: Qwen 2.5 Coder 7B Instruct"
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: deepseek-ai/DeepSeek-V4-Pro-0813
+            name: DeepSeek V4 Pro 0813
+            contextWindow: 1000000
+            maxTokens: 384000
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 1.32
+              output: 3.96
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+              minimal: minimal
+              medium: medium
+              xhigh: xhigh
+          - id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+            name: Nemotron 3.5 Lightning 30B A3B
+            contextWindow: 8192
+            maxTokens: 4096
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.5
+              output: 0.5
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+          - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+            name: Deepseek AI/DeepSeek R1 Distill Qwen 7B
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -12904,6 +15846,13 @@
             cost:
               input: 0.1
               output: 0.3
+          - id: swiss-ai/Apertus-8B-Instruct-2509
+            name: Swiss AI/Apertus 8B Instruct 2509
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
           - id: Qwen/Qwen3-Coder-480B-A35B-Instruct
             name: Qwen3-Coder-480B-A35B-Instruct
             contextWindow: 262144
@@ -12915,13 +15864,35 @@
             cost:
               input: 2
               output: 2
-          - id: swiss-ai/Apertus-8B-Instruct-2509
-            name: Swiss AI/Apertus 8B Instruct 2509
+          - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+            name: Nvidia/NVIDIA Nemotron 3 Ultra 550B A55B NVFP4
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
             reasoning: false
+          - id: Qwen/Qwen3-14B
+            name: Qwen 3 14b
+            contextWindow: 41000
+            maxTokens: 32768
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.08
+              output: 0.24
+          - id: Qwen/Qwen3-Next-80B-A3B-Instruct
+            name: Qwen3-Next-80B-A3B-Instruct
+            contextWindow: 262144
+            maxTokens: 66536
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.25
+              output: 1
           - id: deepseek-ai/DeepSeek-V3
             name: DeepSeek-V3
             contextWindow: 64000
@@ -12951,35 +15922,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: Qwen/Qwen3-Next-80B-A3B-Instruct
-            name: Qwen3-Next-80B-A3B-Instruct
-            contextWindow: 262144
-            maxTokens: 66536
-            input:
-              - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.25
-              output: 1
-          - id: Qwen/Qwen3-32B
-            name: Qwen3 32B
-            contextWindow: 131072
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.29
-              output: 0.59
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
           - id: moonshotai/Kimi-K2.6
             name: Kimi-K2.6
             contextWindow: 262144
@@ -12999,29 +15941,24 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: Qwen/Qwen2.5-VL-72B-Instruct
-            name: "Qwen: Qwen2.5 VL 72B Instruct"
-            contextWindow: 128000
-            maxTokens: 115200
+          - id: Qwen/Qwen3-32B
+            name: Qwen3 32B
+            contextWindow: 131072
+            maxTokens: 16384
             input:
               - text
-              - image
-            reasoning: false
-            tools: false
-            cost:
-              input: 0.8
-              output: 1
-          - id: Qwen/Qwen3-14B
-            name: Qwen 3 14b
-            contextWindow: 41000
-            maxTokens: 32768
-            input:
-              - text
-            reasoning: false
+            reasoning: true
             tools: true
             cost:
-              input: 0.08
-              output: 0.24
+              input: 0.29
+              output: 0.59
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
           - id: MiniMaxAI/MiniMax-M2.5
             name: MiniMax-M2.5
             contextWindow: 204800
@@ -13108,13 +16045,18 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
-            name: Nvidia/NVIDIA Nemotron 3 Ultra 550B A55B NVFP4
-            contextWindow: 262144
-            maxTokens: 8192
+          - id: Qwen/Qwen2.5-VL-72B-Instruct
+            name: "Qwen: Qwen2.5 VL 72B Instruct"
+            contextWindow: 128000
+            maxTokens: 115200
             input:
               - text
+              - image
             reasoning: false
+            tools: false
+            cost:
+              input: 0.8
+              output: 1
           - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
             name: Nemotron 3 Ultra 550B A55B
             contextWindow: 1000000
@@ -13175,17 +16117,44 @@
               minimal: minimal
               xhigh: xhigh
               max: max
-          - id: openai/gpt-oss-safeguard-20b
-            name: Safety GPT OSS 20B
+          - id: zai-org/GLM-4.6V-Flash
+            name: GLM-4.6V-Flash
             contextWindow: 131072
-            maxTokens: 65536
+            maxTokens: 32768
             input:
               - text
+              - image
             reasoning: true
             tools: true
             cost:
-              input: 0.075
-              output: 0.3
+              input: 0.3
+              output: 0.9
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/aya-expanse-32b
+            name: CohereLabs/Aya Expanse 32b
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: Qwen/Qwen3.5-397B-A17B
+            name: Qwen3.5-397B-A17B
+            contextWindow: 262144
+            maxTokens: 32768
+            input:
+              - text
+              - image
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.6
+              output: 3.6
             reasoningEfforts:
               low: low
               medium: medium
@@ -13193,14 +16162,6 @@
               minimal: minimal
               xhigh: xhigh
               max: max
-          - id: prism-ml/Ternary-Bonsai-27B-AWQ-4bit
-            name: Prism Ml/Ternary Bonsai 27B AWQ 4bit
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: false
           - id: deepseek-ai/DeepSeek-V3-0324
             name: DeepSeek V3 0324
             contextWindow: 163840
@@ -13224,19 +16185,23 @@
             cost:
               input: 0.3
               output: 1.5
-          - id: Qwen/Qwen3-235B-A22B-Instruct-2507
-            name: Qwen3 235B-A22B Instruct 2507
+          - id: zai-org/GLM-5.3-Flash-BF16
+            name: Zai Org/GLM 5.3 Flash BF16
             contextWindow: 262144
-            maxTokens: 16384
+            maxTokens: 8192
             input:
               - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.855
-              output: 2.565
-          - id: CohereLabs/aya-expanse-32b
-            name: CohereLabs/Aya Expanse 32b
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/tiny-aya-water
+            name: CohereLabs/Tiny Aya Water
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -13260,8 +16225,26 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: CohereLabs/tiny-aya-water
-            name: CohereLabs/Tiny Aya Water
+          - id: openai/gpt-oss-safeguard-20b
+            name: Safety GPT OSS 20B
+            contextWindow: 131072
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.075
+              output: 0.3
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              minimal: minimal
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/tiny-aya-fire
+            name: CohereLabs/Tiny Aya Fire
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -13274,32 +16257,32 @@
             input:
               - text
             reasoning: false
-          - id: CohereLabs/tiny-aya-fire
-            name: CohereLabs/Tiny Aya Fire
+          - id: Qwen/Qwen3-235B-A22B-Instruct-2507
+            name: Qwen3 235B-A22B Instruct 2507
+            contextWindow: 262144
+            maxTokens: 16384
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.855
+              output: 2.565
+          - id: prism-ml/Ternary-Bonsai-27B-AWQ-4bit
+            name: Prism Ml/Ternary Bonsai 27B AWQ 4bit
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: Qwen/Qwen2.5-Coder-3B-Instruct
+            name: "Qwen: Qwen 2.5 Coder 3B Instruct"
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
             reasoning: false
-          - id: zai-org/GLM-4.6V-Flash
-            name: GLM-4.6V-Flash
-            contextWindow: 131072
-            maxTokens: 32768
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 0.9
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
           - id: Sao10K/L3-8B-Lunaris-v1
             name: Sao10K/L3 8B Lunaris V1
             contextWindow: 262144
@@ -13314,21 +16297,18 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-5.3-Flash-BF16
-            name: Zai Org/GLM 5.3 Flash BF16
-            contextWindow: 262144
-            maxTokens: 8192
+          - id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
+            name: Llama 4 Maverick 17B FP8
+            contextWindow: 1048576
+            maxTokens: 16384
             input:
               - text
               - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
+            reasoning: false
+            tools: false
+            cost:
+              input: 0.2
+              output: 0.8
           - id: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
             name: DeepSeek R1 Distill Llama 70B
             contextWindow: 131072
@@ -13347,66 +16327,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: Qwen/Qwen2.5-Coder-3B-Instruct
-            name: "Qwen: Qwen 2.5 Coder 3B Instruct"
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: moonshotai/Kimi-K2-Instruct-0905
-            name: Kimi-K2-Instruct-0905
-            contextWindow: 262144
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 1
-              output: 3
-          - id: Qwen/Qwen3.5-397B-A17B
-            name: Qwen3.5-397B-A17B
-            contextWindow: 262144
-            maxTokens: 32768
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.6
-              output: 3.6
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              minimal: minimal
-              xhigh: xhigh
-              max: max
-          - id: deepseek-ai/DeepSeek-V3.2-Exp
-            name: DeepSeek V3.2 Exp
-            contextWindow: 163840
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-            tools: false
-            cost:
-              input: 0.28
-              output: 0.42
-          - id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
-            name: Llama 4 Maverick 17B FP8
-            contextWindow: 1048576
-            maxTokens: 16384
-            input:
-              - text
-              - image
-            reasoning: false
-            tools: false
-            cost:
-              input: 0.2
-              output: 0.8
           - id: Qwen/Qwen3-VL-235B-A22B-Thinking
             name: Qwen3 VL 235B A22B Thinking
             contextWindow: 131072
@@ -13426,42 +16346,35 @@
               minimal: minimal
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-4.7
-            name: GLM-4.7
-            contextWindow: 204800
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.6
-              output: 2.2
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: alpindale/WizardLM-2-8x22B
-            name: Alpindale/WizardLM 2 8x22B
+          - id: moonshotai/Kimi-K2-Instruct-0905
+            name: Kimi-K2-Instruct-0905
             contextWindow: 262144
-            maxTokens: 8192
+            maxTokens: 16384
             input:
               - text
             reasoning: false
-          - id: NousResearch/Hermes-3-Llama-3.1-70B
-            name: "Nous: Hermes 3 70B Instruct"
-            contextWindow: 131072
-            maxTokens: 16384
+            tools: true
+            cost:
+              input: 1
+              output: 3
+          - id: deepseek-ai/DeepSeek-V3.2-Exp
+            name: DeepSeek V3.2 Exp
+            contextWindow: 163840
+            maxTokens: 65536
             input:
               - text
             reasoning: false
             tools: false
             cost:
-              input: 0.7
-              output: 0.7
+              input: 0.28
+              output: 0.42
+          - id: CohereLabs/c4ai-command-r-08-2024
+            name: CohereLabs/C4ai Command R 08 2024
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
           - id: baidu/ERNIE-4.5-VL-424B-A47B-Base-PT
             name: Baidu/ERNIE 4.5 VL 424B A47B Base PT
             contextWindow: 262144
@@ -13470,141 +16383,6 @@
               - text
               - image
             reasoning: false
-          - id: CohereLabs/c4ai-command-r-08-2024
-            name: CohereLabs/C4ai Command R 08 2024
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen2.5-72B-Instruct
-            name: Qwen/Qwen2.5-72B-Instruct
-            contextWindow: 33000
-            maxTokens: 4000
-            input:
-              - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.59
-              output: 0.59
-          - id: Qwen/Qwen3-235B-A22B-Thinking-2507
-            name: Qwen3-235B-A22B-Thinking-2507
-            contextWindow: 262144
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 3
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: zai-org/GLM-4.5V
-            name: GLM-4.5V
-            contextWindow: 65536
-            maxTokens: 16384
-            input:
-              - text
-              - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.6
-              output: 1.8
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/c4ai-command-r7b-12-2024
-            name: CohereLabs/C4ai Command R7b 12 2024
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: zai-org/GLM-4-32B-0414
-            name: Zai Org/GLM 4 32B 0414
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: deepseek-ai/DeepSeek-V3.1
-            name: DeepSeek-V3.1
-            contextWindow: 131072
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.27
-              output: 1
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: zai-org/AutoGLM-Phone-9B-Multilingual
-            name: AutoGLM-Phone-9B-Multilingual
-            contextWindow: 65536
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: false
-            tools: false
-            cost:
-              input: 0.035
-              output: 0.138
-          - id: CohereLabs/c4ai-command-a-03-2025
-            name: CohereLabs/C4ai Command A 03 2025
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-235B-A22B
-            name: Qwen3 235B-A22B
-            contextWindow: 40960
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.2
-              output: 0.8
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: deepseek-ai/DeepSeek-V3.1-Terminus
-            name: DeepSeek V3.1 Terminus
-            contextWindow: 128000
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 0.25
-              output: 0.7
           - id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
             name: Deepseek AI/DeepSeek R1 Distill Llama 8B
             contextWindow: 262144
@@ -13619,42 +16397,32 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: CohereLabs/command-a-reasoning-08-2025
-            name: CohereLabs/Command A Reasoning 08 2025
+          - id: alpindale/WizardLM-2-8x22B
+            name: Alpindale/WizardLM 2 8x22B
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: MiniMaxAI/MiniMax-M1-80k
-            name: MiniMax M1 80K
-            contextWindow: 1000000
-            maxTokens: 131072
+            reasoning: false
+          - id: CohereLabs/c4ai-command-r7b-12-2024
+            name: CohereLabs/C4ai Command R7b 12 2024
+            contextWindow: 262144
+            maxTokens: 8192
             input:
               - text
             reasoning: false
-            tools: false
-            cost:
-              input: 0.6052
-              output: 2.4225
-          - id: zai-org/GLM-4.6
-            name: GLM-4.6
-            contextWindow: 204800
-            maxTokens: 131072
+          - id: zai-org/GLM-4.5V
+            name: GLM-4.5V
+            contextWindow: 65536
+            maxTokens: 16384
             input:
               - text
+              - image
             reasoning: true
             tools: true
             cost:
-              input: 0.55
-              output: 2.2
+              input: 0.6
+              output: 1.8
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -13676,35 +16444,47 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: CohereLabs/command-a-translate-08-2025
-            name: CohereLabs/Command A Translate 08 2025
+          - id: Qwen/Qwen2.5-72B-Instruct
+            name: Qwen/Qwen2.5-72B-Instruct
+            contextWindow: 33000
+            maxTokens: 4000
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.59
+              output: 0.59
+          - id: CohereLabs/c4ai-command-a-03-2025
+            name: CohereLabs/C4ai Command A 03 2025
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
             reasoning: false
-          - id: moonshotai/Kimi-K2-Instruct
-            name: Kimi-K2-Instruct
-            contextWindow: 131072
+          - id: zai-org/AutoGLM-Phone-9B-Multilingual
+            name: AutoGLM-Phone-9B-Multilingual
+            contextWindow: 65536
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: false
+            tools: false
+            cost:
+              input: 0.035
+              output: 0.138
+          - id: Qwen/Qwen3-235B-A22B
+            name: Qwen3 235B-A22B
+            contextWindow: 40960
             maxTokens: 16384
             input:
               - text
-            reasoning: false
-            tools: true
-            cost:
-              input: 1
-              output: 3
-          - id: zai-org/GLM-5.1
-            name: GLM-5.1
-            contextWindow: 202752
-            maxTokens: 131072
-            input:
-              - text
             reasoning: true
             tools: true
             cost:
-              input: 1
-              output: 3.2
+              input: 0.2
+              output: 0.8
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -13712,56 +16492,20 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: Qwen/Qwen3-4B-Thinking-2507
-            name: "Qwen: Qwen 3 4B Thinking 2507"
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/tiny-aya-global
-            name: CohereLabs/Tiny Aya Global
+          - id: zai-org/GLM-4-32B-0414
+            name: Zai Org/GLM 4 32B 0414
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
             reasoning: false
-          - id: MiniMaxAI/MiniMax-M2
-            name: MiniMax-M2
-            contextWindow: 204800
-            maxTokens: 131072
+          - id: CohereLabs/command-a-reasoning-08-2025
+            name: CohereLabs/Command A Reasoning 08 2025
+            contextWindow: 262144
+            maxTokens: 8192
             input:
               - text
             reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 1.2
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: MiniMaxAI/MiniMax-M2.7
-            name: MiniMax-M2.7
-            contextWindow: 204800
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 1.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -13787,6 +16531,175 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: Qwen/Qwen3-4B-Thinking-2507
+            name: "Qwen: Qwen 3 4B Thinking 2507"
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: MiniMaxAI/MiniMax-M1-80k
+            name: MiniMax M1 80K
+            contextWindow: 1000000
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: false
+            tools: false
+            cost:
+              input: 0.6052
+              output: 2.4225
+          - id: CohereLabs/command-a-translate-08-2025
+            name: CohereLabs/Command A Translate 08 2025
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: zai-org/GLM-4.6-FP8
+            name: Zai Org/GLM 4.6 FP8
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: NousResearch/Hermes-3-Llama-3.1-70B
+            name: "Nous: Hermes 3 70B Instruct"
+            contextWindow: 131072
+            maxTokens: 16384
+            input:
+              - text
+            reasoning: false
+            tools: false
+            cost:
+              input: 0.7
+              output: 0.7
+          - id: moonshotai/Kimi-K2-Instruct
+            name: Kimi-K2-Instruct
+            contextWindow: 131072
+            maxTokens: 16384
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 1
+              output: 3
+          - id: CohereLabs/tiny-aya-global
+            name: CohereLabs/Tiny Aya Global
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: zai-org/GLM-4.6
+            name: GLM-4.6
+            contextWindow: 204800
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.55
+              output: 2.2
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen3-235B-A22B-Thinking-2507
+            name: Qwen3-235B-A22B-Thinking-2507
+            contextWindow: 262144
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.3
+              output: 3
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: deepseek-ai/DeepSeek-V3.1
+            name: DeepSeek-V3.1
+            contextWindow: 131072
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.27
+              output: 1
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-4.7
+            name: GLM-4.7
+            contextWindow: 204800
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.6
+              output: 2.2
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-5.1
+            name: GLM-5.1
+            contextWindow: 202752
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 1
+              output: 3.2
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: deepseek-ai/DeepSeek-V3.1-Terminus
+            name: DeepSeek V3.1 Terminus
+            contextWindow: 128000
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: false
+            tools: true
+            cost:
+              input: 0.25
+              output: 0.7
           - id: zai-org/GLM-4.5V-FP8
             name: Zai Org/GLM 4.5V FP8
             contextWindow: 262144
@@ -13795,8 +16708,8 @@
               - text
               - image
             reasoning: false
-          - id: MiniMaxAI/MiniMax-M2.1
-            name: MiniMax-M2.1
+          - id: MiniMaxAI/MiniMax-M2
+            name: MiniMax-M2
             contextWindow: 204800
             maxTokens: 131072
             input:
@@ -13813,13 +16726,42 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-4.6-FP8
-            name: Zai Org/GLM 4.6 FP8
-            contextWindow: 262144
-            maxTokens: 8192
+          - id: zai-org/GLM-5.1-FP8
+            name: GLM-5.1 FP8
+            contextWindow: 202752
+            maxTokens: 16384
             input:
               - text
-            reasoning: false
+            reasoning: true
+            tools: true
+            cost:
+              input: 1.4
+              output: 4.4
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: MiniMaxAI/MiniMax-M2.7
+            name: MiniMax-M2.7
+            contextWindow: 204800
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.3
+              output: 1.2
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
           - id: zai-org/GLM-4.6V
             name: GLM 4.6V
             contextWindow: 131072
@@ -13839,24 +16781,17 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: aisingapore/Gemma-SEA-LION-v4-27B-IT
-            name: AIsingapore/Gemma SEA LION V4 27B IT
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: zai-org/GLM-5.1-FP8
-            name: GLM-5.1 FP8
-            contextWindow: 202752
-            maxTokens: 16384
+          - id: MiniMaxAI/MiniMax-M2.1
+            name: MiniMax-M2.1
+            contextWindow: 204800
+            maxTokens: 131072
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 1.4
-              output: 4.4
+              input: 0.3
+              output: 1.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -13864,21 +16799,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-4.6V-FP8
-            name: Zai Org/GLM 4.6V FP8
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: swiss-ai/Apertus-70B-Instruct-2509
-            name: Swiss AI/Apertus 70B Instruct 2509
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
           - id: zai-org/GLM-5.2-FP8
             name: GLM-5.2
             contextWindow: 393216
@@ -13897,13 +16817,20 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: CohereLabs/aya-vision-32b
-            name: CohereLabs/Aya Vision 32b
+          - id: zai-org/GLM-4.6V-FP8
+            name: Zai Org/GLM 4.6V FP8
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
               - image
+            reasoning: false
+          - id: aisingapore/Gemma-SEA-LION-v4-27B-IT
+            name: AIsingapore/Gemma SEA LION V4 27B IT
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
             reasoning: false
           - id: meta-llama/Llama-Guard-4-12B
             name: "Meta: Llama Guard 4 12B"
@@ -13917,6 +16844,21 @@
             cost:
               input: 0.18
               output: 0.18
+          - id: CohereLabs/aya-vision-32b
+            name: CohereLabs/Aya Vision 32b
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: swiss-ai/Apertus-70B-Instruct-2509
+            name: Swiss AI/Apertus 70B Instruct 2509
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
           - id: aisingapore/Qwen-SEA-LION-v4-32B-IT
             name: AIsingapore/Qwen SEA LION V4 32B IT
             contextWindow: 262144

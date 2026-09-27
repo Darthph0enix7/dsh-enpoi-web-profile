@@ -3,7 +3,9 @@
 Dynamic rule/filter engine for the synced model catalogue (doc 82 §E5). Rules
 are **data** in `enpoi-orchestration.catalogRules`; the engine reads them plus
 the hourly-synced `llm-pi-ai` catalogue and provides the `catalogRules` service.
-It never writes settings and never deletes catalogue entries — hide ≠ delete.
+It writes only the derived `catalogRules.resolved` decision map the picker
+reads (never the rules document) and never deletes catalogue entries —
+hide ≠ delete.
 
 ## Document
 
@@ -39,6 +41,16 @@ Manual hidden (the picker's `uiPreferences.hiddenModels` plus
 rules > default visible. The picker renders `decide()`'s `reason`, e.g.
 `hidden by rule: zero-price`, `gated`, `hidden manually`, or
 `pinned visible (rule: zero-price)`.
+
+## Published decisions
+
+On every refresh the engine republishes `catalogRules.resolved`: a
+`provider/model`-keyed map of `{ state, reason, source, rule?, overriddenRule? }`.
+Default-visible entries are omitted (absence = visible), so the map carries
+exactly what a client cannot derive: hidden entries with their reason, and
+manual pins with the rule or gate they override. The composer picker reads it
+through the settings document; manual hidden pins still filter client-side for
+0ms.
 
 ## Group selectors
 

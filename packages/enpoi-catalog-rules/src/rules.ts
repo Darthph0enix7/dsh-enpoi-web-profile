@@ -602,6 +602,47 @@ export function formatHiddenReason(decision: VisibilityDecision): string | null 
   return decision.state === 'hidden' ? decision.reason : null
 }
 
+/** One published picker decision: the engine's answer for one `provider/model`. */
+export interface ResolvedVisibilityEntry {
+  /** Whether the picker shows it. */
+  state: 'visible' | 'hidden'
+  /** Picker string, or null when visible by default. */
+  reason: string | null
+  /** Why: default, manual pin, hide rule, or gating. */
+  source: VisibilityDecision['source']
+  /** The rule text that hid it (`source === 'rule'`). */
+  rule?: string
+  /** The rule text a manual pin overrode, when applicable. */
+  overriddenRule?: string
+}
+
+/**
+ * Project the engine's decisions into the compact map the picker reads from
+ * `enpoi-orchestration.catalogRules.resolved`. Entries visible by default are
+ * omitted — absence means default-visible — so the map carries exactly the
+ * state a client cannot derive: hidden entries (with their reason) and manual
+ * pins (with the rule or gate they override).
+ * @param decisions - the report's per-entry decisions.
+ * @returns the serializable map, `provider/model` keyed, sorted for stability.
+ */
+export function buildResolvedVisibility(
+  decisions: readonly VisibilityDecision[],
+): Record<string, ResolvedVisibilityEntry> {
+  const resolved: Record<string, ResolvedVisibilityEntry> = {}
+  for (const decision of [...decisions].sort((left, right) =>
+    `${left.provider}/${left.model}`.localeCompare(`${right.provider}/${right.model}`))) {
+    if (decision.state === 'visible' && decision.source !== 'manual') continue
+    resolved[`${decision.provider}/${decision.model}`] = {
+      state: decision.state,
+      reason: decision.reason,
+      source: decision.source,
+      ...(decision.rule !== undefined ? { rule: decision.rule } : {}),
+      ...(decision.overriddenRule !== undefined ? { overriddenRule: decision.overriddenRule } : {}),
+    }
+  }
+  return resolved
+}
+
 /** Full visibility report over a catalogue snapshot. */
 export interface VisibilityReport {
   decisions: readonly VisibilityDecision[]
