@@ -1067,9 +1067,24 @@ function keeperProseRejection(text) {
   if (isMostlyMarkup(trimmed)) return "output is mostly markup";
   return null;
 }
+var KEEPER_SECTION_HEADERS_GLOBAL = /^[🎯📚🏛️🚫⚡]\s*/gm;
+var KEEPER_MIN_BRIEF_CHARS = 40;
+var KEEPER_MIN_BRIEF_SECTIONS = 1;
+var KEEPER_MIN_BRIEF_BULLETS = 1;
+function keeperBriefShapeRejection(text) {
+  const sections = text.match(KEEPER_SECTION_HEADERS_GLOBAL)?.length ?? 0;
+  if (sections < KEEPER_MIN_BRIEF_SECTIONS) return "brief has no section header";
+  const bullets = (text.match(/^\s*-\s+\S/gm) ?? []).length;
+  if (bullets < KEEPER_MIN_BRIEF_BULLETS) return "brief has no bullet content";
+  if (text.trim().length < KEEPER_MIN_BRIEF_CHARS) {
+    return `brief is below the minimum length (${KEEPER_MIN_BRIEF_CHARS} chars)`;
+  }
+  return null;
+}
 function cleanKeeperProse(text) {
   if (!text || text.trim().length === 0) return "";
   if (keeperProseRejection(text) !== null) return "";
+  if (keeperBriefShapeRejection(text) !== null) return "";
   const sectionChunks = text.split(/(?=^[🎯📚🏛️🚫⚡]\s*)/m);
   const cleaned = [];
   for (const chunk of sectionChunks) {
@@ -1085,7 +1100,8 @@ function cleanKeeperProse(text) {
       cleaned.push(trimmed);
     }
   }
-  return cleaned.join("\n\n");
+  const cleanedText = cleaned.join("\n\n");
+  return cleanedText.length < KEEPER_MIN_BRIEF_CHARS ? "" : cleanedText;
 }
 function splitClaims(text) {
   const idx = text.indexOf("CLAIMS:");
@@ -1324,7 +1340,8 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
       throw error;
     }
     if (!expectClaims && cleanKeeperProse(result.text).length === 0) {
-      throw new Error(`Output invalid/truncated on ${provider}/${model}: empty output after keeper cleaning`);
+      const reason = keeperProseRejection(result.text) ?? keeperBriefShapeRejection(result.text) ?? "empty output after keeper cleaning";
+      throw new Error(`Output invalid/truncated on ${provider}/${model}: ${reason}`);
     }
     return result.text;
   }
@@ -1445,6 +1462,7 @@ export {
   KEEPER_CACHE_CAP,
   KEEPER_MAX_OUTPUT_TOKENS,
   KEEPER_MESSAGE_KIND,
+  KEEPER_MIN_BRIEF_CHARS,
   KEEPER_ROUTE_FAILURE_THRESHOLD,
   KEEPER_ROUTE_QUARANTINE_MS,
   PREFETCH_DEBOUNCE_MS,
@@ -1460,6 +1478,7 @@ export {
   getKeeperBookkeeping,
   inject,
   keeperAttempts,
+  keeperBriefShapeRejection,
   keeperProseRejection,
   keeperRouteQuarantineRemaining,
   latestCheckpoint,

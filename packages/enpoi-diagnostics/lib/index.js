@@ -749,6 +749,12 @@ function attachSessionEvents(ctx, bus) {
   };
   ctx.on("session/event", listener);
 }
+function fiberFailureText(value) {
+  if (value === void 0 || value === null) return "no error captured";
+  const code = typeof value === "object" && value !== null && typeof value.code === "string" ? ` [${String(value.code)}]` : "";
+  if (value instanceof Error) return truncate(`${value.name}: ${value.message}${code}`, 300);
+  return truncate(`${String(value)}${code}`, 300);
+}
 function attachPluginLifecycle(ctx, bus) {
   const seen = /* @__PURE__ */ new WeakSet();
   ctx.on("internal/status", (fiber) => {
@@ -758,12 +764,15 @@ function attachPluginLifecycle(ctx, bus) {
       if (seen.has(fiber)) return;
       seen.add(fiber);
       const name2 = typeof fiber.name === "string" && fiber.name !== "" ? fiber.name : "unknown";
-      const text = `plugin failed to activate: ${name2}`;
+      const reason = fiberFailureText(fiber._error);
+      const text = `plugin fiber failed: ${name2}: ${reason}`;
+      process.stderr.write(`[enpoi-diagnostics] ${text}
+`);
       bus.push({
         severity: "error",
         source: "plugin",
         kind: "plugin-failed",
-        ...fingerprintIncident("plugin-failed", text, { plugin: name2 })
+        ...fingerprintIncident("plugin-failed", text, { plugin: name2, fiber: name2, error: reason })
       });
     } catch {
       bus.noteSelfFailure();

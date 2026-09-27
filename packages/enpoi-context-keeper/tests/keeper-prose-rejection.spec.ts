@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   cleanKeeperProse,
+  keeperBriefShapeRejection,
   keeperProseRejection,
   createBriefService,
   createCheckpointService,
@@ -137,6 +138,23 @@ describe('enpoi-context-keeper prose rejection (live-defect regression)', () => 
     expect(keeperProseRejection('<root><a>1</a><b>2</b><c>3</c><d>4</d><e>5</e></root>')).toBe('output is mostly markup')
   })
 
+  it('rejects a header-less landing (live defect 2026-09-27: probe-answer echo published as the brief)', () => {
+    const echo = 'F1=640\nF2=73\nF3=190\nF4=377\nF5=E6612\nF6=E9022\nF7=E1001\nF8=unknown\nF9=unknown\nF10=unknown'
+    expect(cleanKeeperProse(echo)).toBe('')
+    expect(keeperBriefShapeRejection(echo)).toBe('brief has no section header')
+  })
+
+  it('rejects a header-only landing and a one-line landing below the length floor', () => {
+    expect(cleanKeeperProse('🎯 ACTIVE GOAL & CORE TRAJECTORY:')).toBe('')
+    expect(keeperBriefShapeRejection('🎯 ACTIVE GOAL & CORE TRAJECTORY:')).toBe('brief has no bullet content')
+    expect(cleanKeeperProse('🎯 ACTIVE GOAL: ship it')).toBe('')
+    // A header + bullet that is still below the floor (a one-line landing).
+    expect(cleanKeeperProse('🎯 ACTIVE GOAL: ok\n- do it')).toBe('')
+    expect(keeperBriefShapeRejection('🎯 ACTIVE GOAL: ok\n- do it')).toContain('minimum length')
+    // A structurally complete brief above the floor still publishes.
+    expect(cleanKeeperProse(GOOD_PROSE)).toContain('ship the heart')
+  })
+
   it('keeps genuine prose (including harmless inline tags)', () => {
     expect(keeperProseRejection(GOOD_PROSE)).toBeNull()
     expect(cleanKeeperProse(GOOD_PROSE)).toContain('ship the heart')
@@ -177,6 +195,37 @@ describe('enpoi-context-keeper prose rejection → model-chain fallback', () => 
     expect(result.reason).toBe('failed')
     expect(callCount()).toBe(2) // primary + fallback both rejected
     expect(session.append).not.toHaveBeenCalled()
+  })
+
+  it('advances to the fallback route when the primary lands a one-line shape failure', async () => {
+    const oneLine = '🎯 ACTIVE GOAL: ship it'
+    const { ctx, callCount } = makeCtx((call) => (call === 1 ? oneLine : GOOD_PROSE))
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    const result = await service.ensureFreshBrief(session as never)
+
+    expect(result.ok).toBe(true)
+    expect(result.model).toBe('antigravity/gemini-3.7-flash-tiered')
+    expect(result.prose).toContain('ship the heart')
+    expect(callCount()).toBe(2)
+    const [type, payload] = session.append.mock.calls[0] as [string, { text: string }]
+    expect(type).toBe('brief/prose-updated')
+    expect(payload.text).not.toBe(oneLine)
+  })
+
+  it('falls back to the deterministic template when every route lands a one-line shape failure', async () => {
+    const { ctx } = makeCtx(() => '🎯 ACTIVE GOAL: ship it')
+    const service = createCheckpointService(ctx as never, baseConfig)
+    const session = sessionWithTurns(2)
+
+    const result = await service.ensureCheckpoint(session as never)
+
+    expect(result.ok).toBe(true)
+    const calls = (session.append.mock.calls as Array<[string, CheckpointData]>).filter((call) => call[0] === 'state/checkpoint')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]![1].via).toBe('template')
+    expect(calls[0]![1].text).not.toContain('ship it')
   })
 
   it('falls back to the deterministic checkpoint template when every route echoes garbage', async () => {

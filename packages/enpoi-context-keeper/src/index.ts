@@ -1594,15 +1594,53 @@ export function keeperProseRejection(text: string): string | null {
   return null
 }
 
+/** The five section headers the prose prompt requires a brief to be built from. */
+const KEEPER_SECTION_HEADERS_GLOBAL = /^[🎯📚🏛️🚫⚡]\s*/gm
+
+/** Minimum published-brief length in characters; a one-line landing is never a brief. */
+export const KEEPER_MIN_BRIEF_CHARS = 40
+/** Minimum recognized section headers a published brief must carry. */
+const KEEPER_MIN_BRIEF_SECTIONS = 1
+/** Minimum bullet content lines a published brief must carry. */
+const KEEPER_MIN_BRIEF_BULLETS = 1
+
+/**
+ * Structural floor for a publishable brief: at least one recognized section
+ * header, at least one bullet line, and at least {@link KEEPER_MIN_BRIEF_CHARS}
+ * characters. A probe echo, a header-only landing, or a one-line landing is
+ * never a brief, so the caller's route ladder (fail over → template) runs.
+ * @param text - raw model output before cleaning.
+ * @returns the rejection reason, or null when the landing has brief structure.
+ */
+export function keeperBriefShapeRejection(text: string): string | null {
+  const sections = text.match(KEEPER_SECTION_HEADERS_GLOBAL)?.length ?? 0
+  if (sections < KEEPER_MIN_BRIEF_SECTIONS) return 'brief has no section header'
+  const bullets = (text.match(/^\s*-\s+\S/gm) ?? []).length
+  if (bullets < KEEPER_MIN_BRIEF_BULLETS) return 'brief has no bullet content'
+  if (text.trim().length < KEEPER_MIN_BRIEF_CHARS) {
+    return `brief is below the minimum length (${KEEPER_MIN_BRIEF_CHARS} chars)`
+  }
+  return null
+}
+
 /**
  * Sanitize keeper prose by stripping sections that contain ONLY negative filler / boilerplate.
  * (e.g. "No documentation...", "No alternative approaches were debated...", "No blockers remain...").
  * Keeps the brief clean, meaningful, and token-efficient. Rejected outputs
- * (tool-call echoes / envelopes / markup blobs) clean to '' — never published.
+ * (tool-call echoes / envelopes / markup blobs / shape failures) clean to '' —
+ * never published.
+ *
+ * Live defect (2026-09-27, opencode-go/deepseek-v4.1-flash): a background
+ * prefetch landed the assistant's probe answer (`F1=640 … F10=unknown`, 87
+ * chars) with no section header at all; the splitter treated line 0 as a
+ * header and line 1 as content, so the echo was published as the Living Brief.
+ * A landing without brief structure (header, bullet, length) is never a brief:
+ * clean to '' (the caller advances the route and nothing is appended).
  */
 export function cleanKeeperProse(text: string): string {
   if (!text || text.trim().length === 0) return ''
   if (keeperProseRejection(text) !== null) return ''
+  if (keeperBriefShapeRejection(text) !== null) return ''
   const sectionChunks = text.split(/(?=^[🎯📚🏛️🚫⚡]\s*)/m)
   const cleaned: string[] = []
 
@@ -1631,7 +1669,10 @@ export function cleanKeeperProse(text: string): string {
     }
   }
 
-  return cleaned.join('\n\n')
+  const cleanedText = cleaned.join('\n\n')
+  // Cleaning can strip a long-but-filler-only landing below the floor; the
+  // published brief must still clear it.
+  return cleanedText.length < KEEPER_MIN_BRIEF_CHARS ? '' : cleanedText
 }
 
 /** Parse the CLAIMS block with per-claim source tags (A3.5: parse is isolated). */
@@ -1987,7 +2028,10 @@ export async function summarize(
     // 2026-09-26: a degraded route emitting only negative-filler sections
     // landed 0 chars and negative-cached without ever trying the next link).
     if (!expectClaims && cleanKeeperProse(result.text).length === 0) {
-      throw new Error(`Output invalid/truncated on ${provider}/${model}: empty output after keeper cleaning`)
+      const reason = keeperProseRejection(result.text)
+        ?? keeperBriefShapeRejection(result.text)
+        ?? 'empty output after keeper cleaning'
+      throw new Error(`Output invalid/truncated on ${provider}/${model}: ${reason}`)
     }
     return result.text
   }

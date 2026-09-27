@@ -362,7 +362,7 @@ function registerMemoryTools(ctx, db, pipeline) {
   });
   ctx.tools.register({
     name: "memory_confirm",
-    description: "Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action \u2014 use only on facts you or Adam verified.",
+    description: "Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action \u2014 use only on facts you or Adam verified. Facts saved with memory_save are already committed; confirmation applies to tentative chat-sourced claims.",
     parameters: {
       type: "object",
       properties: {
@@ -381,9 +381,19 @@ function registerMemoryTools(ctx, db, pipeline) {
     },
     isConcurrencySafe: () => true,
     async execute(args) {
-      const row = await pipeline.confirm(String(args.id ?? ""));
-      if (row === null) return { confirmed: false, note: "Unknown or already graduated fact." };
-      return { confirmed: true, id: row.id, state: row.state };
+      const id = String(args.id ?? "");
+      const row = await pipeline.confirm(id);
+      if (row !== null) return { confirmed: true, id: row.id, state: row.state };
+      const existing = pipeline.get(id);
+      if (existing !== void 0) {
+        return {
+          confirmed: false,
+          id: existing.id,
+          state: existing.state,
+          note: `Already ${existing.state}; confirmation applies only to tentative facts.`
+        };
+      }
+      return { confirmed: false, note: `Unknown fact id "${id}".` };
     }
   });
 }

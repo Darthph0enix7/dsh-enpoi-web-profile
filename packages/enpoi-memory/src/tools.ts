@@ -109,7 +109,7 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
 
   ctx.tools.register({
     name: 'memory_confirm',
-    description: 'Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action — use only on facts you or Adam verified.',
+    description: 'Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action — use only on facts you or Adam verified. Facts saved with memory_save are already committed; confirmation applies to tentative chat-sourced claims.',
     parameters: {
       type: 'object',
       properties: {
@@ -127,9 +127,21 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
     },
     isConcurrencySafe: () => true,
     async execute(args) {
-      const row = await pipeline.confirm(String(args.id ?? ''))
-      if (row === null) return { confirmed: false, note: 'Unknown or already graduated fact.' }
-      return { confirmed: true, id: row.id, state: row.state }
+      const id = String(args.id ?? '')
+      const row = await pipeline.confirm(id)
+      if (row !== null) return { confirmed: true, id: row.id, state: row.state }
+      // Distinguish the two no-op cases: an id that exists but is not
+      // tentative (memory_save lands committed) is not "unknown".
+      const existing = pipeline.get(id)
+      if (existing !== undefined) {
+        return {
+          confirmed: false,
+          id: existing.id,
+          state: existing.state,
+          note: `Already ${existing.state}; confirmation applies only to tentative facts.`,
+        }
+      }
+      return { confirmed: false, note: `Unknown fact id "${id}".` }
     },
   })
 }

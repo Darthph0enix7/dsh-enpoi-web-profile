@@ -1418,7 +1418,7 @@ async function surfacePending(ctx, client, noticesPath, pairing, participant, ta
         reason: askLabel(pairing.alias, sessionLabel, ask),
         signal
       });
-      decision = outcome === "allowed-always" ? "allowed-once" : outcome;
+      decision = outcome === "allowed-always" || outcome === "allowed-always-broad" ? "allowed-once" : outcome;
       record.surfaced = "approval";
     } catch {
       decision = "unsurfaced";
