@@ -135,9 +135,38 @@ function isExternalTarget(target: string): boolean {
   return /\b(web|http|npm|docs?|library|libraries|package|registry|external|api)\b/i.test(target)
 }
 
+/** One evidence request the broker child failed to answer with a parseable sheet. */
+export interface BrokerMiss {
+  req: EvidenceRequest
+  /** Named cause + received excerpt (the caller turns this into the next action). */
+  reason: string
+}
+
+/** A fact sheet the broker produced beyond the requested queue length. */
+export interface BrokerExcess {
+  /** 1-based SHEET number the broker used in its reply. */
+  sheet: number
+  /** Named reason + content excerpt — a discard is never silent. */
+  reason: string
+}
+
 export interface BrokerResult {
   sheets: number
   errors: string[]
+  /**
+   * Requests that produced no parseable sheet. The caller MUST NOT drop these:
+   * it re-queues them (bounded) and, at the bound, commits a named
+   * RETRIEVAL FAILED vault sheet — evidence is never silently absent.
+   */
+  missed: BrokerMiss[]
+  /**
+   * Sheets the broker emitted beyond the requested batch (queue length). They
+   * have no matching request; each one is named (sheet number + content
+   * excerpt) so the caller can surface the drop instead of swallowing it.
+   */
+  excess: BrokerExcess[]
+  /** Which role served the batch (used by the caller for failure placeholders). */
+  retrievedBy: 'explorer' | 'librarian'
 }
 
 /**
@@ -154,8 +183,9 @@ export async function serviceEvidenceQueue(
   signal: AbortSignal,
   timeoutMs: number,
 ): Promise<BrokerResult> {
-  if (queue.length === 0) return { sheets: 0, errors: [] }
+  if (queue.length === 0) return { sheets: 0, errors: [], missed: [], excess: [], retrievedBy: 'explorer' }
   const errors: string[] = []
+  const missed: BrokerMiss[] = []
   // Per-question budget: a batched child runs one research pass per question,
   // so the wait scales with the queue (a fixed timeout cut off 10-question
   // batches mid-flight — the operator-observed "we continued without the
@@ -188,12 +218,19 @@ export async function serviceEvidenceQueue(
     }, signal)
     const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs)
     const parsed = parseFactSheets(text)
+    const excerpt = clip(text.replace(/\s+/g, ' ').trim(), 140)
     let committed = 0
     for (let i = 0; i < queue.length; i++) {
       const sheet = parsed[i]
       if (sheet === undefined) {
-        errors.push(`${queue[i].ticket}: no fact sheet returned`)
-        councilDiag(`[broker] ${queue[i].ticket} FAILED: missing sheet ${i + 1}`)
+        const req = queue[i]
+        const reason = `broker returned no parseable fact sheet ${i + 1}/${queue.length} for "${clip(req.question, 90)}"`
+          + ` (reply carried no SHEET block: ${text.length} chars, "${excerpt}")`
+        errors.push(`${req.ticket}: ${reason}`)
+        missed.push({ req, reason })
+        // Name the failure loudly; the caller re-requests or commits a
+        // RETRIEVAL FAILED sheet — this is never a silent drop.
+        councilDiag(`[broker] ${req.ticket} MISSED sheet ${i + 1}/${queue.length}: ${reason}`)
         continue
       }
       vault.add({
@@ -206,12 +243,26 @@ export async function serviceEvidenceQueue(
       committed += 1
       councilDiag(`[broker] ${queue[i].ticket} satisfied via ${retrievedBy} (${sheet.citation})`)
     }
-    return { sheets: committed, errors }
+    // Sheets beyond the requested batch have no matching request. Name each
+    // one (sheet number + excerpt) instead of dropping it without a word.
+    const excess: BrokerExcess[] = []
+    for (let i = queue.length; i < parsed.length; i++) {
+      const sheet = parsed[i]
+      if (sheet === undefined) continue
+      const reason = `SHEET ${i + 1} exceeds the requested batch of ${queue.length} — no matching evidence request, so the sheet is dropped: "${clip(sheet.facts, 90)}"`
+      errors.push(`excess sheet ${i + 1}/${queue.length}: ${reason}`)
+      excess.push({ sheet: i + 1, reason })
+      councilDiag(`[broker] ${reason}`)
+    }
+    return { sheets: committed, errors, missed, excess, retrievedBy }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    for (const req of queue) errors.push(`${req.ticket}: ${msg}`)
+    for (const req of queue) {
+      errors.push(`${req.ticket}: broker batch failed: ${msg}`)
+      missed.push({ req, reason: `broker batch failed: ${msg}` })
+    }
     councilDiag(`[broker] batch FAILED: ${msg}`)
-    return { sheets: 0, errors }
+    return { sheets: 0, errors, missed, excess: [], retrievedBy }
   } finally {
     if (fiber !== undefined) {
       try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
@@ -219,23 +270,59 @@ export async function serviceEvidenceQueue(
   }
 }
 
+function clip(text: string, max: number): string {
+  const t = text.replace(/\s+/g, ' ').trim()
+  return t.length <= max ? t : `${t.slice(0, max)}…`
+}
+
 /** Parse ONE fact sheet (single-question responses). */
 export function parseFactSheet(text: string): { citation: string; facts: string; confidence: string } | null {
   return parseFactSheets(text)[0] ?? null
 }
 
-/** Parse a (possibly multi-sheet) broker response into ordered fact sheets. */
-export function parseFactSheets(text: string): Array<{ citation: string; facts: string; confidence: string }> {
+/**
+ * Split a broker reply at its numbered `SHEET n` headers, keeping the header
+ * with its block. Returns [] when no numbered header exists.
+ */
+function splitBySheetMarkers(plain: string): Array<{ index: number; block: string }> {
+  const marker = /^[^\S\n]*(?:[>#*+_-]+[^\S\n]*)*SHEET[^\S\n]+(\d+)\b[^\n]*$/gim
+  const found: Array<{ index: number; start: number }> = []
+  for (let m = marker.exec(plain); m !== null; m = marker.exec(plain)) {
+    found.push({ index: Number(m[1]), start: m.index })
+  }
+  return found.map((entry, i) => ({
+    index: entry.index,
+    block: plain.slice(entry.start, found[i + 1]?.start ?? plain.length),
+  }))
+}
+
+/**
+ * Parse a (possibly multi-sheet) broker response into ordered fact sheets.
+ *
+ * Primary shape: numbered `SHEET n` blocks — a sheet the child numbered is
+ * never lost just because its CITATION line drifted. Sheets are placed by
+ * their own number, so a missing sheet leaves an explicit hole (undefined)
+ * the caller reports by name instead of silently shifting answers.
+ * Fallback shape (no markers): split at CITATION lines, in order.
+ */
+export function parseFactSheets(text: string): Array<{ citation: string; facts: string; confidence: string } | undefined> {
   // Tolerate markdown bolding (**CITATION:** etc.) before matching.
   const plain = text.replace(/\*\*/g, '')
-  // Each sheet starts at its CITATION line; split there and parse in order.
+  const marked = splitBySheetMarkers(plain)
+  const results: Array<{ citation: string; facts: string; confidence: string } | undefined> = []
+  if (marked.length > 0) {
+    for (const { index, block } of marked) {
+      const sheet = parseOneSheet(block)
+      if (sheet !== null) results[index - 1] = sheet
+    }
+    return results
+  }
   const parts = plain.split(/(?=CITATION\s*[:=])/i).filter(p => /CITATION\s*[:=]/i.test(p))
-  const sheets: Array<{ citation: string; facts: string; confidence: string }> = []
   for (const part of parts) {
     const sheet = parseOneSheet(part)
-    if (sheet !== null) sheets.push(sheet)
+    if (sheet !== null) results.push(sheet)
   }
-  return sheets
+  return results
 }
 
 function parseOneSheet(text: string): { citation: string; facts: string; confidence: string } | null {
@@ -243,7 +330,11 @@ function parseOneSheet(text: string): { citation: string; facts: string; confide
   const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim()
   const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim()
   const confidence = plain.match(/CONFIDENCE\s*[:=]\s*(high|medium|low)/i)?.[1]?.toLowerCase()
-  if (!rawCitation || !facts) return null
+  // FACTS is the only irreducible part of a sheet. A missing CITATION is
+  // degraded to explicit unverified (the question still gets an answer), but
+  // a block with no FACTS is not a sheet at all.
+  if (!facts) return null
+  if (!rawCitation) return { citation: 'unverified (broker omitted citation)', facts, confidence: confidence ?? 'low' }
   // Placeholder citations (the model echoed the template) degrade to explicit
   // unverified instead of poisoning the vault with fake precision.
   const placeholder = /<file:line|url\s*—|— exact>|your citation/i.test(rawCitation)

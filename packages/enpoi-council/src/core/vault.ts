@@ -55,11 +55,6 @@ export class EvidenceVault {
     return createHash('sha256').update(`${target}::${question}`.toLowerCase()).digest('hex').slice(0, 16)
   }
 
-  findByFingerprint(fp: string): VaultEntry | undefined {
-    void fp
-    return undefined // fingerprints are kept by the broker queue, not the vault
-  }
-
   /** Render the vault (or a delta) as compact prompt text. */
   render(entries?: VaultEntry[]): string {
     const list = entries ?? this.all()

@@ -323,4 +323,90 @@ describe('fiber turn settlement (a flail ends with a reason)', () => {
     await expect(waitForSeatTurnDetailed(ctx as never, 'child-working', new AbortController().signal, 400))
       .rejects.toThrow(/timed out after 400ms .*never settled a turn/)
   })
+
+  /** Settled turn events for a registered child. */
+  const settledEvents = [
+    { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'prompt' }] } },
+    { type: 'assistant/message', seq: 2, data: { message: { content: [{ type: 'text', text: 'settled while registered' }] } } },
+    { type: 'turn/end', seq: 3, data: { reason: { kind: 'completed' } } },
+  ]
+
+  it('reads a settled turn from persistence while the child is STILL REGISTERED (latent-stall regression)', async () => {
+    // The old gate was `agents.get(childId) === undefined`, so an idle child
+    // whose fiber was still registered polled to the 90s deadline with its
+    // text sitting durable in persistence. It must now be read on settle.
+    let opens = 0
+    const ctx = {
+      agents: { get: () => ({ status: 'idle' }) },
+      get: (ns: string) => ns === 'sessionPersistence'
+        ? {
+            open: async () => {
+              opens += 1
+              return { read: async () => ({ events: settledEvents }), close: async () => undefined }
+            },
+          }
+        : undefined,
+    }
+    const turn = await waitForSeatTurnDetailed(ctx as never, 'child-registered', new AbortController().signal, 2000)
+    expect(turn.text).toBe('settled while registered')
+    expect(turn.truncated).toBe(false)
+    expect(opens).toBeGreaterThan(0)
+  })
+
+  it('does not probe persistence while the child is registered and running', async () => {
+    let opens = 0
+    const ctx = {
+      agents: { get: () => ({ status: 'running' }) },
+      get: (ns: string) => ns === 'sessionPersistence'
+        ? { open: async () => { opens += 1; return { read: async () => ({ events: settledEvents }), close: async () => undefined } } }
+        : undefined,
+    }
+    await expect(waitForSeatTurnDetailed(ctx as never, 'child-running', new AbortController().signal, 400))
+      .rejects.toThrow(/timed out after 400ms .*never settled a turn.*no persistence probe was attempted/)
+    expect(opens).toBe(0)
+  })
+
+  it('names a failing persistence probe when the wait still times out', async () => {
+    const ctx = {
+      agents: { get: () => ({ status: 'idle' }) },
+      get: (ns: string) => ns === 'sessionPersistence'
+        ? { open: async () => { throw new Error('store offline') } }
+        : undefined,
+    }
+    await expect(waitForSeatTurnDetailed(ctx as never, 'child-probe-error', new AbortController().signal, 400))
+      .rejects.toThrow(/last failed: store offline/)
+  })
+
+  it('bounds each persistence probe — a hung store is named, not waited on', async () => {
+    const ctx = {
+      agents: { get: () => ({ status: 'idle' }) },
+      get: (ns: string) => ns === 'sessionPersistence'
+        ? { open: () => new Promise<never>(() => { /* never resolves */ }) }
+        : undefined,
+    }
+    await expect(waitForSeatTurnDetailed(ctx as never, 'child-hang', new AbortController().signal, 700))
+      .rejects.toThrow(/last failed: session persistence open for child-hang timed out after \d+ms/)
+  })
+})
+
+describe('EvidenceVault', () => {
+  it('has no no-op fingerprint lookup — the dead stub stays deleted', async () => {
+    const { EvidenceVault } = await import('../src/core/vault.ts')
+    expect('findByFingerprint' in EvidenceVault.prototype).toBe(false)
+  })
+
+  it('keeps the real dedupe surface: question/citation lookups over live entries', async () => {
+    const { EvidenceVault } = await import('../src/core/vault.ts')
+    const vault = new EvidenceVault()
+    const entry = vault.add({
+      citation: 'src/core/vault.ts:1',
+      question: 'where is dedupe?',
+      factSheet: 'in the live-entry scans',
+      addedEpoch: 1,
+      retrievedBy: 'explorer',
+    })
+    expect(vault.get(entry.id)?.question).toBe('where is dedupe?')
+    expect(vault.hasLiveFor('src/core/vault.ts:1')).toBe(true)
+    expect(vault.since(1)).toHaveLength(1)
+  })
 })

@@ -26,6 +26,7 @@ import {
   type SeatTurn,
 } from './fiber.ts'
 import { EvidenceQueue, extractEvidenceRequests, serviceEvidenceQueue } from './broker.ts'
+import type { BrokerResult, EvidenceRequest } from './broker.ts'
 import { councilDenyList } from './fiber.ts'
 import { ChairOutputError, validateChairDeliverable } from './chair.ts'
 import { loadCouncilRegistry } from '../registry.ts'
@@ -123,6 +124,59 @@ export async function runCouncil(
     if (refereeNotes.length > MAX_REFEREE_NOTES) refereeNotes.shift()
   }
 
+  /**
+   * Broker flush with the honesty contract: a request the broker child did not
+   * answer with a parseable sheet is NEVER dropped. It is re-queued for the
+   * next boundary (bounded), and after BROKER_MAX_ATTEMPTS the vault receives
+   * a named RETRIEVAL FAILED sheet so no verdict, referee note, or chair
+   * sentence can silently argue around a fact nobody retrieved.
+   */
+  const BROKER_MAX_ATTEMPTS = 3
+  const brokerAttempts = new Map<string, number>()
+  const runBroker = async (reqs: EvidenceRequest[], epoch: number): Promise<BrokerResult> => {
+    const served = await serviceEvidenceQueue(ctx, parent, reqs, vault, epoch, signal, params.evidenceTimeoutMs)
+    const retry: EvidenceRequest[] = []
+    for (const miss of served.missed) {
+      const attempt = (brokerAttempts.get(miss.req.ticket) ?? 0) + 1
+      brokerAttempts.set(miss.req.ticket, attempt)
+      const named = `${miss.req.ticket}: ${miss.reason}`
+      if (attempt < BROKER_MAX_ATTEMPTS) {
+        retry.push(miss.req)
+        const line = `${named} — next action: re-request at epoch ${epoch + 1} (attempt ${attempt + 1}/${BROKER_MAX_ATTEMPTS})`
+        audit.push(`epoch ${epoch}: broker miss — ${line}`)
+        councilDiag(`[broker] ${line}`)
+        if (briefStall === '') briefStall = line
+      } else {
+        const line = `${named} — retrieval abandoned after ${attempt} attempts; the vault carries a RETRIEVAL FAILED sheet for the chair`
+        audit.push(`epoch ${epoch}: broker miss — ${line}`)
+        councilDiag(`[broker] ${line}`)
+        if (briefStall === '') briefStall = line
+        vault.add({
+          citation: `unretrieved (broker: ${miss.reason})`,
+          question: miss.req.question,
+          factSheet: `RETRIEVAL FAILED after ${attempt} attempts: evidence was requested but the broker child never returned a parseable fact sheet. Treat this as OPEN — do not assert it either way.\nCONFIDENCE: low`,
+          addedEpoch: epoch,
+          retrievedBy: served.retrievedBy,
+        })
+      }
+    }
+    if (retry.length > 0) queue.push(retry, vault)
+    return served
+  }
+
+  /**
+   * Round-event broker payload. `excess` counts sheets the broker returned
+   * beyond the requested batch and `excessReasons` names each drop — a
+   * misnumbered batch is visible on the event stream, never swallowed.
+   */
+  const brokerEvent = (b: BrokerResult) => ({
+    sheets: b.sheets,
+    missed: b.missed.length,
+    errors: b.errors.slice(0, 3),
+    excess: b.excess.length,
+    excessReasons: b.excess.map(e => e.reason).slice(0, 3),
+  })
+
   const emitRound = (epoch: number, extra: Record<string, unknown>) => {
     try {
       opts.onRound?.({ epoch, audit: extra })
@@ -156,14 +210,15 @@ export async function runCouncil(
     // ── Optional preflight: INVENTORY ONLY (never interpretation) ───────
     if (params.evidenceBroker && spec.preflightInventory) {
       try {
-        const res = await serviceEvidenceQueue(
-          ctx, parent,
+        const res = await runBroker(
           [{ ticket: 'EV-preflight', seatId: 'preflight', target: 'this repository', question: `Map the top-level modules, key entry points, and existing docs relevant to: ${query}` }],
-          vault, 0, signal, params.evidenceTimeoutMs,
+          0,
         )
-        audit.push(`preflight inventory: ${res.sheets} sheet(s)`)
+        audit.push(`preflight inventory: ${res.sheets} sheet(s)${res.missed.length > 0 ? ` — ${res.missed.length} missed (named; re-requested at epoch 2)` : ''}${res.excess.length > 0 ? ` — ${res.excess.length} excess sheet(s) beyond the batch (named)` : ''}`)
       } catch (err) {
-        councilDiag(`preflight failed (non-fatal): ${String(err)}`)
+        const msg = err instanceof Error ? err.message : String(err)
+        audit.push(`preflight inventory unavailable: ${msg} — proceeding without it`)
+        councilDiag(`preflight failed (non-fatal): ${msg}`)
       }
     }
 
@@ -207,11 +262,12 @@ export async function runCouncil(
 
       // Evidence requested during formulation is brokered BEFORE the ingest
       // pass (Oracle gate: blind-epoch requests were silently dropped).
+      let openingBroker: BrokerResult | null = null
       if (params.evidenceBroker) {
         for (const t of blindTurns.turns) queue.push(extractEvidenceRequests(t.seatId, 1, t.text), vault)
         if (queue.size > 0) {
-          const served = await serviceEvidenceQueue(ctx, parent, queue.drain(), vault, 1, signal, params.evidenceTimeoutMs)
-          audit.push(`opening broker: ${served.sheets} sheet(s)`)
+          openingBroker = await runBroker(queue.drain(), 1)
+          audit.push(`opening broker: ${openingBroker.sheets} sheet(s)${openingBroker.missed.length > 0 ? ` — ${openingBroker.missed.length} missed (named; re-requested)` : ''}${openingBroker.excess.length > 0 ? ` — ${openingBroker.excess.length} excess sheet(s) beyond the batch (named on the round event)` : ''}`)
         }
       }
 
@@ -256,7 +312,13 @@ export async function runCouncil(
         noteReferee(`ingest rejected ${ingest.applied.rejected.length} ruling(s): ${ingest.applied.rejected.slice(0, 4).join('; ')}`)
       }
       trackFlipRun(runtime, ledger.flipsInEpoch(1) + ingest.applied.admissions.length, false)
-      emitRound(1, { flips: ledger.flipsInEpoch(1), admissions: ingest.applied.admissions.length, applied: ingest.applied, phase: 'ingest' })
+      emitRound(1, {
+        flips: ledger.flipsInEpoch(1),
+        admissions: ingest.applied.admissions.length,
+        applied: ingest.applied,
+        phase: 'ingest',
+        ...(openingBroker !== null ? { broker: brokerEvent(openingBroker) } : {}),
+      })
       audit.push(`ingest: ${ingest.applied.admissions.length} admission(s)`)
     }
 
@@ -322,14 +384,14 @@ export async function runCouncil(
       runtime.tokens = totalTokens
 
       // 2. Evidence extraction + broker flush (BEFORE the referee — amendment #3).
+      let epochBroker: BrokerResult | null = null
       if (params.evidenceBroker) {
         for (const turn of round.turns) {
           queue.push(extractEvidenceRequests(turn.seatId, epoch, turn.text), vault)
         }
         if (queue.size > 0) {
-          const served = await serviceEvidenceQueue(ctx, parent, queue.drain(), vault, epoch, signal, params.evidenceTimeoutMs)
-          audit.push(`epoch ${epoch}: broker served ${served.sheets} sheet(s)${served.errors.length > 0 ? ` (${served.errors.length} errors)` : ''}`)
-          if (served.errors.length > 0 && briefStall === '') briefStall = served.errors[0]
+          epochBroker = await runBroker(queue.drain(), epoch)
+          audit.push(`epoch ${epoch}: broker served ${epochBroker.sheets} sheet(s)${epochBroker.missed.length > 0 ? ` (${epochBroker.missed.length} missed — named, re-request pending)` : ''}${epochBroker.excess.length > 0 ? ` (${epochBroker.excess.length} excess sheet(s) beyond the batch — named on the round event)` : ''}`)
         }
       }
 
@@ -421,6 +483,7 @@ export async function runCouncil(
         applied: referee.applied,
         scopeWarnings: referee.output.scopeWarnings,
         tokens: round.tokens,
+        ...(epochBroker !== null ? { broker: brokerEvent(epochBroker) } : {}),
       })
 
       // 5. Stopping.

@@ -433,10 +433,58 @@ export interface SeatTurnResult {
   truncated: boolean
 }
 
+/** Per-probe bound: a hung persistence store must not stall the seat wait. */
+const PERSISTENCE_PROBE_TIMEOUT_MS = 5_000
+/** Minimum gap between persistence probes while the child is still registered. */
+const PERSISTENCE_PROBE_INTERVAL_MS = 250
+
+/** Bound one persistence call so a wedged store fails loud, not silent. */
+async function withBoundedWait<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/** Read a child's persisted event log with open/read both time-bounded. */
+async function readPersistedEvents(
+  persistence: SessionPersistence,
+  childId: SessionId,
+  timeoutMs: number,
+): Promise<readonly SessionEvent[]> {
+  const handle = await withBoundedWait(
+    persistence.open(childId, 'read'),
+    timeoutMs,
+    `session persistence open for ${childId}`,
+  )
+  try {
+    const page = await withBoundedWait(
+      handle.read(0, undefined),
+      timeoutMs,
+      `session persistence read for ${childId}`,
+    )
+    return page.events
+  } finally {
+    try { await handle.close() } catch { /* best-effort close */ }
+  }
+}
+
 /**
  * Like {@link waitForSeatTurn} but also reports whether the turn ended at the
  * output-token cap — callers can resume the seat instead of arguing from a
  * silently truncated position.
+ *
+ * Persistence is probed when the child is gone OR while it is still registered
+ * but not running. The earlier `agent === undefined` gate missed
+ * SETTLED-BUT-STILL-REGISTERED children: their text was durable in persistence,
+ * but the wait polled to the 90s deadline instead of reading it.
  */
 export async function waitForSeatTurnDetailed(
   ctx: Context,
@@ -448,21 +496,41 @@ export async function waitForSeatTurnDetailed(
   const controller = new AbortController()
   const onAbort = () => controller.abort()
   signal.addEventListener('abort', onAbort, { once: true })
+  let probes = 0
+  let lastProbeError: string | undefined
+  let lastProbeAt = 0
   try {
     for (;;) {
       if (signal.aborted) throw new Error('council deliberation aborted')
-      if (Date.now() - started > timeoutMs) {
-        throw new Error(`council seat timed out after ${timeoutMs}ms (child ${childId} never settled a turn — no assistant text and no completed turn/end observed)`)
+      const elapsed = Date.now() - started
+      if (elapsed > timeoutMs) {
+        const probeNote = probes === 0
+          ? '; no persistence probe was attempted'
+          : lastProbeError !== undefined
+            ? `; ${probes} persistence probe(s), last failed: ${lastProbeError}`
+            : `; ${probes} persistence probe(s) saw no settled turn`
+        throw new Error(`council seat timed out after ${timeoutMs}ms (child ${childId} never settled a turn — no assistant text and no completed turn/end observed${probeNote})`)
       }
-      if (ctx.agents.get(childId as SessionId) === undefined) {
+      const agent = ctx.agents.get(childId as SessionId)
+      // Probe when the child is gone OR registered-but-not-running. `!==
+      // 'running'` (not `=== 'idle'`) also covers agents whose status is
+      // unobservable; a probe that finds no settled turn simply keeps polling.
+      const settledOrGone = agent === undefined || (agent as { status?: string }).status !== 'running'
+      if (settledOrGone && Date.now() - lastProbeAt >= PERSISTENCE_PROBE_INTERVAL_MS) {
+        lastProbeAt = Date.now()
         const persistence = ctx.get('sessionPersistence') as SessionPersistence | undefined
         if (persistence !== undefined) {
-          const handle = await persistence.open(childId as SessionId, 'read')
-          let events: readonly SessionEvent[]
+          probes += 1
+          let events: readonly SessionEvent[] = []
           try {
-            events = (await handle.read(0, undefined)).events
-          } finally {
-            await handle.close()
+            events = await readPersistedEvents(
+              persistence,
+              childId as SessionId,
+              Math.max(1, Math.min(PERSISTENCE_PROBE_TIMEOUT_MS, timeoutMs - elapsed)),
+            )
+            lastProbeError = undefined
+          } catch (err) {
+            lastProbeError = err instanceof Error ? err.message : String(err)
           }
           const lastUser = [...events].reverse().find(e => e.type === 'user/message')
           const since = lastUser === undefined ? 0 : lastUser.seq

@@ -305,26 +305,74 @@ async function followupSeatFiber(ctx, parent, fiber, promptText, signal, timeout
 async function waitForSeatTurn(ctx, childId, signal, timeoutMs = 9e4) {
   return (await waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs)).text;
 }
+var PERSISTENCE_PROBE_TIMEOUT_MS = 5e3;
+var PERSISTENCE_PROBE_INTERVAL_MS = 250;
+async function withBoundedWait(promise2, timeoutMs, what) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise2,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} timed out after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+}
+async function readPersistedEvents(persistence, childId, timeoutMs) {
+  const handle = await withBoundedWait(
+    persistence.open(childId, "read"),
+    timeoutMs,
+    `session persistence open for ${childId}`
+  );
+  try {
+    const page = await withBoundedWait(
+      handle.read(0, void 0),
+      timeoutMs,
+      `session persistence read for ${childId}`
+    );
+    return page.events;
+  } finally {
+    try {
+      await handle.close();
+    } catch {
+    }
+  }
+}
 async function waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs = 9e4) {
   const started = Date.now();
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   signal.addEventListener("abort", onAbort, { once: true });
+  let probes = 0;
+  let lastProbeError;
+  let lastProbeAt = 0;
   try {
     for (; ; ) {
       if (signal.aborted) throw new Error("council deliberation aborted");
-      if (Date.now() - started > timeoutMs) {
-        throw new Error(`council seat timed out after ${timeoutMs}ms (child ${childId} never settled a turn \u2014 no assistant text and no completed turn/end observed)`);
+      const elapsed = Date.now() - started;
+      if (elapsed > timeoutMs) {
+        const probeNote = probes === 0 ? "; no persistence probe was attempted" : lastProbeError !== void 0 ? `; ${probes} persistence probe(s), last failed: ${lastProbeError}` : `; ${probes} persistence probe(s) saw no settled turn`;
+        throw new Error(`council seat timed out after ${timeoutMs}ms (child ${childId} never settled a turn \u2014 no assistant text and no completed turn/end observed${probeNote})`);
       }
-      if (ctx.agents.get(childId) === void 0) {
+      const agent = ctx.agents.get(childId);
+      const settledOrGone = agent === void 0 || agent.status !== "running";
+      if (settledOrGone && Date.now() - lastProbeAt >= PERSISTENCE_PROBE_INTERVAL_MS) {
+        lastProbeAt = Date.now();
         const persistence = ctx.get("sessionPersistence");
         if (persistence !== void 0) {
-          const handle = await persistence.open(childId, "read");
-          let events;
+          probes += 1;
+          let events = [];
           try {
-            events = (await handle.read(0, void 0)).events;
-          } finally {
-            await handle.close();
+            events = await readPersistedEvents(
+              persistence,
+              childId,
+              Math.max(1, Math.min(PERSISTENCE_PROBE_TIMEOUT_MS, timeoutMs - elapsed))
+            );
+            lastProbeError = void 0;
+          } catch (err) {
+            lastProbeError = err instanceof Error ? err.message : String(err);
           }
           const lastUser = [...events].reverse().find((e) => e.type === "user/message");
           const since = lastUser === void 0 ? 0 : lastUser.seq;
@@ -20559,8 +20607,9 @@ function isExternalTarget(target) {
   return /\b(web|http|npm|docs?|library|libraries|package|registry|external|api)\b/i.test(target);
 }
 async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, timeoutMs) {
-  if (queue.length === 0) return { sheets: 0, errors: [] };
+  if (queue.length === 0) return { sheets: 0, errors: [], missed: [], excess: [], retrievedBy: "explorer" };
   const errors = [];
+  const missed = [];
   const waitMs = Math.max(timeoutMs, queue.length * 9e4);
   councilDiag(`[broker] servicing ${queue.length} evidence request(s) at epoch ${epoch} (batched: one child, wait ${Math.round(waitMs / 1e3)}s)`);
   const hasExternal = queue.some((req) => isExternalTarget(req.target));
@@ -20583,12 +20632,16 @@ async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, ti
     }, signal);
     const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
     const parsed = parseFactSheets(text);
+    const excerpt = clip(text.replace(/\s+/g, " ").trim(), 140);
     let committed = 0;
     for (let i = 0; i < queue.length; i++) {
       const sheet = parsed[i];
       if (sheet === void 0) {
-        errors.push(`${queue[i].ticket}: no fact sheet returned`);
-        councilDiag(`[broker] ${queue[i].ticket} FAILED: missing sheet ${i + 1}`);
+        const req = queue[i];
+        const reason = `broker returned no parseable fact sheet ${i + 1}/${queue.length} for "${clip(req.question, 90)}" (reply carried no SHEET block: ${text.length} chars, "${excerpt}")`;
+        errors.push(`${req.ticket}: ${reason}`);
+        missed.push({ req, reason });
+        councilDiag(`[broker] ${req.ticket} MISSED sheet ${i + 1}/${queue.length}: ${reason}`);
         continue;
       }
       vault.add({
@@ -20602,12 +20655,24 @@ CONFIDENCE: ${sheet.confidence}`,
       committed += 1;
       councilDiag(`[broker] ${queue[i].ticket} satisfied via ${retrievedBy} (${sheet.citation})`);
     }
-    return { sheets: committed, errors };
+    const excess = [];
+    for (let i = queue.length; i < parsed.length; i++) {
+      const sheet = parsed[i];
+      if (sheet === void 0) continue;
+      const reason = `SHEET ${i + 1} exceeds the requested batch of ${queue.length} \u2014 no matching evidence request, so the sheet is dropped: "${clip(sheet.facts, 90)}"`;
+      errors.push(`excess sheet ${i + 1}/${queue.length}: ${reason}`);
+      excess.push({ sheet: i + 1, reason });
+      councilDiag(`[broker] ${reason}`);
+    }
+    return { sheets: committed, errors, missed, excess, retrievedBy };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    for (const req of queue) errors.push(`${req.ticket}: ${msg}`);
+    for (const req of queue) {
+      errors.push(`${req.ticket}: broker batch failed: ${msg}`);
+      missed.push({ req, reason: `broker batch failed: ${msg}` });
+    }
     councilDiag(`[broker] batch FAILED: ${msg}`);
-    return { sheets: 0, errors };
+    return { sheets: 0, errors, missed, excess: [], retrievedBy };
   } finally {
     if (fiber !== void 0) {
       try {
@@ -20617,22 +20682,46 @@ CONFIDENCE: ${sheet.confidence}`,
     }
   }
 }
+function clip(text, max) {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length <= max ? t : `${t.slice(0, max)}\u2026`;
+}
+function splitBySheetMarkers(plain) {
+  const marker = /^[^\S\n]*(?:[>#*+_-]+[^\S\n]*)*SHEET[^\S\n]+(\d+)\b[^\n]*$/gim;
+  const found = [];
+  for (let m = marker.exec(plain); m !== null; m = marker.exec(plain)) {
+    found.push({ index: Number(m[1]), start: m.index });
+  }
+  return found.map((entry, i) => ({
+    index: entry.index,
+    block: plain.slice(entry.start, found[i + 1]?.start ?? plain.length)
+  }));
+}
 function parseFactSheets(text) {
   const plain = text.replace(/\*\*/g, "");
+  const marked = splitBySheetMarkers(plain);
+  const results = [];
+  if (marked.length > 0) {
+    for (const { index, block } of marked) {
+      const sheet = parseOneSheet(block);
+      if (sheet !== null) results[index - 1] = sheet;
+    }
+    return results;
+  }
   const parts = plain.split(/(?=CITATION\s*[:=])/i).filter((p) => /CITATION\s*[:=]/i.test(p));
-  const sheets = [];
   for (const part of parts) {
     const sheet = parseOneSheet(part);
-    if (sheet !== null) sheets.push(sheet);
+    if (sheet !== null) results.push(sheet);
   }
-  return sheets;
+  return results;
 }
 function parseOneSheet(text) {
   const plain = text.replace(/\*\*/g, "");
   const rawCitation = plain.match(/CITATION\s*[:=]\s*(.+)/i)?.[1]?.trim();
   const facts = plain.match(/FACTS\s*[:=]\s*([\s\S]*?)(?:CONFIDENCE\s*[:=]|$)/i)?.[1]?.trim();
   const confidence = plain.match(/CONFIDENCE\s*[:=]\s*(high|medium|low)/i)?.[1]?.toLowerCase();
-  if (!rawCitation || !facts) return null;
+  if (!facts) return null;
+  if (!rawCitation) return { citation: "unverified (broker omitted citation)", facts, confidence: confidence ?? "low" };
   const placeholder = /<file:line|url\s*—|— exact>|your citation/i.test(rawCitation);
   const citation = placeholder ? "unverified (broker echoed template)" : rawCitation;
   return { citation, facts, confidence: placeholder ? "low" : confidence ?? "medium" };
@@ -21061,10 +21150,6 @@ var EvidenceVault = class {
   static fingerprint(question, target) {
     return createHash2("sha256").update(`${target}::${question}`.toLowerCase()).digest("hex").slice(0, 16);
   }
-  findByFingerprint(fp) {
-    void fp;
-    return void 0;
-  }
   /** Render the vault (or a delta) as compact prompt text. */
   render(entries) {
     const list = entries ?? this.all();
@@ -21108,6 +21193,46 @@ async function runCouncil(ctx, parent, opts) {
     refereeNotes.push(clipped);
     if (refereeNotes.length > MAX_REFEREE_NOTES) refereeNotes.shift();
   };
+  const BROKER_MAX_ATTEMPTS = 3;
+  const brokerAttempts = /* @__PURE__ */ new Map();
+  const runBroker = async (reqs, epoch) => {
+    const served = await serviceEvidenceQueue(ctx, parent, reqs, vault, epoch, signal, params.evidenceTimeoutMs);
+    const retry = [];
+    for (const miss of served.missed) {
+      const attempt = (brokerAttempts.get(miss.req.ticket) ?? 0) + 1;
+      brokerAttempts.set(miss.req.ticket, attempt);
+      const named = `${miss.req.ticket}: ${miss.reason}`;
+      if (attempt < BROKER_MAX_ATTEMPTS) {
+        retry.push(miss.req);
+        const line = `${named} \u2014 next action: re-request at epoch ${epoch + 1} (attempt ${attempt + 1}/${BROKER_MAX_ATTEMPTS})`;
+        audit.push(`epoch ${epoch}: broker miss \u2014 ${line}`);
+        councilDiag(`[broker] ${line}`);
+        if (briefStall === "") briefStall = line;
+      } else {
+        const line = `${named} \u2014 retrieval abandoned after ${attempt} attempts; the vault carries a RETRIEVAL FAILED sheet for the chair`;
+        audit.push(`epoch ${epoch}: broker miss \u2014 ${line}`);
+        councilDiag(`[broker] ${line}`);
+        if (briefStall === "") briefStall = line;
+        vault.add({
+          citation: `unretrieved (broker: ${miss.reason})`,
+          question: miss.req.question,
+          factSheet: `RETRIEVAL FAILED after ${attempt} attempts: evidence was requested but the broker child never returned a parseable fact sheet. Treat this as OPEN \u2014 do not assert it either way.
+CONFIDENCE: low`,
+          addedEpoch: epoch,
+          retrievedBy: served.retrievedBy
+        });
+      }
+    }
+    if (retry.length > 0) queue.push(retry, vault);
+    return served;
+  };
+  const brokerEvent = (b) => ({
+    sheets: b.sheets,
+    missed: b.missed.length,
+    errors: b.errors.slice(0, 3),
+    excess: b.excess.length,
+    excessReasons: b.excess.map((e) => e.reason).slice(0, 3)
+  });
   const emitRound = (epoch, extra) => {
     try {
       opts.onRound?.({ epoch, audit: extra });
@@ -21137,18 +21262,15 @@ async function runCouncil(ctx, parent, opts) {
     const briefText = getLivingBriefText(ctx, parent);
     if (params.evidenceBroker && spec.preflightInventory) {
       try {
-        const res = await serviceEvidenceQueue(
-          ctx,
-          parent,
+        const res = await runBroker(
           [{ ticket: "EV-preflight", seatId: "preflight", target: "this repository", question: `Map the top-level modules, key entry points, and existing docs relevant to: ${query}` }],
-          vault,
-          0,
-          signal,
-          params.evidenceTimeoutMs
+          0
         );
-        audit.push(`preflight inventory: ${res.sheets} sheet(s)`);
+        audit.push(`preflight inventory: ${res.sheets} sheet(s)${res.missed.length > 0 ? ` \u2014 ${res.missed.length} missed (named; re-requested at epoch 2)` : ""}${res.excess.length > 0 ? ` \u2014 ${res.excess.length} excess sheet(s) beyond the batch (named)` : ""}`);
       } catch (err) {
-        councilDiag(`preflight failed (non-fatal): ${String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        audit.push(`preflight inventory unavailable: ${msg} \u2014 proceeding without it`);
+        councilDiag(`preflight failed (non-fatal): ${msg}`);
       }
     }
     const openingPrompt = (seatPersonaGate) => [
@@ -21185,11 +21307,12 @@ ${spec.scopeContract}` : "",
         audit.push(`opening: ${t.seatId} ${t.tokens}t`);
         lastActive.set(t.seatId, 0);
       }
+      let openingBroker = null;
       if (params.evidenceBroker) {
         for (const t of blindTurns.turns) queue.push(extractEvidenceRequests(t.seatId, 1, t.text), vault);
         if (queue.size > 0) {
-          const served = await serviceEvidenceQueue(ctx, parent, queue.drain(), vault, 1, signal, params.evidenceTimeoutMs);
-          audit.push(`opening broker: ${served.sheets} sheet(s)`);
+          openingBroker = await runBroker(queue.drain(), 1);
+          audit.push(`opening broker: ${openingBroker.sheets} sheet(s)${openingBroker.missed.length > 0 ? ` \u2014 ${openingBroker.missed.length} missed (named; re-requested)` : ""}${openingBroker.excess.length > 0 ? ` \u2014 ${openingBroker.excess.length} excess sheet(s) beyond the batch (named on the round event)` : ""}`);
         }
       }
       ledger.setEpoch(1);
@@ -21229,7 +21352,13 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
         noteReferee(`ingest rejected ${ingest.applied.rejected.length} ruling(s): ${ingest.applied.rejected.slice(0, 4).join("; ")}`);
       }
       trackFlipRun(runtime, ledger.flipsInEpoch(1) + ingest.applied.admissions.length, false);
-      emitRound(1, { flips: ledger.flipsInEpoch(1), admissions: ingest.applied.admissions.length, applied: ingest.applied, phase: "ingest" });
+      emitRound(1, {
+        flips: ledger.flipsInEpoch(1),
+        admissions: ingest.applied.admissions.length,
+        applied: ingest.applied,
+        phase: "ingest",
+        ...openingBroker !== null ? { broker: brokerEvent(openingBroker) } : {}
+      });
       audit.push(`ingest: ${ingest.applied.admissions.length} admission(s)`);
     }
     let epoch = 1;
@@ -21288,14 +21417,14 @@ ${directives[seat.id]}` : "",
       }
       totalTokens += round.tokens;
       runtime.tokens = totalTokens;
+      let epochBroker = null;
       if (params.evidenceBroker) {
         for (const turn of round.turns) {
           queue.push(extractEvidenceRequests(turn.seatId, epoch, turn.text), vault);
         }
         if (queue.size > 0) {
-          const served = await serviceEvidenceQueue(ctx, parent, queue.drain(), vault, epoch, signal, params.evidenceTimeoutMs);
-          audit.push(`epoch ${epoch}: broker served ${served.sheets} sheet(s)${served.errors.length > 0 ? ` (${served.errors.length} errors)` : ""}`);
-          if (served.errors.length > 0 && briefStall === "") briefStall = served.errors[0];
+          epochBroker = await runBroker(queue.drain(), epoch);
+          audit.push(`epoch ${epoch}: broker served ${epochBroker.sheets} sheet(s)${epochBroker.missed.length > 0 ? ` (${epochBroker.missed.length} missed \u2014 named, re-request pending)` : ""}${epochBroker.excess.length > 0 ? ` (${epochBroker.excess.length} excess sheet(s) beyond the batch \u2014 named on the round event)` : ""}`);
         }
       }
       ledger.setEpoch(epoch);
@@ -21370,7 +21499,8 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
         zeroFlipRun: runtime.zeroFlipRun,
         applied: referee.applied,
         scopeWarnings: referee.output.scopeWarnings,
-        tokens: round.tokens
+        tokens: round.tokens,
+        ...epochBroker !== null ? { broker: brokerEvent(epochBroker) } : {}
       });
       if (epoch === consolidationEpoch) {
         stopReason = "post-challenge consolidation complete";
