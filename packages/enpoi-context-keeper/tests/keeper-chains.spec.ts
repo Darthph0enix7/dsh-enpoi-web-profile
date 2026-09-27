@@ -2,6 +2,7 @@ import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import {
   keeperAttempts,
   keeperRouteQuarantineRemaining,
+  keeperRouteRequestLevelFailure,
   resetKeeperRouteHealth,
   resolveKeeperRoute,
   splitClaims,
@@ -366,6 +367,53 @@ describe('keeper route health (empty landings + quarantine)', () => {
     expect(keeperRouteQuarantineRemaining('p1', 'm1')).toBeGreaterThan(0)
     expect(written.some(line => line.includes('quarantined until'))).toBe(true)
     expect(written.some(line => line.includes('skipping quarantined link(s): p1/m1'))).toBe(true)
+  })
+
+  it('classifies request-shaped failures by code and by context-overflow wording', () => {
+    expect(keeperRouteRequestLevelFailure({ code: 'CONTEXT_WINDOW_EXCEEDED', message: 'too big' })).toBe(true)
+    expect(keeperRouteRequestLevelFailure({ code: 'HTTP_400', message: "This model's maximum context length is 32768 tokens" })).toBe(true)
+    expect(keeperRouteRequestLevelFailure(new Error('prompt is too long for this model'))).toBe(true)
+    // OpenCode's free-tier client gate is server-side policy (anomalyco/opencode#49621):
+    // recognized by code from the llm seam or by the body an older adapter passed through.
+    expect(keeperRouteRequestLevelFailure({ code: 'FREE_TIER_GATED', message: 'gated' })).toBe(true)
+    expect(keeperRouteRequestLevelFailure(new Error(
+      '403 {"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}',
+    ))).toBe(true)
+    expect(keeperRouteRequestLevelFailure({ code: 'SERVER', message: 'provider outage' })).toBe(false)
+    expect(keeperRouteRequestLevelFailure(new Error('Output invalid/truncated on p1/m1'))).toBe(false)
+  })
+
+  it('never quarantines a link whose 400 is a context-overflow rejection', async () => {
+    const calls: string[] = []
+    const overflow = "This model's maximum context length is 32768 tokens, however you requested 41000 tokens."
+    const stream = async function* (options: { provider: string; model: string }) {
+      calls.push(`${options.provider}/${options.model}`)
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: { message: overflow, code: 'CONTEXT_WINDOW_EXCEEDED' },
+        },
+      }
+    }
+    const ctx = makeCtx({ stream })
+    const written: string[] = []
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true })
+
+    for (let run = 0; run < 3; run += 1) {
+      await expect(summarize(
+        ctx as never, baseConfig, makeSession() as never, 'recent events',
+        new AbortController().signal, route, 'system', false,
+      )).rejects.toThrow(/maximum context length/)
+    }
+
+    // The payload, not the link, overflowed: both links stay healthy and the
+    // gateway's own explanation reaches the caller instead of a rotation story.
+    expect(calls).toEqual(['p1/m1', 'p2/m2', 'p1/m1', 'p2/m2', 'p1/m1', 'p2/m2'])
+    expect(keeperRouteQuarantineRemaining('p1', 'm1')).toBe(0)
+    expect(keeperRouteQuarantineRemaining('p2', 'm2')).toBe(0)
+    expect(written.some(line => line.includes('no route strike'))).toBe(true)
+    expect(written.some(line => line.includes('quarantined until'))).toBe(false)
   })
 
   it('keeps a normal landing on link 1 unchanged (no failover, no health)', async () => {

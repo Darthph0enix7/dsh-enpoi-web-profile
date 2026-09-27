@@ -14,7 +14,7 @@
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
     provider: opencode-go
-    model: minimax-m2.5
+    model: deepseek-v4.1-flash
 - id: ui-settings-general
   name: "@deepseek-ai/dsh-client-ui-settings-general"
   config:
@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790501410625
+        checkedAt: 1790531589879
     personas:
       oracle:
         provider: opencode-go
@@ -121,7 +121,7 @@
             model: deepseek-v4-flash
         attempts: 2
         onCut: failover
-        disabled: true
+        disabled: false
       free:
         label: Free
         links:
@@ -1060,6 +1060,34 @@
           agent: orchestrator
           global: true
           createdAt: 2026-09-27T03:38:50.266Z
+      agents:
+        oracle:
+          available:
+            - bash
+            - edit
+            - glob
+            - grep
+            - memory_confirm
+            - memory_rescind
+            - memory_save
+            - memory_search
+            - read
+            - read_image
+            - request_evidence
+            - skill
+            - str_replace_editor
+            - subagent
+            - task
+            - todo_read
+            - todo_write
+            - web_fetch
+            - web_search
+            - whiteboard_pin
+            - whiteboard_read
+            - whiteboard_unpin
+            - whiteboard_write
+            - write
+          tools: {}
     whiteboard:
       version: 8
       docs:
@@ -1353,6 +1381,13 @@
                   thresholdChars: 8192
                   headChars: 4096
                   tailChars: 1024
+
+              # Durable image offload (doc 66 image policy): an image-capable
+              # route that refuses an over-budget request retries after the
+              # oldest image occurrences are durably marked offloaded, so media
+              # never hard-fails a task or a summarizer call.
+              - id: image-offload
+                name: '@deepseek-ai/dsh-compaction-image-offload'
 
           # ── delegation and workflows ────────────────────────────────────────────────
 
@@ -1704,6 +1739,13 @@
                   headChars: 4096
                   tailChars: 1024
 
+              # Durable image offload (doc 66 image policy): an image-capable
+              # route that refuses an over-budget request retries after the
+              # oldest image occurrences are durably marked offloaded, so media
+              # never hard-fails a task or a summarizer call.
+              - id: image-offload
+                name: '@deepseek-ai/dsh-compaction-image-offload'
+
           # ── delegation and workflows ────────────────────────────────────────────────
 
           # The `subagents` registry and its spawn/fork backends live in the HOST
@@ -1966,31 +2008,6 @@
         api: anthropic-messages
         baseURL: http://100.122.163.25:8082
         models:
-          - id: gemini-3.1-pro-low
-            name: Gemini 3.1 Pro Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.6-flash-low
-            name: Gemini 3.6 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
           - id: gemini-3.1-flash-lite
             name: Gemini 3.1 Flash Lite
             contextWindow: 1048576
@@ -2004,20 +2021,8 @@
               low: low
               medium: medium
               high: high
-          - id: gemini-pro-agent
-            name: Gemini Pro Latest
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-2.5-flash-thinking
-            name: Gemini 2.5 Flash
+          - id: gemini-3.5-flash-low
+            name: Gemini 3.5 Flash
             contextWindow: 1048576
             maxTokens: 65536
             input:
@@ -2029,8 +2034,82 @@
               low: low
               medium: medium
               high: high
-              xhigh: xhigh
+          - id: gemini-3.7-flash-tiered
+            name: Gemini 3.7 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3-flash-agent
+            name: Gemini 3 Flash Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: claude-opus-4-6-thinking
+            name: Claude Opus 4.6
+            contextWindow: 1000000
+            maxTokens: 128000
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
               max: max
+          - id: gemini-3.8-flash-tiered
+            name: Gemini 3.8 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: claude-sonnet-4-6
+            name: Claude Sonnet 4.6
+            contextWindow: 1000000
+            maxTokens: 128000
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              max: max
+          - id: gemini-3-flash
+            name: Gemini 3 Flash Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
           - id: gemini-3.6-flash-tiered
             name: Gemini 3.6 Flash
             contextWindow: 1048576
@@ -2044,6 +2123,93 @@
               low: low
               medium: medium
               high: high
+          - id: gemini-3.6-flash-high
+            name: Gemini 3.6 Flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.1-pro-low
+            name: Gemini 3.1 Pro Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.1-pro-high
+            name: Gemini 3.1 Pro Preview
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-2.5-pro
+            name: Gemini 2.5 Pro
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: gemini-3.5-flash-extra-low
+            name: Gemini 3.5 Flash (Low)
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: gemini-pro-agent
+            name: Gemini Pro Latest
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-2.5-flash-lite
+            name: Gemini 2.5 Flash-Lite
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
           - id: gemini-3.6-flash-medium
             name: Gemini 3.6 Flash
             contextWindow: 1048576
@@ -2057,8 +2223,32 @@
               low: low
               medium: medium
               high: high
-          - id: gemini-3-flash-agent
-            name: Gemini 3 Flash Preview
+          - id: gemini-3.1-flash-image
+            name: Nano Banana 2
+            contextWindow: 131072
+            maxTokens: 32768
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              high: high
+          - id: gemini-3.5-flash-lite
+            name: Gemini 3.5 Flash Lite
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+          - id: gemini-3.6-flash-low
+            name: Gemini 3.6 Flash
             contextWindow: 1048576
             maxTokens: 65536
             input:
@@ -2085,58 +2275,8 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: gemini-3.8-flash-tiered
-            name: Gemini 3.8 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.1-pro-high
-            name: Gemini 3.1 Pro Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.5-flash-lite
-            name: Gemini 3.5 Flash Lite
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.6-flash-high
-            name: Gemini 3.6 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-2.5-pro
-            name: Gemini 2.5 Pro
+          - id: gemini-2.5-flash-thinking
+            name: Gemini 2.5 Flash
             contextWindow: 1048576
             maxTokens: 65536
             input:
@@ -2150,104 +2290,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: gemini-3.7-flash-tiered
-            name: Gemini 3.7 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: gemini-3.5-flash-low
-            name: Gemini 3.5 Flash
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: claude-sonnet-4-6
-            name: Claude Sonnet 4.6
-            contextWindow: 1000000
-            maxTokens: 128000
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              max: max
-          - id: gemini-2.5-flash-lite
-            name: Gemini 2.5 Flash-Lite
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: gemini-3-flash
-            name: Gemini 3 Flash Preview
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-          - id: claude-opus-4-6-thinking
-            name: Claude Opus 4.6
-            contextWindow: 1000000
-            maxTokens: 128000
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              max: max
-          - id: gemini-3.1-flash-image
-            name: Nano Banana 2
-            contextWindow: 131072
-            maxTokens: 32768
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              high: high
-          - id: gemini-3.5-flash-extra-low
-            name: Gemini 3.5 Flash (Low)
-            contextWindow: 1048576
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: false
       opencode-go:
         displayName: OpenCode Go
         api: openai-completions
@@ -4940,7 +4982,7 @@
           - id: z-ai/glm-5.3
             name: GLM-5.3
             contextWindow: 1310720
-            maxTokens: 235929
+            maxTokens: 943717
             input:
               - text
             reasoning: true
@@ -7976,7 +8018,7 @@
           - id: minimax/minimax-m2
             name: MiniMax-M2
             contextWindow: 204800
-            maxTokens: 131072
+            maxTokens: 176947
             input:
               - text
             reasoning: true
@@ -9348,7 +9390,7 @@
           - id: deepseek/deepseek-chat
             name: DeepSeek Chat
             contextWindow: 163840
-            maxTokens: 16384
+            maxTokens: 16000
             input:
               - text
             reasoning: false
@@ -9858,13 +9900,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: prism-ml/Ternary-Bonsai-27B-gguf
-            name: Prism Ml/Ternary Bonsai 27B Gguf
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
           - id: Qwen/Qwen3.6-35B-A3B
             name: Qwen3.6 35B-A3B
             contextWindow: 262144
@@ -9880,6 +9915,13 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: prism-ml/Ternary-Bonsai-27B-gguf
+            name: Prism Ml/Ternary Bonsai 27B Gguf
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
           - id: meta-models/Muse-Glimmer-30B
             name: Meta Models/Muse Glimmer 30B
             contextWindow: 262144
@@ -9965,6 +10007,33 @@
               minimal: minimal
               xhigh: xhigh
               max: max
+          - id: inclusionAI/Ling-3.0-flash-VL
+            name: Ling 3.0 Flash VL
+            contextWindow: 262144
+            maxTokens: 32768
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: Qwen/Qwen3-Coder-Next
+            name: Qwen3-Coder-Next
+            contextWindow: 262144
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: false
+          - id: google/gemma-3-4b-it
+            name: Gemma 3 4B IT
+            contextWindow: 131072
+            maxTokens: 131072
+            input:
+              - text
+              - image
+            reasoning: false
           - id: deepseek-ai/DeepSeek-V4-Flash
             name: DeepSeek V4 Flash
             contextWindow: 1048576
@@ -9979,25 +10048,20 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: Qwen/Qwen3-Coder-Next
-            name: Qwen3-Coder-Next
-            contextWindow: 262144
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-          - id: inclusionAI/Ling-3.0-flash-VL
-            name: Ling 3.0 Flash VL
-            contextWindow: 262144
+          - id: deepseek-ai/DeepSeek-R1
+            name: DeepSeek-R1
+            contextWindow: 64000
             maxTokens: 32768
             input:
               - text
-              - image
             reasoning: true
             reasoningEfforts:
+              minimal: minimal
               low: low
               medium: medium
               high: high
+              xhigh: xhigh
+              max: max
           - id: tencent/Hy4-preview
             name: Hy4 preview
             contextWindow: 1000000
@@ -10007,47 +10071,10 @@
             reasoning: true
             reasoningEfforts:
               high: high
-          - id: google/gemma-3-4b-it
-            name: Gemma 3 4B IT
-            contextWindow: 131072
-            maxTokens: 131072
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: thinkingmachines/Inkling
-            name: Inkling
-            contextWindow: 1048576
-            maxTokens: 1048576
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              minimal: minimal
-              xhigh: xhigh
-              max: max
           - id: zai-org/GLM-5.2
             name: GLM-5.2
             contextWindow: 262144
             maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: deepseek-ai/DeepSeek-R1
-            name: DeepSeek-R1
-            contextWindow: 64000
-            maxTokens: 32768
             input:
               - text
             reasoning: true
@@ -10073,6 +10100,36 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: swiss-ai/Apertus-v1.5-70B
+            name: Apertus v1.5 70B
+            contextWindow: 100000
+            maxTokens: 8192
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: thinkingmachines/Inkling
+            name: Inkling
+            contextWindow: 1048576
+            maxTokens: 1048576
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              minimal: minimal
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen3-Coder-30B-A3B-Instruct
+            name: Qwen3-Coder 30B-A3B Instruct
+            contextWindow: 262144
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: false
           - id: deepseek-ai/DeepSeek-V4-Pro
             name: DeepSeek V4 Pro
             contextWindow: 1048576
@@ -10102,50 +10159,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: XiaomiMiMo/MiMo-V2.5-Pro
-            name: MiMo-V2.5-Pro
-            contextWindow: 1048576
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              minimal: minimal
-              max: max
-          - id: Qwen/Qwen3-Coder-30B-A3B-Instruct
-            name: Qwen3-Coder 30B-A3B Instruct
-            contextWindow: 262144
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-          - id: thinkingmachines/Inkling-Small
-            name: Inkling Small
-            contextWindow: 524288
-            maxTokens: 1048576
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: swiss-ai/Apertus-v1.5-70B
-            name: Apertus v1.5 70B
-            contextWindow: 100000
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: false
           - id: Qwen/Qwen3-4B-Instruct-2507
             name: Qwen3 4B Instruct
             contextWindow: 32768
@@ -10165,10 +10178,127 @@
               - text
               - image
             reasoning: false
+          - id: XiaomiMiMo/MiMo-V2.5-Pro
+            name: MiMo-V2.5-Pro
+            contextWindow: 1048576
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              minimal: minimal
+              max: max
           - id: zai-org/GLM-4.7-Flash
             name: GLM-4.7-Flash
             contextWindow: 200000
             maxTokens: 128000
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen2.5-Coder-32B-Instruct
+            name: Qwen2.5-Coder-32B-Instruct
+            contextWindow: 131072
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: thinkingmachines/Inkling-Small
+            name: Inkling Small
+            contextWindow: 524288
+            maxTokens: 1048576
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: meta-llama/Llama-3.3-70B-Instruct
+            name: Llama-3.3-70B-Instruct
+            contextWindow: 131072
+            maxTokens: 4096
+            input:
+              - text
+            reasoning: false
+          - id: Qwen/Qwen3.5-27B
+            name: Qwen3.5 27B
+            contextWindow: 262144
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+            name: DeepSeek V4 Flash Vision Exp
+            contextWindow: 1048576
+            maxTokens: 384000
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+              minimal: minimal
+              medium: medium
+              xhigh: xhigh
+          - id: microsoft/phi-4
+            name: "Microsoft: Phi 4"
+            contextWindow: 16384
+            maxTokens: 14745
+            input:
+              - text
+            reasoning: false
+          - id: inclusionAI/Ling-3.0-flash-Fin
+            name: "inclusionAI: Ling 3.0 Flash Fin"
+            contextWindow: 262144
+            maxTokens: 235929
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              high: high
+          - id: Qwen/Qwen3-30B-A3B
+            name: Qwen3 30B A3B
+            contextWindow: 40960
+            maxTokens: 16384
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: Sao10K/L3-8B-Stheno-v3.2
+            name: Sao10K Stheno 8b
+            contextWindow: 16384
+            maxTokens: 8192
             input:
               - text
             reasoning: true
@@ -10193,50 +10323,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: Qwen/Qwen3.5-27B
-            name: Qwen3.5 27B
-            contextWindow: 262144
-            maxTokens: 65536
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: Qwen/Qwen2.5-Coder-32B-Instruct
-            name: Qwen2.5-Coder-32B-Instruct
-            contextWindow: 131072
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
-            name: DeepSeek V4 Flash Vision Exp
-            contextWindow: 1048576
-            maxTokens: 384000
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              high: high
-              max: max
-              minimal: minimal
-              medium: medium
-              xhigh: xhigh
-          - id: meta-llama/Llama-3.3-70B-Instruct
-            name: Llama-3.3-70B-Instruct
-            contextWindow: 131072
-            maxTokens: 4096
-            input:
-              - text
-            reasoning: false
           - id: XiaomiMiMo/MiMo-V2.5
             name: MiMo-V2.5
             contextWindow: 262144
@@ -10251,61 +10337,10 @@
               xhigh: xhigh
               minimal: minimal
               max: max
-          - id: microsoft/phi-4
-            name: "Microsoft: Phi 4"
-            contextWindow: 16384
-            maxTokens: 14745
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-30B-A3B
-            name: Qwen3 30B A3B
-            contextWindow: 40960
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: zai-org/GLM-4.5-Air
-            name: GLM-4.5-Air
-            contextWindow: 131072
-            maxTokens: 98304
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
           - id: inclusionAI/Ling-3.0-flash
             name: Ling 3.0 Flash
             contextWindow: 262144
             maxTokens: 32768
-            input:
-              - text
-            reasoning: false
-          - id: inclusionAI/Ling-3.0-flash-Fin
-            name: "inclusionAI: Ling 3.0 Flash Fin"
-            contextWindow: 262144
-            maxTokens: 235929
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              high: high
-          - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
-            name: Nvidia/NVIDIA Nemotron 3 Ultra 550B A55B NVFP4
-            contextWindow: 262144
-            maxTokens: 8192
             input:
               - text
             reasoning: false
@@ -10323,65 +10358,6 @@
             input:
               - text
             reasoning: false
-          - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
-            name: Nemotron 3 Ultra 550B A55B
-            contextWindow: 1000000
-            maxTokens: 65000
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-          - id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-            name: Nemotron 3.5 Lightning 30B A3B
-            contextWindow: 8192
-            maxTokens: 4096
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-          - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
-            name: Deepseek AI/DeepSeek R1 Distill Qwen 7B
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: google/gemma-3-27b-it
-            name: Gemma 3 27B IT
-            contextWindow: 131072
-            maxTokens: 131072
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: Sao10K/L3-8B-Stheno-v3.2
-            name: Sao10K Stheno 8b
-            contextWindow: 16384
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
           - id: tencent/Hy3
             name: Hy3
             contextWindow: 262144
@@ -10394,6 +10370,77 @@
               high: high
               minimal: minimal
               medium: medium
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-4.5-Air
+            name: GLM-4.5-Air
+            contextWindow: 131072
+            maxTokens: 98304
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen2.5-Coder-7B-Instruct
+            name: "Qwen: Qwen 2.5 Coder 7B Instruct"
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: google/gemma-3-27b-it
+            name: Gemma 3 27B IT
+            contextWindow: 131072
+            maxTokens: 131072
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: ibm-granite/granite-4.2-8b
+            name: Granite 4.2 8B
+            contextWindow: 131072
+            maxTokens: 117964
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              high: high
+              minimal: minimal
+              medium: medium
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-5.3-BF16
+            name: Zai Org/GLM 5.3 BF16
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+            name: Deepseek AI/DeepSeek R1 Distill Qwen 7B
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
               xhigh: xhigh
               max: max
           - id: deepseek-ai/DeepSeek-V4-Pro-0813
@@ -10410,28 +10457,6 @@
               minimal: minimal
               medium: medium
               xhigh: xhigh
-          - id: zai-org/GLM-5.3-BF16
-            name: Zai Org/GLM 5.3 BF16
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: google/gemma-3-12b-it
-            name: Gemma 3 12B IT
-            contextWindow: 131072
-            maxTokens: 131072
-            input:
-              - text
-              - image
-            reasoning: false
           - id: Qwen/Qwen3.5-35B-A3B
             name: Qwen3.5 35B-A3B
             contextWindow: 262144
@@ -10447,33 +10472,29 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: stepfun-ai/Step-3.7-Flash
-            name: Step 3.7 Flash
+          - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+            name: Nvidia/NVIDIA Nemotron 3 Ultra 550B A55B NVFP4
             contextWindow: 262144
-            maxTokens: 256000
+            maxTokens: 8192
             input:
               - text
-              - image
+            reasoning: false
+          - id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+            name: Nemotron 3.5 Lightning 30B A3B
+            contextWindow: 8192
+            maxTokens: 4096
+            input:
+              - text
             reasoning: true
             reasoningEfforts:
               low: low
               medium: medium
               high: high
-              minimal: minimal
               xhigh: xhigh
-              max: max
-          - id: meta-llama/Llama-4-Scout-17B-16E-Instruct
-            name: Llama 4 Scout 17B
-            contextWindow: 327680
-            maxTokens: 16384
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: swiss-ai/Apertus-8B-Instruct-2509
-            name: Swiss AI/Apertus 8B Instruct 2509
+          - id: Qwen/Qwen3-Coder-480B-A35B-Instruct
+            name: Qwen3-Coder-480B-A35B-Instruct
             contextWindow: 262144
-            maxTokens: 8192
+            maxTokens: 66536
             input:
               - text
             reasoning: false
@@ -10492,6 +10513,20 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: Qwen/Qwen3-14B
+            name: Qwen 3 14b
+            contextWindow: 41000
+            maxTokens: 32768
+            input:
+              - text
+            reasoning: false
+          - id: Qwen/Qwen3-Next-80B-A3B-Instruct
+            name: Qwen3-Next-80B-A3B-Instruct
+            contextWindow: 262144
+            maxTokens: 66536
+            input:
+              - text
+            reasoning: false
           - id: Qwen/Qwen3.5-122B-A10B
             name: Qwen3.5 122B-A10B
             contextWindow: 262144
@@ -10507,85 +10542,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: moonshotai/Kimi-K2.6
-            name: Kimi-K2.6
-            contextWindow: 262144
-            maxTokens: 262144
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: moonshotai/Kimi-K2.7-Code
-            name: Kimi K2.7 Code
-            contextWindow: 262144
-            maxTokens: 262144
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: Qwen/Qwen2.5-Coder-7B-Instruct
-            name: "Qwen: Qwen 2.5 Coder 7B Instruct"
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-Coder-480B-A35B-Instruct
-            name: Qwen3-Coder-480B-A35B-Instruct
-            contextWindow: 262144
-            maxTokens: 66536
-            input:
-              - text
-            reasoning: false
-          - id: zai-org/GLM-5
-            name: GLM-5
-            contextWindow: 202752
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: deepseek-ai/DeepSeek-V3
-            name: DeepSeek-V3
-            contextWindow: 64000
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-14B
-            name: Qwen 3 14b
-            contextWindow: 41000
-            maxTokens: 32768
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-Next-80B-A3B-Instruct
-            name: Qwen3-Next-80B-A3B-Instruct
-            contextWindow: 262144
-            maxTokens: 66536
-            input:
-              - text
-            reasoning: false
           - id: Qwen/Qwen3-32B
             name: Qwen3 32B
             contextWindow: 131072
@@ -10614,6 +10570,103 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: moonshotai/Kimi-K2.7-Code
+            name: Kimi K2.7 Code
+            contextWindow: 262144
+            maxTokens: 262144
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: meta-llama/Llama-4-Scout-17B-16E-Instruct
+            name: Llama 4 Scout 17B
+            contextWindow: 327680
+            maxTokens: 16384
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: google/gemma-3-12b-it
+            name: Gemma 3 12B IT
+            contextWindow: 131072
+            maxTokens: 131072
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: swiss-ai/Apertus-8B-Instruct-2509
+            name: Swiss AI/Apertus 8B Instruct 2509
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: Qwen/Qwen2.5-VL-72B-Instruct
+            name: "Qwen: Qwen2.5 VL 72B Instruct"
+            contextWindow: 128000
+            maxTokens: 115200
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: deepseek-ai/DeepSeek-V3
+            name: DeepSeek-V3
+            contextWindow: 64000
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: zai-org/GLM-5
+            name: GLM-5
+            contextWindow: 202752
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: stepfun-ai/Step-3.7-Flash
+            name: Step 3.7 Flash
+            contextWindow: 262144
+            maxTokens: 256000
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              minimal: minimal
+              xhigh: xhigh
+              max: max
+          - id: moonshotai/Kimi-K2.6
+            name: Kimi-K2.6
+            contextWindow: 262144
+            maxTokens: 262144
+            input:
+              - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
           - id: stepfun-ai/Step-3.5-Flash
             name: Step 3.5 Flash
             contextWindow: 262144
@@ -10628,6 +10681,17 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+            name: Nemotron 3 Ultra 550B A55B
+            contextWindow: 1000000
+            maxTokens: 65000
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
           - id: ibm-granite/granite-4.2-3b
             name: Ibm Granite/Granite 4.2 3b
             contextWindow: 262144
@@ -10635,124 +10699,10 @@
             input:
               - text
             reasoning: false
-          - id: prism-ml/Ternary-Bonsai-27B-AWQ-4bit
-            name: Prism Ml/Ternary Bonsai 27B AWQ 4bit
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-VL-235B-A22B-Instruct
-            name: Qwen3 VL 235B A22B Instruct
-            contextWindow: 131072
-            maxTokens: 32768
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: Sao10K/L3-8B-Lunaris-v1
-            name: Sao10K/L3 8B Lunaris V1
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: Qwen/Qwen3-235B-A22B-Instruct-2507
-            name: Qwen3 235B-A22B Instruct 2507
-            contextWindow: 262144
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: false
           - id: CohereLabs/aya-expanse-32b
             name: CohereLabs/Aya Expanse 32b
             contextWindow: 262144
             maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: deepseek-ai/DeepSeek-V3-0324
-            name: DeepSeek V3 0324
-            contextWindow: 163840
-            maxTokens: 163840
-            input:
-              - text
-            reasoning: false
-          - id: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
-            name: DeepSeek R1 Distill Llama 70B
-            contextWindow: 131072
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/tiny-aya-water
-            name: CohereLabs/Tiny Aya Water
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: deepseek-ai/DeepSeek-R1-0528
-            name: DeepSeek-R1-0528
-            contextWindow: 163840
-            maxTokens: 163840
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: moonshotai/Kimi-K2-Instruct-0905
-            name: Kimi-K2-Instruct-0905
-            contextWindow: 262144
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: false
-          - id: CohereLabs/tiny-aya-fire
-            name: CohereLabs/Tiny Aya Fire
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: ibm-granite/granite-4.2-8b
-            name: Granite 4.2 8B
-            contextWindow: 131072
-            maxTokens: 117964
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              low: low
-              high: high
-              minimal: minimal
-              medium: medium
-              xhigh: xhigh
-              max: max
-          - id: deepseek-ai/DeepSeek-V3.2-Exp
-            name: DeepSeek V3.2 Exp
-            contextWindow: 163840
-            maxTokens: 65536
             input:
               - text
             reasoning: false
@@ -10771,8 +10721,71 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: ibm-granite/granite-4.2-30b
-            name: Ibm Granite/Granite 4.2 30b
+          - id: openai/gpt-oss-safeguard-20b
+            name: Safety GPT OSS 20B
+            contextWindow: 131072
+            maxTokens: 65536
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              minimal: minimal
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen2.5-Coder-3B-Instruct
+            name: "Qwen: Qwen 2.5 Coder 3B Instruct"
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: deepseek-ai/DeepSeek-V3-0324
+            name: DeepSeek V3 0324
+            contextWindow: 163840
+            maxTokens: 163840
+            input:
+              - text
+            reasoning: false
+          - id: CohereLabs/tiny-aya-water
+            name: CohereLabs/Tiny Aya Water
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: zai-org/GLM-5.3-Flash-BF16
+            name: Zai Org/GLM 5.3 Flash BF16
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: deepseek-ai/DeepSeek-R1-0528
+            name: DeepSeek-R1-0528
+            contextWindow: 163840
+            maxTokens: 163840
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/tiny-aya-fire
+            name: CohereLabs/Tiny Aya Fire
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -10793,27 +10806,26 @@
               minimal: minimal
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-5.3-Flash-BF16
-            name: Zai Org/GLM 5.3 Flash BF16
+          - id: ibm-granite/granite-4.2-30b
+            name: Ibm Granite/Granite 4.2 30b
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: Qwen/Qwen2.5-VL-72B-Instruct
-            name: "Qwen: Qwen2.5 VL 72B Instruct"
-            contextWindow: 128000
-            maxTokens: 115200
+            reasoning: false
+          - id: Qwen/Qwen3-235B-A22B-Instruct-2507
+            name: Qwen3 235B-A22B Instruct 2507
+            contextWindow: 262144
+            maxTokens: 16384
             input:
               - text
-              - image
+            reasoning: false
+          - id: prism-ml/Ternary-Bonsai-27B-AWQ-4bit
+            name: Prism Ml/Ternary Bonsai 27B AWQ 4bit
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
             reasoning: false
           - id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
             name: Llama 4 Maverick 17B FP8
@@ -10823,12 +10835,28 @@
               - text
               - image
             reasoning: false
-          - id: Qwen/Qwen2.5-Coder-3B-Instruct
-            name: "Qwen: Qwen 2.5 Coder 3B Instruct"
+          - id: Sao10K/L3-8B-Lunaris-v1
+            name: Sao10K/L3 8B Lunaris V1
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
+              - image
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: Qwen/Qwen3-VL-235B-A22B-Instruct
+            name: Qwen3 VL 235B A22B Instruct
+            contextWindow: 131072
+            maxTokens: 32768
+            input:
+              - text
+              - image
             reasoning: false
           - id: Qwen/Qwen3-VL-235B-A22B-Thinking
             name: Qwen3 VL 235B A22B Thinking
@@ -10845,31 +10873,31 @@
               minimal: minimal
               xhigh: xhigh
               max: max
-          - id: openai/gpt-oss-safeguard-20b
-            name: Safety GPT OSS 20B
+          - id: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+            name: DeepSeek R1 Distill Llama 70B
             contextWindow: 131072
-            maxTokens: 65536
+            maxTokens: 131072
             input:
               - text
             reasoning: true
             reasoningEfforts:
+              minimal: minimal
               low: low
               medium: medium
               high: high
-              minimal: minimal
               xhigh: xhigh
               max: max
-          - id: NousResearch/Hermes-3-Llama-3.1-70B
-            name: "Nous: Hermes 3 70B Instruct"
-            contextWindow: 131072
+          - id: moonshotai/Kimi-K2-Instruct-0905
+            name: Kimi-K2-Instruct-0905
+            contextWindow: 262144
             maxTokens: 16384
             input:
               - text
             reasoning: false
-          - id: aisingapore/Gemma-SEA-LION-v4-27B-IT
-            name: AIsingapore/Gemma SEA LION V4 27B IT
-            contextWindow: 262144
-            maxTokens: 8192
+          - id: deepseek-ai/DeepSeek-V3.2-Exp
+            name: DeepSeek V3.2 Exp
+            contextWindow: 163840
+            maxTokens: 65536
             input:
               - text
             reasoning: false
@@ -10881,29 +10909,23 @@
               - text
               - image
             reasoning: false
-          - id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-            name: Deepseek AI/DeepSeek R1 Distill Llama 8B
+          - id: NousResearch/Hermes-3-Llama-3.1-70B
+            name: "Nous: Hermes 3 70B Instruct"
+            contextWindow: 131072
+            maxTokens: 16384
+            input:
+              - text
+            reasoning: false
+          - id: CohereLabs/aya-vision-32b
+            name: CohereLabs/Aya Vision 32b
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: Qwen/Qwen2.5-72B-Instruct
-            name: Qwen/Qwen2.5-72B-Instruct
-            contextWindow: 33000
-            maxTokens: 4000
-            input:
-              - text
+              - image
             reasoning: false
-          - id: swiss-ai/Apertus-70B-Instruct-2509
-            name: Swiss AI/Apertus 70B Instruct 2509
+          - id: alpindale/WizardLM-2-8x22B
+            name: Alpindale/WizardLM 2 8x22B
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -10924,20 +10946,36 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
-            name: Deepseek AI/DeepSeek R1 Distill Qwen 14B
+          - id: Qwen/Qwen2.5-72B-Instruct
+            name: Qwen/Qwen2.5-72B-Instruct
+            contextWindow: 33000
+            maxTokens: 4000
+            input:
+              - text
+            reasoning: false
+          - id: meta-llama/Llama-Guard-4-12B
+            name: "Meta: Llama Guard 4 12B"
+            contextWindow: 163840
+            maxTokens: 16384
+            input:
+              - text
+              - image
+            reasoning: false
+          - id: zai-org/GLM-4-32B-0414
+            name: Zai Org/GLM 4 32B 0414
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
+            reasoning: false
+          - id: zai-org/AutoGLM-Phone-9B-Multilingual
+            name: AutoGLM-Phone-9B-Multilingual
+            contextWindow: 65536
+            maxTokens: 65536
+            input:
+              - text
+              - image
+            reasoning: false
           - id: Qwen/Qwen3-235B-A22B-Thinking-2507
             name: Qwen3-235B-A22B-Thinking-2507
             contextWindow: 262144
@@ -10952,20 +10990,12 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: aisingapore/Qwen-SEA-LION-v4-32B-IT
-            name: AIsingapore/Qwen SEA LION V4 32B IT
+          - id: zai-org/GLM-4.5V-FP8
+            name: Zai Org/GLM 4.5V FP8
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
-            reasoning: false
-          - id: zai-org/AutoGLM-Phone-9B-Multilingual
-            name: AutoGLM-Phone-9B-Multilingual
-            contextWindow: 65536
-            maxTokens: 65536
-            input:
-              - text
-              - image
             reasoning: false
           - id: Qwen/Qwen3-235B-A22B
             name: Qwen3 235B-A22B
@@ -10981,6 +11011,13 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: aisingapore/Gemma-SEA-LION-v4-27B-IT
+            name: AIsingapore/Gemma SEA LION V4 27B IT
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
           - id: deepseek-ai/DeepSeek-V3.1
             name: DeepSeek-V3.1
             contextWindow: 131072
@@ -10995,104 +11032,6 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: zai-org/GLM-4.5
-            name: GLM-4.5
-            contextWindow: 131072
-            maxTokens: 98304
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/c4ai-command-r-08-2024
-            name: CohereLabs/C4ai Command R 08 2024
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: Qwen/Qwen3-4B-Thinking-2507
-            name: "Qwen: Qwen 3 4B Thinking 2507"
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: deepseek-ai/DeepSeek-V3.1-Terminus
-            name: DeepSeek V3.1 Terminus
-            contextWindow: 128000
-            maxTokens: 65536
-            input:
-              - text
-            reasoning: false
-          - id: zai-org/GLM-4.6-FP8
-            name: Zai Org/GLM 4.6 FP8
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: CohereLabs/c4ai-command-r7b-12-2024
-            name: CohereLabs/C4ai Command R7b 12 2024
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: zai-org/GLM-4.5V-FP8
-            name: Zai Org/GLM 4.5V FP8
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: zai-org/GLM-4.6
-            name: GLM-4.6
-            contextWindow: 204800
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: zai-org/GLM-5.1
-            name: GLM-5.1
-            contextWindow: 202752
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/c4ai-command-a-03-2025
-            name: CohereLabs/C4ai Command A 03 2025
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
           - id: zai-org/GLM-4.6V
             name: GLM 4.6V
             contextWindow: 131072
@@ -11108,55 +11047,26 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: MiniMaxAI/MiniMax-M2.7
-            name: MiniMax-M2.7
-            contextWindow: 204800
+          - id: MiniMaxAI/MiniMax-M1-80k
+            name: MiniMax M1 80K
+            contextWindow: 1000000
             maxTokens: 131072
             input:
               - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: zai-org/GLM-5.1-FP8
-            name: GLM-5.1 FP8
-            contextWindow: 202752
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/command-a-reasoning-08-2025
-            name: CohereLabs/Command A Reasoning 08 2025
+            reasoning: false
+          - id: swiss-ai/Apertus-70B-Instruct-2509
+            name: Swiss AI/Apertus 70B Instruct 2509
             contextWindow: 262144
             maxTokens: 8192
             input:
               - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: meta-llama/Llama-Guard-4-12B
-            name: "Meta: Llama Guard 4 12B"
-            contextWindow: 163840
-            maxTokens: 16384
+            reasoning: false
+          - id: deepseek-ai/DeepSeek-V3.1-Terminus
+            name: DeepSeek V3.1 Terminus
+            contextWindow: 128000
+            maxTokens: 65536
             input:
               - text
-              - image
             reasoning: false
           - id: zai-org/GLM-4.6V-FP8
             name: Zai Org/GLM 4.6V FP8
@@ -11165,29 +11075,15 @@
             input:
               - text
             reasoning: false
-          - id: zai-org/GLM-5.2-FP8
-            name: GLM-5.2
-            contextWindow: 393216
-            maxTokens: 131072
-            input:
-              - text
-            reasoning: true
-            reasoningEfforts:
-              minimal: minimal
-              low: low
-              medium: medium
-              high: high
-              xhigh: xhigh
-              max: max
-          - id: CohereLabs/command-a-translate-08-2025
-            name: CohereLabs/Command A Translate 08 2025
-            contextWindow: 262144
-            maxTokens: 8192
+          - id: moonshotai/Kimi-K2-Instruct
+            name: Kimi-K2-Instruct
+            contextWindow: 131072
+            maxTokens: 16384
             input:
               - text
             reasoning: false
-          - id: alpindale/WizardLM-2-8x22B
-            name: Alpindale/WizardLM 2 8x22B
+          - id: aisingapore/Qwen-SEA-LION-v4-32B-IT
+            name: AIsingapore/Qwen SEA LION V4 32B IT
             contextWindow: 262144
             maxTokens: 8192
             input:
@@ -11207,53 +11103,51 @@
               high: high
               xhigh: xhigh
               max: max
-          - id: CohereLabs/tiny-aya-global
-            name: CohereLabs/Tiny Aya Global
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: CohereLabs/aya-vision-32b
-            name: CohereLabs/Aya Vision 32b
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: zai-org/GLM-4-32B-0414
-            name: Zai Org/GLM 4 32B 0414
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-            reasoning: false
-          - id: CohereLabs/command-a-vision-07-2025
-            name: CohereLabs/Command A Vision 07 2025
-            contextWindow: 262144
-            maxTokens: 8192
-            input:
-              - text
-              - image
-            reasoning: false
-          - id: MiniMaxAI/MiniMax-M1-80k
-            name: MiniMax M1 80K
-            contextWindow: 1000000
+          - id: zai-org/GLM-4.6
+            name: GLM-4.6
+            contextWindow: 204800
             maxTokens: 131072
             input:
               - text
-            reasoning: false
-          - id: moonshotai/Kimi-K2-Instruct
-            name: Kimi-K2-Instruct
-            contextWindow: 131072
-            maxTokens: 16384
-            input:
-              - text
-            reasoning: false
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
           - id: MiniMaxAI/MiniMax-M2
             name: MiniMax-M2
             contextWindow: 204800
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+            name: Deepseek AI/DeepSeek R1 Distill Llama 8B
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-5.1
+            name: GLM-5.1
+            contextWindow: 202752
             maxTokens: 131072
             input:
               - text
@@ -11279,6 +11173,132 @@
               high: high
               xhigh: xhigh
               max: max
+          - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+            name: Deepseek AI/DeepSeek R1 Distill Qwen 14B
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: MiniMaxAI/MiniMax-M2.7
+            name: MiniMax-M2.7
+            contextWindow: 204800
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-4.6-FP8
+            name: Zai Org/GLM 4.6 FP8
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: CohereLabs/c4ai-command-r-08-2024
+            name: CohereLabs/C4ai Command R 08 2024
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: Qwen/Qwen3-4B-Thinking-2507
+            name: "Qwen: Qwen 3 4B Thinking 2507"
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: zai-org/GLM-5.1-FP8
+            name: GLM-5.1 FP8
+            contextWindow: 202752
+            maxTokens: 16384
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/c4ai-command-r7b-12-2024
+            name: CohereLabs/C4ai Command R7b 12 2024
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: zai-org/GLM-5.2-FP8
+            name: GLM-5.2
+            contextWindow: 393216
+            maxTokens: 131072
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/c4ai-command-a-03-2025
+            name: CohereLabs/C4ai Command A 03 2025
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: CohereLabs/command-a-reasoning-08-2025
+            name: CohereLabs/Command A Reasoning 08 2025
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: true
+            reasoningEfforts:
+              minimal: minimal
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: CohereLabs/command-a-translate-08-2025
+            name: CohereLabs/Command A Translate 08 2025
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
+          - id: CohereLabs/tiny-aya-global
+            name: CohereLabs/Tiny Aya Global
+            contextWindow: 262144
+            maxTokens: 8192
+            input:
+              - text
+            reasoning: false
         api: openai-completions
       freellmapi:
         displayName: FreeLLMAPI (Unified Free Quota)

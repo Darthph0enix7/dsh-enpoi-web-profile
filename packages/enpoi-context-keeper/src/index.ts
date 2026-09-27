@@ -41,7 +41,7 @@
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { SessionLogOffset, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { BlockAssembler, createUserMessage, type ContextFormed, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createUserMessage, isContextWindowExceededError, type ContextFormed, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Enpoi context keeper: state-checkpoint surface messages and keeper model requests. */
@@ -1982,6 +1982,46 @@ function clearKeeperRouteFailure(provider: string, model: string): void {
   keeperRouteHealth.delete(`${provider}/${model}`)
 }
 
+/**
+ * Request-shaped failure codes: the payload, not the route, is the problem, so
+ * the same call fails identically on every healthy link.
+ */
+const REQUEST_LEVEL_FAILURE_CODES = new Set([
+  'CONTEXT_WINDOW_EXCEEDED',
+  'INVALID_REQUEST',
+  'UNSUPPORTED_CONTENT',
+  'IMAGE_OFFLOAD_REQUIRED',
+  // OpenCode's free-tier client gate: the route is policy-gated server-side
+  // ("You cannot use the free tier in other harnesses", anomalyco/opencode#49621),
+  // so a strike/quarantine would idle a link no credential can repair. The
+  // free link is retired from default chains; this keeps a hand-enabled one
+  // from poisoning route health while it explains itself.
+  'FREE_TIER_GATED',
+])
+
+/**
+ * Whether one summarizer failure describes the request rather than the route.
+ * A context-overflow 400 (or a media refusal) must never count toward route
+ * quarantine — striking every link over one oversized payload would idle the
+ * keeper and hide the gateway's own explanation behind a rotation failure.
+ * @param error - the caught attempt failure.
+ * @returns true for request-shaped codes and context-overflow wording.
+ */
+/**
+ * OpenCode's free-tier client gate as it appears in a provider body
+ * (`FreeTierError`, or the policy phrase). Defined here textually so the
+ * keeper does not depend on a built `@deepseek-ai/dsh-llm` export version:
+ * a link routed through an older adapter may carry no FREE_TIER_GATED code yet.
+ */
+const FREE_TIER_GATED_RE = /FreeTierError|free tier can only be used/i
+
+export function keeperRouteRequestLevelFailure(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code
+  if (typeof code === 'string' && REQUEST_LEVEL_FAILURE_CODES.has(code)) return true
+  const message = error instanceof Error ? error.message : (error as { message?: unknown } | null)?.message
+  return typeof message === 'string' && (isContextWindowExceededError(message) || FREE_TIER_GATED_RE.test(message))
+}
+
 /** One LLM completion with resolved primary route + fixed fallback (soft-degrading + cutoff shield). */
 export async function summarize(
   ctx: Context,
@@ -2088,14 +2128,24 @@ export async function summarize(
     // Empty/timeout/cut/invalid landings are route failures: one strike per
     // summary attempt; a link at the threshold is quarantined for a bounded
     // window so the next wake goes straight to the next enabled link.
-    const health = recordKeeperRouteFailure(attempt.provider, attempt.model)
-    if (health.quarantinedUntil > Date.now()) {
-      const until = new Date(health.quarantinedUntil).toISOString()
+    // Request-level refusals never strike route health: another link may fit
+    // where this one did not, and the explanation stays the gateway's own.
+    if (keeperRouteRequestLevelFailure(failure)) {
+      const message = failure instanceof Error ? failure.message : String(failure)
       process.stderr.write(
-        `[model-chain] ${route.chainId ?? 'keeper'}: route ${attempt.provider}/${attempt.model}`
-        + ` quarantined until ${until} (${health.failures} consecutive failures)\n`,
+        `[model-chain] ${route.chainId ?? 'keeper'}: link ${index + 1} (${attempt.provider}/${attempt.model})`
+        + ` rejected the request (no route strike): ${message}\n`,
       )
-      diag(`route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)`)
+    } else {
+      const health = recordKeeperRouteFailure(attempt.provider, attempt.model)
+      if (health.quarantinedUntil > Date.now()) {
+        const until = new Date(health.quarantinedUntil).toISOString()
+        process.stderr.write(
+          `[model-chain] ${route.chainId ?? 'keeper'}: route ${attempt.provider}/${attempt.model}`
+          + ` quarantined until ${until} (${health.failures} consecutive failures)\n`,
+        )
+        diag(`route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)`)
+      }
     }
     lastError = failure
     const next = attempts[index + 1]

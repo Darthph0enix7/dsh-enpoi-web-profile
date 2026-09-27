@@ -46,7 +46,7 @@ var __callDispose = (stack, error, hasError) => {
 
 // src/index.ts
 import { SessionLogOffset } from "@deepseek-ai/dsh-session";
-import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { BlockAssembler, createUserMessage, isContextWindowExceededError } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1312,6 +1312,25 @@ function recordKeeperRouteFailure(provider, model) {
 function clearKeeperRouteFailure(provider, model) {
   keeperRouteHealth.delete(`${provider}/${model}`);
 }
+var REQUEST_LEVEL_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "CONTEXT_WINDOW_EXCEEDED",
+  "INVALID_REQUEST",
+  "UNSUPPORTED_CONTENT",
+  "IMAGE_OFFLOAD_REQUIRED",
+  // OpenCode's free-tier client gate: the route is policy-gated server-side
+  // ("You cannot use the free tier in other harnesses", anomalyco/opencode#49621),
+  // so a strike/quarantine would idle a link no credential can repair. The
+  // free link is retired from default chains; this keeps a hand-enabled one
+  // from poisoning route health while it explains itself.
+  "FREE_TIER_GATED"
+]);
+var FREE_TIER_GATED_RE = /FreeTierError|free tier can only be used/i;
+function keeperRouteRequestLevelFailure(error) {
+  const code = error?.code;
+  if (typeof code === "string" && REQUEST_LEVEL_FAILURE_CODES.has(code)) return true;
+  const message = error instanceof Error ? error.message : error?.message;
+  return typeof message === "string" && (isContextWindowExceededError(message) || FREE_TIER_GATED_RE.test(message));
+}
 async function summarize(ctx, config, session, input, signal, route, systemPrompt, expectClaims) {
   const messages = [createUserMessage({
     content: [{ type: "text", text: input }],
@@ -1386,14 +1405,22 @@ async function summarize(ctx, config, session, input, signal, route, systemPromp
       }
     }
     if (signal.aborted) throw failure;
-    const health = recordKeeperRouteFailure(attempt.provider, attempt.model);
-    if (health.quarantinedUntil > Date.now()) {
-      const until = new Date(health.quarantinedUntil).toISOString();
+    if (keeperRouteRequestLevelFailure(failure)) {
+      const message2 = failure instanceof Error ? failure.message : String(failure);
       process.stderr.write(
-        `[model-chain] ${route.chainId ?? "keeper"}: route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)
+        `[model-chain] ${route.chainId ?? "keeper"}: link ${index + 1} (${attempt.provider}/${attempt.model}) rejected the request (no route strike): ${message2}
 `
       );
-      diag(`route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)`);
+    } else {
+      const health = recordKeeperRouteFailure(attempt.provider, attempt.model);
+      if (health.quarantinedUntil > Date.now()) {
+        const until = new Date(health.quarantinedUntil).toISOString();
+        process.stderr.write(
+          `[model-chain] ${route.chainId ?? "keeper"}: route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)
+`
+        );
+        diag(`route ${attempt.provider}/${attempt.model} quarantined until ${until} (${health.failures} consecutive failures)`);
+      }
     }
     lastError = failure;
     const next = attempts[index + 1];
@@ -1481,6 +1508,7 @@ export {
   keeperBriefShapeRejection,
   keeperProseRejection,
   keeperRouteQuarantineRemaining,
+  keeperRouteRequestLevelFailure,
   latestCheckpoint,
   latestCheckpointMessageSeq,
   name,

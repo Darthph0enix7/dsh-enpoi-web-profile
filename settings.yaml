@@ -10314,8 +10314,8 @@ enpoi-orchestration:
       provider: freellmapi
       model: auto
     integrator:
-      provider: opencode
-      model: mimo-v2.5-free
+      provider: opencode-go
+      model: deepseek-v4.1-flash
   uiPreferences:
     hiddenModels:
       deepseek:

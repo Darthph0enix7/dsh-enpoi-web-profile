@@ -15,6 +15,8 @@ device. Companion to the fork repo `Darthph0enix7/deepseek-harness`
 | `pnpm-lock.yaml`, `pnpm-workspace.yaml` | Install reproducibility (hoisted linker, build allow-list: node-pty, cpu-features, ssh2) |
 | `rebuild-sidebar.sh` | Restores the patched sidebar sources + rebuilds the client bundle + restarts dsh-web. **Run after ANY `dsh plugin`/pnpm reinstall of this profile.** Restores only when the installed src lacks the `MIN_CENTER_COLUMN` marker (never clobbers newer local edits). |
 | `sidebar-patch/` | Our patch overlay for dsh-better-sidebar: `src/client/{Sidebar.tsx,split-pane.tsx,layout.css}` + `build-client.{mjs,cjs}` |
+| `scripts/dsh-rebrand.mjs` | Re-applies the fork branding to the served web artifact after any client rebuild or pnpm reinstall (Enpoi title in `apps/web/dist/{index.html,preview.html}`, the preview's dark boot marker, the branded favicon/manifest set, and the baked `productTitle` in `ui-layout`'s built client). Wired as this profile's `postinstall`; guard mode `node scripts/dsh-rebrand.mjs --check --live` also probes the running origin for the served title, the skin binding and the dark theme default (safeguard 19 in `~/dsh-migration/50-…md`). |
+| `patches/@deepseek-ai__dsh-web-frontend@0.1.7-enpoi.1.patch` | Registry-install half of the same branding fix, referenced by `pnpm.patchedDependencies` in `package.json` (workspace links are not patchable, so on this checkout the script above is the operative route; `pnpm.allowNonAppliedPatches` keeps installs quiet). |
 
 ## Settings & plugin Config (0.1.7 settings→Config migration)
 
@@ -49,6 +51,16 @@ through the config editor. The old `settings-file` service and the
   a composition row in **`cordis.patch.yml`** (the config-editor document). The
   one-shot `settings.yaml` import lands the same row here; the row is what keeps
   the default model-group chain alive.
+- **OpenCode free tier is retired by profile policy.** `opencode/*-free` links
+  answer `403 FreeTierError` to any non-OpenCode client ("You cannot use the
+  free tier in other harnesses", anomalyco/opencode#49621), so the `free` chain
+  stays present but `disabled: true`, no enabled chain may link one, and the
+  default seat names a paid `opencode-go` route. Because any settings write
+  re-persists the live row into `cordis.patch.yml` (the Model Groups enable
+  toggle writes `chains.<id>.disabled`; every model picker writes the seat's
+  `chain`), re-run **`node scripts/disable-free-tier.mjs`** after settings
+  edits; `packages/enpoi-capabilities/tests/profile-patch.spec.ts` fails the
+  profile test run if the invariant drifts.
 
 Operator checklist at the switch: the first 0.1.7 boot renames
 `~/.dsh/settings.yaml` to `settings.yaml.imported` and imports each section into

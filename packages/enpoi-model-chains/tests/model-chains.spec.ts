@@ -43,6 +43,23 @@ describe('enpoi-model-chains parseChainEntry', () => {
     expect(Object.isFrozen(chain!.links[0])).toBe(true)
   })
 
+  it('treats a non-string or blank effort as absent and keeps the link', () => {
+    const chain = parseChainEntry('efforts', {
+      links: [
+        { provider: 'p1', model: 'm1', effort: 7 },
+        { provider: 'p2', model: 'm2', effort: '   ' },
+        { provider: 'p3', model: 'm3', effort: 'max' },
+      ],
+    }, () => {})
+    // Absence is the only "no effort" spelling: the link stays usable and the
+    // adapter is left to resolve its own default, as if effort were undeclared.
+    expect(chain!.links).toEqual([
+      { provider: 'p1', model: 'm1' },
+      { provider: 'p2', model: 'm2' },
+      { provider: 'p3', model: 'm3', effort: 'max' },
+    ])
+  })
+
   it('drops malformed links (empty provider/model) and keeps the valid ones', () => {
     const warn = vi.fn()
     const chain = parseChainEntry('mixed', {
