@@ -91,6 +91,8 @@ export interface OrchestrationConfig {
   councils: Volatile<Record<string, unknown>>
   /** Operator-defined model failover chains (doc 60). */
   chains: Volatile<Record<string, unknown>>
+  /** Dynamic catalogue rules (doc 82 §E5): visibility, privacy, group selectors. */
+  catalogRules: Volatile<Record<string, unknown>>
   /** Orchestration parameters (council/keeper/oracle/memory/verifyGate). */
   parameters: Volatile<Record<string, unknown>>
   /** UI preferences (favorites, hidden models, hidden surfaces, provider order). */
@@ -118,6 +120,10 @@ export const OrchestrationSettingsSchema = Schema.object({
   // so the namespace contract admits the key rather than relying on
   // unknown-key survival.
   chains: live(Schema.dict(Schema.any()).default({})),
+  // Dynamic catalogue rules (doc 82 §E5): privacy seed, visibility hide rules,
+  // manual overrides. Owned by dsh-enpoi-catalog-rules and declared here so the
+  // namespace contract admits the key rather than relying on unknown-key survival.
+  catalogRules: live(Schema.dict(Schema.any()).default({})),
   parameters: live(Schema.dict(Schema.any()).default({})),
   // UI preferences (favorites, hidden models, model assignments, …) shared by
   // every client through `settings/document-updated`. The whole record stays

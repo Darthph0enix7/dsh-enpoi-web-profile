@@ -13,12 +13,15 @@
  * - Exact max output token limits.
  * - Exact modalities (text, image, audio, video, pdf).
  * - Exact reasoning options & effort ladders.
+ * - Tool-calling and price metadata (models.dev `tool_call` / `cost`) consumed
+ *   by the dynamic catalogue rules (dsh-enpoi-catalog-rules predicates).
  * - Live hot-swap into runtime memory without restarting the server.
  *
  * @module dsh-enpoi-provider-sync
  */
 
-import { readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
@@ -75,6 +78,17 @@ interface LiveModel {
   id: string
   name?: string
   contextWindow?: number
+  maxTokens?: number
+  /** Modalities the listing itself disclosed; `undefined` means it said nothing. */
+  input?: Array<'text' | 'image'>
+  /** Whether the listing advertised tool calling; `undefined` means undisclosed. */
+  tools?: boolean
+  /** Whether the listing advertised reasoning; `undefined` means undisclosed. */
+  reasoning?: boolean
+  /** The listing's own price fields, verbatim. */
+  pricing?: Record<string, string>
+  /** Whether the listing's directory marked the model free. */
+  isFree?: boolean
 }
 
 /** The llm-pi-ai namespace (branded through the settings seam). */
@@ -119,6 +133,11 @@ interface ModelsDevModel {
   reasoning_options?: Array<{ type?: string; values?: string[] }>
   tool_call?: boolean
   structured_output?: boolean
+  /** USD per million tokens, as models.dev publishes it. */
+  cost?: {
+    input?: number
+    output?: number
+  }
   modalities?: {
     input?: string[]
     output?: string[]
@@ -269,6 +288,21 @@ function getCatalogIndex(): Map<string, Model<Api>> {
   return index
 }
 
+/**
+ * Whether the installed pi-ai catalog describes this route. A described route
+ * needs no discovery: the catalog already answers with better metadata, and
+ * the discovered cache must never shadow it.
+ * @param route - the provider route key.
+ * @returns true when pi-ai ships one or more models for the route.
+ */
+export function isCatalogRoute(route: string): boolean {
+  try {
+    return getBuiltinModels(route as Parameters<typeof getBuiltinModels>[0]).length > 0
+  } catch {
+    return false
+  }
+}
+
 /** Cleanly beautifies raw model IDs into human-readable titles. */
 function beautifyId(id: string): string {
   return id
@@ -299,8 +333,124 @@ function beautifyId(id: string): string {
     .replace(/Free\b/i, '(Free)')
 }
 
-/** GET one provider's model listing. Fails loudly for the caller to log. */
-async function fetchModels(baseURL: string, key: string | undefined): Promise<LiveModel[]> {
+/** A positive integer field of a listing entry, or `undefined`. */
+function listingCapacity(...candidates: readonly unknown[]): number | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0) return candidate
+  }
+  return undefined
+}
+
+/** A non-empty string field of a listing entry, or `undefined`. */
+function listingString(...candidates: readonly unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return undefined
+}
+
+/** The modalities one listing entry disclosed, or `undefined` when it stayed silent. */
+function listingModalities(entry: Record<string, unknown>): Array<'text' | 'image'> | undefined {
+  const architecture = entry.architecture as { input_modalities?: unknown } | undefined
+  const raw = Array.isArray(entry.input_modalities)
+    ? entry.input_modalities
+    : Array.isArray(entry.modalities)
+      ? entry.modalities
+      : Array.isArray(architecture?.input_modalities)
+        ? architecture.input_modalities
+        : undefined
+  if (raw === undefined) return undefined
+  const inputs: Array<'text' | 'image'> = []
+  for (const value of raw) {
+    if (value === 'text' && !inputs.includes('text')) inputs.push('text')
+    if ((value === 'image' || value === 'vision') && !inputs.includes('image')) inputs.push('image')
+  }
+  return inputs.length === 0 ? undefined : inputs
+}
+
+/**
+ * The `supported_parameters` vocabulary OpenRouter-style gateways publish.
+ * Absent means undisclosed; present means the endpoint enumerated what it
+ * takes, so an omission is a disclosure of absence for the two flags read
+ * here — never an assumption in the other direction.
+ */
+function listingSupported(entry: Record<string, unknown>): { tools?: boolean; reasoning?: boolean } {
+  const raw = entry.supported_parameters
+  if (!Array.isArray(raw)) return {}
+  const strings = raw.filter((value): value is string => typeof value === 'string')
+  return {
+    tools: strings.includes('tools') || strings.includes('tool_choice'),
+    reasoning: strings.includes('reasoning'),
+  }
+}
+
+/** The listing's price fields as strings, or `undefined` when it priced nothing. */
+function listingPricing(entry: Record<string, unknown>): Record<string, string> | undefined {
+  const raw = entry.pricing
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const pricing: Record<string, string> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') pricing[key] = value
+    else if (typeof value === 'number' && Number.isFinite(value)) pricing[key] = String(value)
+  }
+  return Object.keys(pricing).length === 0 ? undefined : pricing
+}
+
+/**
+ * Normalize one raw listing row into the fields this sync understands. Every
+ * capability field stays absent when the listing did not disclose it, so the
+ * caller can tell "the endpoint said no" from "the endpoint said nothing".
+ * @param entry - one raw row of the endpoint's listing.
+ * @returns the normalized model, or `undefined` when it names no usable id.
+ */
+export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
+  if (entry === null || typeof entry !== 'object') return undefined
+  const row = entry as Record<string, unknown>
+  const id = listingString(row.id)
+  if (id === undefined) return undefined
+  const displayName = listingString(row.name, row.display_name, row.displayName)
+  const topProvider = row.top_provider as { context_length?: unknown; max_completion_tokens?: unknown } | undefined
+  const limit = row.limit as { context?: unknown; output?: unknown } | undefined
+  const contextWindow = listingCapacity(
+    row.context_length,
+    row.contextWindow,
+    row.context_window,
+    row.max_input_tokens,
+    topProvider?.context_length,
+    limit?.context,
+  )
+  const maxTokens = listingCapacity(
+    row.maxOutputTokens,
+    row.max_output_tokens,
+    row.maxTokens,
+    row.max_tokens,
+    topProvider?.max_completion_tokens,
+    limit?.output,
+  )
+  const supported = listingSupported(row)
+  return {
+    id,
+    ...displayName === undefined || displayName.length > 120 ? {} : { name: displayName },
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...maxTokens === undefined ? {} : { maxTokens },
+    ...listingModalities(row) === undefined ? {} : { input: listingModalities(row) },
+    ...supported.tools === undefined ? {} : { tools: supported.tools },
+    ...supported.reasoning === undefined ? {} : { reasoning: supported.reasoning },
+    ...listingPricing(row) === undefined ? {} : { pricing: listingPricing(row) },
+    ...typeof row.isFree === 'boolean' ? { isFree: row.isFree } : {},
+  }
+}
+
+/**
+ * GET one provider's model listing. Fails loudly for the caller to log; the
+ * caller is also the only one that knows whether the route already has a
+ * usable catalogue to fall back on.
+ * @param baseURL - the provider endpoint; `/models` is appended.
+ * @param key - the route's credential, when one exists. Kilo and other
+ *   anonymous gateways list unauthenticated.
+ * @returns the normalized listing in endpoint order, deduplicated by id.
+ */
+export async function fetchModels(baseURL: string, key: string | undefined): Promise<LiveModel[]> {
   const url = `${baseURL.replace(/\/+$/, '')}/models`
   const headers: Record<string, string> = { accept: 'application/json' }
   if (key !== undefined && key.length > 0) headers.authorization = `Bearer ${key}`
@@ -312,30 +462,167 @@ async function fetchModels(baseURL: string, key: string | undefined): Promise<Li
   const seen = new Set<string>()
   const models: LiveModel[] = []
   for (const raw of data) {
-    const entry = raw as { id?: unknown; name?: unknown; description?: unknown; contextWindow?: unknown; context_window?: unknown; context_length?: unknown }
-    const id = typeof entry?.id === 'string' ? entry.id : undefined
-    if (id === undefined || id.length === 0 || seen.has(id)) continue
-    seen.add(id)
-    const displayName = typeof entry?.name === 'string' && entry.name.length > 0 && entry.name.length <= 60
-      ? entry.name
-      : typeof entry?.description === 'string' && entry.description.length > 0 && entry.description.length <= 60
-        ? entry.description
-        : undefined
-    const contextWindow = typeof entry?.contextWindow === 'number'
-      ? entry.contextWindow
-      : typeof entry?.context_window === 'number'
-        ? entry.context_window
-        : typeof entry?.context_length === 'number'
-          ? entry.context_length
-          : undefined
-    models.push({
-      id,
-      ...displayName ? { name: displayName } : {},
-      ...contextWindow ? { contextWindow } : {},
-    })
+    const model = normalizeListingEntry(raw)
+    if (model === undefined || seen.has(model.id)) continue
+    seen.add(model.id)
+    models.push(model)
   }
   return models
 }
+
+/**
+ * One model of the discovered-model cache written for `llm-pi-ai` to read.
+ * The cache file is the contract between this profile plugin and the
+ * `dsh-llm-pi-ai` resolution layer (`src/discovered.ts` there owns the
+ * reader); keep the shapes in step.
+ */
+export interface DiscoveredFileModel {
+  id: string
+  name?: string
+  contextWindow?: number
+  maxTokens?: number
+  input?: Array<'text' | 'image'>
+  tools?: boolean
+  reasoning?: boolean
+  pricing?: Record<string, string>
+  isFree?: boolean
+  /** True only when neither models.dev, the installed catalog, nor the listing disclosed a capability. */
+  unverified?: boolean
+  source: 'discovered'
+  discoveredAt: number
+}
+
+/** One route's discovered models plus the fetch that produced them. */
+export interface DiscoveredFileRoute {
+  baseURL?: string
+  fetchedAt: number
+  models: DiscoveredFileModel[]
+}
+
+interface DiscoveredFile {
+  version: number
+  routes: Record<string, DiscoveredFileRoute>
+}
+
+/** Cache format version; must match `dsh-llm-pi-ai`'s reader. */
+const DISCOVERED_CACHE_VERSION = 1
+
+/** The shared discovered-model cache path, overridable for tests. */
+export function discoveredCachePath(): string {
+  const override = process.env.DSH_DISCOVERED_MODELS
+  if (override !== undefined && override.length > 0) return override
+  const dshHome = process.env.DSH_HOME
+  const base = dshHome !== undefined && dshHome.length > 0
+    ? dshHome
+    : join(process.env.HOME ?? '/home/adam', '.dsh')
+  return join(base, 'cache', 'discovered-models.json')
+}
+
+/** Read the cache tolerantly: a corrupt file is replaced, never fatal to a sync pass. */
+function readDiscoveredFile(path: string): DiscoveredFile {
+  try {
+    if (!existsSync(path)) return { version: DISCOVERED_CACHE_VERSION, routes: {} }
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<DiscoveredFile>
+    const routes = raw.routes
+    if (routes === null || typeof routes !== 'object' || Array.isArray(routes)) {
+      return { version: DISCOVERED_CACHE_VERSION, routes: {} }
+    }
+    // Normalize just enough for the merge to be total: a hand-edited route
+    // without a models array is dropped rather than crashing the pass that
+    // would have fixed it.
+    const safe: Record<string, DiscoveredFileRoute> = {}
+    for (const [route, value] of Object.entries(routes as Record<string, unknown>)) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+      const record = value as Partial<DiscoveredFileRoute>
+      if (!Array.isArray(record.models)) continue
+      safe[route] = {
+        ...typeof record.baseURL === 'string' ? { baseURL: record.baseURL } : {},
+        fetchedAt: typeof record.fetchedAt === 'number' ? record.fetchedAt : 0,
+        models: record.models,
+      }
+    }
+    return { version: DISCOVERED_CACHE_VERSION, routes: safe }
+  } catch {
+    return { version: DISCOVERED_CACHE_VERSION, routes: {} }
+  }
+}
+
+/** The content identity of a discovered record, excluding the provenance stamps a re-stamp would change. */
+function discoveredContent(model: object): string {
+  const { discoveredAt: _stamp, source: _source, ...rest } = model as { discoveredAt?: number; source?: string }
+  return JSON.stringify(rest)
+}
+
+/**
+ * Merge a fresh listing into the cache record for one route. Idempotent by
+ * construction: a model whose content is unchanged keeps its original
+ * `discoveredAt`, so re-running a sync pass over an unchanged endpoint leaves
+ * the file byte-identical instead of re-stamping every model every hour.
+ * @param previous - the route's existing record, when one exists.
+ * @param baseURL - the endpoint interrogated.
+ * @param models - the freshly analyzed models, without provenance stamps.
+ * @param now - the current epoch milliseconds.
+ * @returns the record to persist.
+ */
+export function mergeDiscoveredRoute(
+  previous: DiscoveredFileRoute | undefined,
+  baseURL: string,
+  models: Array<Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>>,
+  now: number,
+): DiscoveredFileRoute {
+  const priorById = new Map((previous?.models ?? []).map(model => [model.id, model]))
+  const merged: DiscoveredFileModel[] = models.map((model) => {
+    const prior = priorById.get(model.id)
+    return {
+      ...model,
+      source: 'discovered',
+      discoveredAt: prior !== undefined && discoveredContent(prior) === discoveredContent(model)
+        ? prior.discoveredAt
+        : now,
+    }
+  })
+  const unchanged = previous !== undefined
+    && previous.baseURL === baseURL
+    && JSON.stringify(previous.models) === JSON.stringify(merged)
+  return {
+    baseURL,
+    fetchedAt: unchanged ? previous.fetchedAt : now,
+    models: merged,
+  }
+}
+
+/**
+ * Persist one route's discovered models atomically. Cache-write failures are
+ * logged by the caller and never fail the sync pass: the settings-side merge
+ * (for configured routes) is the durable catalogue, and this file is the
+ * resolution layer's copy.
+ * @param route - the provider route key.
+ * @param record - the merged route record.
+ */
+export function writeDiscoveredRoute(route: string, record: DiscoveredFileRoute): void {
+  const path = discoveredCachePath()
+  const document = readDiscoveredFile(path)
+  document.version = DISCOVERED_CACHE_VERSION
+  document.routes[route] = record
+  mkdirSync(dirname(path), { recursive: true })
+  const temporary = `${path}.tmp-${String(process.pid)}`
+  writeFileSync(temporary, JSON.stringify(document), 'utf8')
+  renameSync(temporary, path)
+}
+
+/**
+ * The honest failure line for a route whose listing could not be fetched:
+ * the current error plus where a person can put models instead.
+ * @param route - the provider route key.
+ * @param error - the fetch failure.
+ * @returns one line the caller logs verbatim.
+ */
+export function describeSyncFailure(route: string, error: unknown): string {
+  return `route ${route}: sync failed — ${error instanceof Error ? error.message : String(error)};`
+    + ' add models manually on the Models page, or list them in llm-pi-ai.providers'
+    + `["${route}"].models`
+}
+
 
 /** Capacity fallback for one model id on one route. */
 interface CapacityFallback {
@@ -356,13 +643,23 @@ function fallbackFor(capacities: Record<string, RouteCapacity> | undefined, rout
 
 /** Detect input modalities (strictly 'text' | 'image' as required by pi-ai schema).
  *
- * Data-first: when models.dev / catalog carry modalities, they are
- * AUTHORITATIVE — id heuristics never add image on top (that produced false
- * vision claims for text-only models). Heuristics run only when no structured
- * data exists (custom/alias models).
+ * Data-first: when models.dev / catalog / the live listing carry modalities,
+ * they are AUTHORITATIVE — id heuristics never add image on top (that produced
+ * false vision claims for text-only models). Heuristics run only when no
+ * structured data exists at all (custom/alias models).
+ * @param id - the model id.
+ * @param mDev - the models.dev entry, when one exists.
+ * @param cat - the installed pi-ai catalog entry, when one exists.
+ * @param live - modalities the listing disclosed, when it disclosed any.
+ * @returns the accepted input types; `['text']` is the schema floor.
  */
-function detectModalities(id: string, mDev: ModelsDevModel | undefined, cat: Model<Api> | undefined): ('text' | 'image')[] {
-  const rawInputs = mDev?.modalities?.input ?? cat?.input ?? []
+function detectModalities(
+  id: string,
+  mDev: ModelsDevModel | undefined,
+  cat: Model<Api> | undefined,
+  live?: Array<'text' | 'image'>,
+): ('text' | 'image')[] {
+  const rawInputs = mDev?.modalities?.input ?? cat?.input ?? live ?? []
   const lower = id.toLowerCase()
 
   if (rawInputs.length > 0) {
@@ -395,8 +692,21 @@ function detectModalities(id: string, mDev: ModelsDevModel | undefined, cat: Mod
   return ['text']
 }
 
-/** Determines if a model has reasoning capabilities. */
-function isReasoningModel(id: string, mDev: ModelsDevModel | undefined, cat: Model<Api> | undefined): boolean {
+/**
+ * Determines if a model has reasoning capabilities.
+ * @param id - the model id.
+ * @param mDev - the models.dev entry, when one exists.
+ * @param cat - the installed pi-ai catalog entry, when one exists.
+ * @param live - whether the listing advertised reasoning; a boolean disclosure
+ *   wins over id heuristics and is never assumed when absent.
+ * @returns whether the model reasons.
+ */
+function isReasoningModel(
+  id: string,
+  mDev: ModelsDevModel | undefined,
+  cat: Model<Api> | undefined,
+  live?: boolean,
+): boolean {
   if (mDev?.reasoning === true) return true
   if (Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0) return true
   if (cat?.reasoning === true) return true
@@ -404,6 +714,7 @@ function isReasoningModel(id: string, mDev: ModelsDevModel | undefined, cat: Mod
     const nonOff = Object.keys(cat.thinkingLevelMap).filter(k => k !== 'off')
     if (nonOff.length > 0) return true
   }
+  if (live !== undefined) return live
   const lower = id.toLowerCase()
   return (
     lower.includes('think') ||
@@ -426,16 +737,46 @@ function isReasoningModel(id: string, mDev: ModelsDevModel | undefined, cat: Mod
   )
 }
 
-/** Enrich a live model with canonical naming, reasoning efforts, and capacity metadata. */
-function enrichModel(
+/** One model's two renderings: what settings stores and what the discovery cache keeps. */
+interface AnalyzedModel {
+  /**
+   * The settings-model record. Exactly the fields this sync has always
+   * written, plus `unverified: true` when nothing at all disclosed the
+   * model's capabilities.
+   */
+  settings: Record<string, unknown>
+  /** The discovered-cache record, minus the provenance stamps the writer adds. */
+  discovered: Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>
+}
+
+/**
+ * Analyze a live model with canonical naming, reasoning efforts, capacity
+ * metadata, and honest provenance.
+ *
+ * A model that neither models.dev, the installed catalog, nor the listing
+ * itself describes carries `unverified: true` and is rendered with the
+ * schema's floor (`text` input, no reasoning, no tools claim): the sync
+ * publishes what it knows, which here is nothing beyond the id.
+ * @param route - the provider route key, for models.dev scoping.
+ * @param model - the normalized listing entry.
+ * @param fallback - the route's capacity fallback for ids nothing sizes.
+ * @returns the settings record and the cache record.
+ */
+function analyzeModel(
   route: string,
   model: LiveModel,
   fallback: CapacityFallback | undefined,
-): Record<string, unknown> {
+): AnalyzedModel {
   const mDev = resolveFromModelsDev(route, model.id)
   const catalog = getCatalogIndex()
   const shortId = model.id.includes('/') ? model.id.split('/').pop()! : model.id
   const cat = catalog.get(model.id) ?? catalog.get(shortId)
+
+  // Nothing described this model: not models.dev, not the installed catalog,
+  // and not the listing beyond an id. Capabilities stay at the schema floor
+  // and the record is marked unverified rather than guessed at.
+  const unverified = mDev === undefined && cat === undefined
+    && model.input === undefined && model.reasoning === undefined && model.tools === undefined
 
   // 1. Resolve Name — models.dev is AUTHORITATIVE; the live proxy's
   // description is often mislabeled (e.g. gemini-2.5-flash-thinking described
@@ -462,9 +803,10 @@ function enrichModel(
   const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262_144
   const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32_768
 
-  // 3. Resolve Modalities & Capabilities
-  const inputModalities = detectModalities(model.id, mDev, cat)
-  const isReasoning = isReasoningModel(model.id, mDev, cat)
+  // 3. Resolve Modalities & Capabilities. An unverified model gets the floor,
+  // not the heuristics: "no metadata" must not read as "probably vision".
+  const inputModalities: ('text' | 'image')[] = unverified ? ['text'] : detectModalities(model.id, mDev, cat, model.input)
+  const isReasoning = unverified ? false : isReasoningModel(model.id, mDev, cat, model.reasoning)
 
   // 4. Resolve Reasoning Efforts
   // NOTE: the `off` level is deliberately NOT written as a key — `off` is a
@@ -512,14 +854,45 @@ function enrichModel(
     }
   }
 
+  // 5. Tool-calling and price metadata. Both feed the dynamic catalogue rules
+  // (dsh-enpoi-catalog-rules): the `tools` and `zeroPrice`/`maxPrice`
+  // predicates. models.dev wins; the listing fills what models.dev does not
+  // know; absent fields stay absent so a rule can tell "unknown" from "known
+  // free"/"known pays".
+  const tools = typeof mDev?.tool_call === 'boolean'
+    ? mDev.tool_call
+    : model.tools
+  const costInput = typeof mDev?.cost?.input === 'number' && Number.isFinite(mDev.cost.input) ? mDev.cost.input : undefined
+  const costOutput = typeof mDev?.cost?.output === 'number' && Number.isFinite(mDev.cost.output) ? mDev.cost.output : undefined
+  const cost = costInput !== undefined || costOutput !== undefined
+    ? { ...(costInput !== undefined ? { input: costInput } : {}), ...(costOutput !== undefined ? { output: costOutput } : {}) }
+    : undefined
+
   return {
-    id: model.id,
-    name,
-    contextWindow,
-    maxTokens,
-    input: inputModalities,
-    reasoning: isReasoning,
-    ...reasoningEfforts ? { reasoningEfforts } : {},
+    settings: {
+      id: model.id,
+      name,
+      contextWindow,
+      maxTokens,
+      input: inputModalities,
+      reasoning: isReasoning,
+      ...(tools !== undefined ? { tools } : {}),
+      ...(cost !== undefined ? { cost } : {}),
+      ...(reasoningEfforts ? { reasoningEfforts } : {}),
+      ...(unverified ? { unverified: true } : {}),
+    },
+    discovered: {
+      id: model.id,
+      name,
+      contextWindow,
+      maxTokens,
+      ...(unverified ? {} : { input: inputModalities }),
+      ...(tools === undefined ? {} : { tools }),
+      ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
+      ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
+      ...(model.isFree === undefined ? {} : { isFree: model.isFree }),
+      ...(unverified ? { unverified: true } : {}),
+    },
   }
 }
 
@@ -532,9 +905,21 @@ function mergeModels(
   const enriched: Array<Record<string, unknown>> = []
   for (const model of live) {
     const fallback = fallbackFor(capacities, route, model.id)
-    enriched.push(enrichModel(route, model, fallback))
+    enriched.push(analyzeModel(route, model, fallback).settings)
   }
   return enriched
+}
+
+/** Merge a live listing into the discovered-cache records, without provenance stamps. */
+export function mergeDiscoveredModels(
+  route: string,
+  live: LiveModel[],
+  capacities: Record<string, RouteCapacity> | undefined,
+): Array<Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>> {
+  return live.map((model) => {
+    const fallback = fallbackFor(capacities, route, model.id)
+    return analyzeModel(route, model, fallback).discovered
+  })
 }
 
 function stringifyComparable(models: Array<Record<string, unknown>> | undefined): string {
@@ -545,6 +930,9 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       contextWindow: m.contextWindow,
       maxTokens: m.maxTokens,
       reasoning: m.reasoningEfforts ? Object.keys(m.reasoningEfforts as object).sort() : null,
+      tools: m.tools ?? null,
+      cost: m.cost ?? null,
+      unverified: m.unverified ?? null,
     })),
   )
 }
@@ -576,17 +964,31 @@ export function apply(ctx: Context, config: Config): void {
     const credentials = ctx.get('credentials') as CredentialsSeam | undefined
     const revision = () => settings.describe().find(entry => entry.ns === LLM_NS)?.revision
 
-    for (const [route, profile] of Object.entries(section.providers)) {
-      const baseURL = endpoints[route] ?? profile.baseURL
+    // Configured routes plus every endpoint this deployment knows about. The
+    // extra endpoints are how a provider Adam has *selected but not yet saved*
+    // — a preset with a baseURL and no models — gets discovered and cached
+    // before the config write that would otherwise refuse it for resolving no
+    // models. A catalog-less route is never written to settings unless it is
+    // configured; the cache is its only home.
+    const routes = [...new Set([...Object.keys(section.providers), ...Object.keys(endpoints)])]
+
+    for (const route of routes) {
+      const profile: ProviderProfile | undefined = section.providers[route]
+      const baseURL = endpoints[route] ?? profile?.baseURL
       if (baseURL === undefined) {
         logger.debug(`route ${route}: no baseURL and no known endpoint — skipped`)
         continue
       }
+      // A route the installed catalog already describes has its answer; the
+      // discovered cache would only shadow a better one, so it is neither
+      // fetched nor written here.
+      const catalogRoute = isCatalogRoute(route)
+      if (profile === undefined && catalogRoute) continue
       let key: string | undefined
-      if (profile.apiKeyEnv !== undefined) {
+      if (profile?.apiKeyEnv !== undefined) {
         const hit = credentials === undefined ? undefined : await credentials.resolve(profile.apiKeyEnv)
         key = hit?.value
-      } else if (profile.pool?.identities !== undefined && profile.pool.identities.length > 0) {
+      } else if (profile?.pool?.identities !== undefined && profile.pool.identities.length > 0) {
         // Pooled routes carry no single apiKeyEnv: discover with the
         // highest-priority enabled identity's credential.
         const primary = [...profile.pool.identities]
@@ -599,26 +1001,51 @@ export function apply(ctx: Context, config: Config): void {
       }
       try {
         const live = await fetchModels(baseURL, key)
-        const merged = mergeModels(route, live, capacities)
-        const before = stringifyComparable(profile.models)
-        const after = stringifyComparable(merged)
-        if (before === after) {
-          logger.debug(`route ${route}: ${String(live.length)} live models, no change`)
-          continue
+        if (profile !== undefined) {
+          const merged = mergeModels(route, live, capacities)
+          const before = stringifyComparable(profile.models)
+          const after = stringifyComparable(merged)
+          if (before === after) {
+            logger.debug(`route ${route}: ${String(live.length)} live models, no change`)
+          } else {
+            for (let attempt = 0; ; attempt++) {
+              try {
+                await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', route, 'models'], value: merged }], revision())
+                logger.info(`route ${route}: catalog refreshed & enriched from models.dev — ${String(live.length)} live models`)
+                break
+              } catch (error) {
+                const conflict = error as Partial<SettingsConflictError>
+                if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
+                throw error
+              }
+            }
+          }
         }
-        for (let attempt = 0; ; attempt++) {
-          try {
-            await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', route, 'models'], value: merged }], revision())
-            logger.info(`route ${route}: catalog refreshed & enriched from models.dev — ${String(live.length)} live models`)
-            break
-          } catch (error) {
-            const conflict = error as Partial<SettingsConflictError>
-            if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
-            throw error
+        if (!catalogRoute) {
+          // Everything the endpoint advertised, provenanced and timestamped,
+          // for the llm-pi-ai resolution layer to serve while this route has
+          // no configured models. Idempotent: an unchanged listing leaves the
+          // file (and every discoveredAt) exactly as it was.
+          const previous = readDiscoveredFile(discoveredCachePath()).routes[route]
+          const record = mergeDiscoveredRoute(
+            previous,
+            baseURL,
+            mergeDiscoveredModels(route, live, capacities),
+            Date.now(),
+          )
+          if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {
+            logger.debug(`route ${route}: ${String(live.length)} discovered models, no change`)
+          } else {
+            try {
+              writeDiscoveredRoute(route, record)
+              logger.info(`route ${route}: discovered ${String(live.length)} models from ${baseURL} (source: discovered)`)
+            } catch (error) {
+              logger.warn(`route ${route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
+            }
           }
         }
       } catch (error) {
-        logger.warn(`route ${route}: sync failed — ${error instanceof Error ? error.message : String(error)}`)
+        logger.warn(describeSyncFailure(route, error))
       }
     }
   }

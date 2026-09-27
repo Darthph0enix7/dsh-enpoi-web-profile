@@ -1,0 +1,69 @@
+# dsh-enpoi-catalog-rules
+
+Dynamic rule/filter engine for the synced model catalogue (doc 82 §E5). Rules
+are **data** in `enpoi-orchestration.catalogRules`; the engine reads them plus
+the hourly-synced `llm-pi-ai` catalogue and provides the `catalogRules` service.
+It never writes settings and never deletes catalogue entries — hide ≠ delete.
+
+## Document
+
+```yaml
+enpoi-orchestration:
+  catalogRules:
+    version: 1
+    privacy:
+      providers: { mistral: trains, groq: no-train }   # route id → trains | no-train
+      models: { mistral/mistral-large-latest: no-train } # provider/model or bare id; beats provider
+    visibility:
+      hide:
+        - id: zero-price
+          when: { zeroPrice: true }                     # reason defaults to the predicate summary
+          # reason: "free tier"                          # optional picker string
+    overrides:
+      hidden: { openrouter: [some/model] }              # manual hidden pins
+      shown: { openrouter: [other/model] }              # manual visible pins
+      gated: { providers: [], models: [] }              # unavailable from this client
+```
+
+Predicates (all present clauses ANDed): `zeroPrice`, `maxPrice`, `tools`,
+`vision`, `reasoning`, `minContextWindow`, `provider`, `providerGlob`,
+`idGlob`, `nameGlob`, `noTraining`, `gated`. Unknown price/context/name fails
+the clause rather than guessing; **unknown privacy fails `noTraining` in both
+directions** — never treated as safe. The curated privacy seed lives in
+`src/rules.ts` and the profile settings document.
+
+## Precedence
+
+Manual hidden (the picker's `uiPreferences.hiddenModels` plus
+`overrides.hidden`) > manual shown (`overrides.shown`) > gated marker > hide
+rules > default visible. The picker renders `decide()`'s `reason`, e.g.
+`hidden by rule: zero-price`, `gated`, `hidden manually`, or
+`pinned visible (rule: zero-price)`.
+
+## Group selectors
+
+Chains may mix explicit `links` with `selectors`, expanded live through
+`ctx.get('catalogRules').expandSelector()` when the chain resolves. Matches are
+best-first (known-cheapest price, larger context, then id). A selector adopts
+the matches present at its first evaluation; `adopt: true` (opt-in) also
+adopts new matches continuously and announces them on stderr, while the
+default `adopt: false` holds newer matches as preview-only candidates.
+
+## Discipline
+
+A hide rule or manual pin that matches nothing emits a warning; a selector
+that matches nothing keeps the explicit links (and warns). `previewRulesChange`
+diffs a proposed document's hidden/gated effect over the live catalogue before
+the edit is applied.
+
+## Service
+
+`visibility()`, `decide(provider, model)`, `expandSelector(selector)`,
+`expandRawSelector(raw)` (the model-chains seam), `previewRulesChange(raw)`,
+`warnings()`.
+
+## Verification
+
+```sh
+pnpm exec vitest run packages/enpoi-catalog-rules packages/enpoi-model-chains
+```

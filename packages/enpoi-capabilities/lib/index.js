@@ -1196,6 +1196,10 @@ var OrchestrationSettingsSchema = Schema.object({
   // so the namespace contract admits the key rather than relying on
   // unknown-key survival.
   chains: live(Schema.dict(Schema.any()).default({})),
+  // Dynamic catalogue rules (doc 82 §E5): privacy seed, visibility hide rules,
+  // manual overrides. Owned by dsh-enpoi-catalog-rules and declared here so the
+  // namespace contract admits the key rather than relying on unknown-key survival.
+  catalogRules: live(Schema.dict(Schema.any()).default({})),
   parameters: live(Schema.dict(Schema.any()).default({})),
   // UI preferences (favorites, hidden models, model assignments, …) shared by
   // every client through `settings/document-updated`. The whole record stays

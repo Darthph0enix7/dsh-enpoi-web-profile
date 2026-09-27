@@ -19540,10 +19540,10 @@ async function setupSkills(ctx) {
   for (const skill of session.agent.skills) {
     try {
       const version = await client.beta.skills.versions.retrieve(skill.version, { skill_id: skill.skill_id });
-      let dirname2 = path2.basename(version.name.trim());
-      if (dirname2 === "" || dirname2 === "." || dirname2 === "..")
-        dirname2 = skill.skill_id;
-      const dest = path2.resolve(skillsRoot, dirname2);
+      let dirname3 = path2.basename(version.name.trim());
+      if (dirname3 === "" || dirname3 === "." || dirname3 === "..")
+        dirname3 = skill.skill_id;
+      const dest = path2.resolve(skillsRoot, dirname3);
       if (dest !== skillsRoot && !dest.startsWith(skillsRoot + path2.sep)) {
         log.warn("skill name escapes the skills dir; skipping", {
           component: "agent-tool-context",
@@ -76147,7 +76147,8 @@ var init_pi_messages = __esm({
 });
 
 // src/index.ts
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { dirname as dirname2, join as join2 } from "node:path";
 import Schema from "@deepseek-ai/schemastery";
 import { readSettingsDocument } from "dsh-enpoi-contracts";
 
@@ -77741,6 +77742,13 @@ function getCatalogIndex() {
   globalCatalogIndex = index;
   return index;
 }
+function isCatalogRoute(route) {
+  try {
+    return getBuiltinModels(route).length > 0;
+  } catch {
+    return false;
+  }
+}
 function beautifyId(id) {
   return id.replace(/^openai\//i, "OpenAI: ").replace(/^google\//i, "Google: ").replace(/^meta-llama\//i, "Meta: ").replace(/^qwen\//i, "Qwen: ").replace(/^minimax\//i, "MiniMax: ").replace(/^moonshotai\//i, "MoonshotAI: ").replace(/qwen(\d)/gi, "Qwen $1").replace(/mimo/gi, "MiMo").replace(/[-_.]/g, (m2, offset, str2) => {
     const prev = str2[offset - 1];
@@ -77748,6 +77756,85 @@ function beautifyId(id) {
     if (m2 === "." && /\d/.test(prev ?? "") && /\d/.test(next ?? "")) return ".";
     return " ";
   }).replace(/\s+/g, " ").trim().replace(/\b([a-z])/g, (_, c) => c.toUpperCase()).replace(/Gpt/g, "GPT").replace(/Vl/g, "VL").replace(/Ai/g, "AI").replace(/Qwen/g, "Qwen").replace(/Glm/g, "GLM").replace(/R1/g, "R1").replace(/V(\d)/g, "V$1").replace(/Free\b/i, "(Free)");
+}
+function listingCapacity(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
+  }
+  return void 0;
+}
+function listingString(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  }
+  return void 0;
+}
+function listingModalities(entry) {
+  const architecture = entry.architecture;
+  const raw = Array.isArray(entry.input_modalities) ? entry.input_modalities : Array.isArray(entry.modalities) ? entry.modalities : Array.isArray(architecture?.input_modalities) ? architecture.input_modalities : void 0;
+  if (raw === void 0) return void 0;
+  const inputs = [];
+  for (const value2 of raw) {
+    if (value2 === "text" && !inputs.includes("text")) inputs.push("text");
+    if ((value2 === "image" || value2 === "vision") && !inputs.includes("image")) inputs.push("image");
+  }
+  return inputs.length === 0 ? void 0 : inputs;
+}
+function listingSupported(entry) {
+  const raw = entry.supported_parameters;
+  if (!Array.isArray(raw)) return {};
+  const strings = raw.filter((value2) => typeof value2 === "string");
+  return {
+    tools: strings.includes("tools") || strings.includes("tool_choice"),
+    reasoning: strings.includes("reasoning")
+  };
+}
+function listingPricing(entry) {
+  const raw = entry.pricing;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+  const pricing = {};
+  for (const [key, value2] of Object.entries(raw)) {
+    if (typeof value2 === "string") pricing[key] = value2;
+    else if (typeof value2 === "number" && Number.isFinite(value2)) pricing[key] = String(value2);
+  }
+  return Object.keys(pricing).length === 0 ? void 0 : pricing;
+}
+function normalizeListingEntry(entry) {
+  if (entry === null || typeof entry !== "object") return void 0;
+  const row = entry;
+  const id = listingString(row.id);
+  if (id === void 0) return void 0;
+  const displayName = listingString(row.name, row.display_name, row.displayName);
+  const topProvider = row.top_provider;
+  const limit3 = row.limit;
+  const contextWindow = listingCapacity(
+    row.context_length,
+    row.contextWindow,
+    row.context_window,
+    row.max_input_tokens,
+    topProvider?.context_length,
+    limit3?.context
+  );
+  const maxTokens = listingCapacity(
+    row.maxOutputTokens,
+    row.max_output_tokens,
+    row.maxTokens,
+    row.max_tokens,
+    topProvider?.max_completion_tokens,
+    limit3?.output
+  );
+  const supported = listingSupported(row);
+  return {
+    id,
+    ...displayName === void 0 || displayName.length > 120 ? {} : { name: displayName },
+    ...contextWindow === void 0 ? {} : { contextWindow },
+    ...maxTokens === void 0 ? {} : { maxTokens },
+    ...listingModalities(row) === void 0 ? {} : { input: listingModalities(row) },
+    ...supported.tools === void 0 ? {} : { tools: supported.tools },
+    ...supported.reasoning === void 0 ? {} : { reasoning: supported.reasoning },
+    ...listingPricing(row) === void 0 ? {} : { pricing: listingPricing(row) },
+    ...typeof row.isFree === "boolean" ? { isFree: row.isFree } : {}
+  };
 }
 async function fetchModels(baseURL, key) {
   const url = `${baseURL.replace(/\/+$/, "")}/models`;
@@ -77761,19 +77848,78 @@ async function fetchModels(baseURL, key) {
   const seen = /* @__PURE__ */ new Set();
   const models = [];
   for (const raw of data) {
-    const entry = raw;
-    const id = typeof entry?.id === "string" ? entry.id : void 0;
-    if (id === void 0 || id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
-    const displayName = typeof entry?.name === "string" && entry.name.length > 0 && entry.name.length <= 60 ? entry.name : typeof entry?.description === "string" && entry.description.length > 0 && entry.description.length <= 60 ? entry.description : void 0;
-    const contextWindow = typeof entry?.contextWindow === "number" ? entry.contextWindow : typeof entry?.context_window === "number" ? entry.context_window : typeof entry?.context_length === "number" ? entry.context_length : void 0;
-    models.push({
-      id,
-      ...displayName ? { name: displayName } : {},
-      ...contextWindow ? { contextWindow } : {}
-    });
+    const model = normalizeListingEntry(raw);
+    if (model === void 0 || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push(model);
   }
   return models;
+}
+var DISCOVERED_CACHE_VERSION = 1;
+function discoveredCachePath() {
+  const override = process.env.DSH_DISCOVERED_MODELS;
+  if (override !== void 0 && override.length > 0) return override;
+  const dshHome = process.env.DSH_HOME;
+  const base = dshHome !== void 0 && dshHome.length > 0 ? dshHome : join2(process.env.HOME ?? "/home/adam", ".dsh");
+  return join2(base, "cache", "discovered-models.json");
+}
+function readDiscoveredFile(path6) {
+  try {
+    if (!existsSync(path6)) return { version: DISCOVERED_CACHE_VERSION, routes: {} };
+    const raw = JSON.parse(readFileSync(path6, "utf8"));
+    const routes = raw.routes;
+    if (routes === null || typeof routes !== "object" || Array.isArray(routes)) {
+      return { version: DISCOVERED_CACHE_VERSION, routes: {} };
+    }
+    const safe = {};
+    for (const [route, value2] of Object.entries(routes)) {
+      if (value2 === null || typeof value2 !== "object" || Array.isArray(value2)) continue;
+      const record = value2;
+      if (!Array.isArray(record.models)) continue;
+      safe[route] = {
+        ...typeof record.baseURL === "string" ? { baseURL: record.baseURL } : {},
+        fetchedAt: typeof record.fetchedAt === "number" ? record.fetchedAt : 0,
+        models: record.models
+      };
+    }
+    return { version: DISCOVERED_CACHE_VERSION, routes: safe };
+  } catch {
+    return { version: DISCOVERED_CACHE_VERSION, routes: {} };
+  }
+}
+function discoveredContent(model) {
+  const { discoveredAt: _stamp, source: _source, ...rest } = model;
+  return JSON.stringify(rest);
+}
+function mergeDiscoveredRoute(previous, baseURL, models, now) {
+  const priorById = new Map((previous?.models ?? []).map((model) => [model.id, model]));
+  const merged = models.map((model) => {
+    const prior = priorById.get(model.id);
+    return {
+      ...model,
+      source: "discovered",
+      discoveredAt: prior !== void 0 && discoveredContent(prior) === discoveredContent(model) ? prior.discoveredAt : now
+    };
+  });
+  const unchanged = previous !== void 0 && previous.baseURL === baseURL && JSON.stringify(previous.models) === JSON.stringify(merged);
+  return {
+    baseURL,
+    fetchedAt: unchanged ? previous.fetchedAt : now,
+    models: merged
+  };
+}
+function writeDiscoveredRoute(route, record) {
+  const path6 = discoveredCachePath();
+  const document2 = readDiscoveredFile(path6);
+  document2.version = DISCOVERED_CACHE_VERSION;
+  document2.routes[route] = record;
+  mkdirSync(dirname2(path6), { recursive: true });
+  const temporary = `${path6}.tmp-${String(process.pid)}`;
+  writeFileSync(temporary, JSON.stringify(document2), "utf8");
+  renameSync(temporary, path6);
+}
+function describeSyncFailure(route, error) {
+  return `route ${route}: sync failed \u2014 ${error instanceof Error ? error.message : String(error)}; add models manually on the Models page, or list them in llm-pi-ai.providers["${route}"].models`;
 }
 function fallbackFor(capacities, route, modelId) {
   const routeCaps = capacities?.[route];
@@ -77784,8 +77930,8 @@ function fallbackFor(capacities, route, modelId) {
   }
   return routeCaps.default === void 0 ? void 0 : { ...routeCaps.default, matched: "default" };
 }
-function detectModalities(id, mDev, cat) {
-  const rawInputs = mDev?.modalities?.input ?? cat?.input ?? [];
+function detectModalities(id, mDev, cat, live2) {
+  const rawInputs = mDev?.modalities?.input ?? cat?.input ?? live2 ?? [];
   const lower2 = id.toLowerCase();
   if (rawInputs.length > 0) {
     const inputs = ["text"];
@@ -77797,7 +77943,7 @@ function detectModalities(id, mDev, cat) {
   }
   return ["text"];
 }
-function isReasoningModel(id, mDev, cat) {
+function isReasoningModel(id, mDev, cat, live2) {
   if (mDev?.reasoning === true) return true;
   if (Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0) return true;
   if (cat?.reasoning === true) return true;
@@ -77805,14 +77951,16 @@ function isReasoningModel(id, mDev, cat) {
     const nonOff = Object.keys(cat.thinkingLevelMap).filter((k) => k !== "off");
     if (nonOff.length > 0) return true;
   }
+  if (live2 !== void 0) return live2;
   const lower2 = id.toLowerCase();
   return lower2.includes("think") || lower2.includes("reason") || lower2.includes("luna") || lower2.includes("sol") || lower2.includes("terra") || lower2.includes("flash-tiered") || lower2.includes("pro-agent") || lower2.includes("pro-high") || lower2.includes("opus-4-6") || lower2.includes("r1") || lower2.includes("o1") || lower2.includes("o3") || lower2.includes("o4") || lower2.includes("gpt-5") || lower2.includes("k3") || lower2.includes("m3") || lower2.includes("glm-5");
 }
-function enrichModel(route, model, fallback) {
+function analyzeModel(route, model, fallback) {
   const mDev = resolveFromModelsDev(route, model.id);
   const catalog = getCatalogIndex();
   const shortId = model.id.includes("/") ? model.id.split("/").pop() : model.id;
   const cat = catalog.get(model.id) ?? catalog.get(shortId);
+  const unverified = mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0;
   let name2 = mDev?.name;
   if (name2 === void 0 || name2.length === 0) {
     const liveName = model.name;
@@ -77828,8 +77976,8 @@ function enrichModel(route, model, fallback) {
   const prefixMax = fallback?.matched === "prefix" ? fallback.maxTokens : void 0;
   const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262144;
   const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32768;
-  const inputModalities = detectModalities(model.id, mDev, cat);
-  const isReasoning = isReasoningModel(model.id, mDev, cat);
+  const inputModalities = unverified ? ["text"] : detectModalities(model.id, mDev, cat, model.input);
+  const isReasoning = unverified ? false : isReasoningModel(model.id, mDev, cat, model.reasoning);
   let reasoningEfforts;
   if (isReasoning) {
     const levels = {};
@@ -77863,23 +78011,50 @@ function enrichModel(route, model, fallback) {
       reasoningEfforts = levels;
     }
   }
+  const tools = typeof mDev?.tool_call === "boolean" ? mDev.tool_call : model.tools;
+  const costInput = typeof mDev?.cost?.input === "number" && Number.isFinite(mDev.cost.input) ? mDev.cost.input : void 0;
+  const costOutput = typeof mDev?.cost?.output === "number" && Number.isFinite(mDev.cost.output) ? mDev.cost.output : void 0;
+  const cost = costInput !== void 0 || costOutput !== void 0 ? { ...costInput !== void 0 ? { input: costInput } : {}, ...costOutput !== void 0 ? { output: costOutput } : {} } : void 0;
   return {
-    id: model.id,
-    name: name2,
-    contextWindow,
-    maxTokens,
-    input: inputModalities,
-    reasoning: isReasoning,
-    ...reasoningEfforts ? { reasoningEfforts } : {}
+    settings: {
+      id: model.id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      input: inputModalities,
+      reasoning: isReasoning,
+      ...tools !== void 0 ? { tools } : {},
+      ...cost !== void 0 ? { cost } : {},
+      ...reasoningEfforts ? { reasoningEfforts } : {},
+      ...unverified ? { unverified: true } : {}
+    },
+    discovered: {
+      id: model.id,
+      name: name2,
+      contextWindow,
+      maxTokens,
+      ...unverified ? {} : { input: inputModalities },
+      ...tools === void 0 ? {} : { tools },
+      ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
+      ...model.pricing === void 0 ? {} : { pricing: model.pricing },
+      ...model.isFree === void 0 ? {} : { isFree: model.isFree },
+      ...unverified ? { unverified: true } : {}
+    }
   };
 }
 function mergeModels(route, live2, capacities) {
   const enriched = [];
   for (const model of live2) {
     const fallback = fallbackFor(capacities, route, model.id);
-    enriched.push(enrichModel(route, model, fallback));
+    enriched.push(analyzeModel(route, model, fallback).settings);
   }
   return enriched;
+}
+function mergeDiscoveredModels(route, live2, capacities) {
+  return live2.map((model) => {
+    const fallback = fallbackFor(capacities, route, model.id);
+    return analyzeModel(route, model, fallback).discovered;
+  });
 }
 function stringifyComparable(models) {
   return JSON.stringify(
@@ -77888,7 +78063,10 @@ function stringifyComparable(models) {
       name: m2.name,
       contextWindow: m2.contextWindow,
       maxTokens: m2.maxTokens,
-      reasoning: m2.reasoningEfforts ? Object.keys(m2.reasoningEfforts).sort() : null
+      reasoning: m2.reasoningEfforts ? Object.keys(m2.reasoningEfforts).sort() : null,
+      tools: m2.tools ?? null,
+      cost: m2.cost ?? null,
+      unverified: m2.unverified ?? null
     }))
   );
 }
@@ -77912,17 +78090,21 @@ function apply(ctx, config) {
     }
     const credentials = ctx.get("credentials");
     const revision = () => settings.describe().find((entry) => entry.ns === LLM_NS)?.revision;
-    for (const [route, profile] of Object.entries(section.providers)) {
-      const baseURL = endpoints[route] ?? profile.baseURL;
+    const routes = [.../* @__PURE__ */ new Set([...Object.keys(section.providers), ...Object.keys(endpoints)])];
+    for (const route of routes) {
+      const profile = section.providers[route];
+      const baseURL = endpoints[route] ?? profile?.baseURL;
       if (baseURL === void 0) {
         logger.debug(`route ${route}: no baseURL and no known endpoint \u2014 skipped`);
         continue;
       }
+      const catalogRoute = isCatalogRoute(route);
+      if (profile === void 0 && catalogRoute) continue;
       let key;
-      if (profile.apiKeyEnv !== void 0) {
+      if (profile?.apiKeyEnv !== void 0) {
         const hit = credentials === void 0 ? void 0 : await credentials.resolve(profile.apiKeyEnv);
         key = hit?.value;
-      } else if (profile.pool?.identities !== void 0 && profile.pool.identities.length > 0) {
+      } else if (profile?.pool?.identities !== void 0 && profile.pool.identities.length > 0) {
         const primary = [...profile.pool.identities].filter((identity) => identity.enabled !== false).sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))[0];
         if (primary !== void 0) {
           const hit = credentials === void 0 ? void 0 : await credentials.resolve(primary.credentialRef);
@@ -77931,26 +78113,47 @@ function apply(ctx, config) {
       }
       try {
         const live2 = await fetchModels(baseURL, key);
-        const merged = mergeModels(route, live2, capacities);
-        const before = stringifyComparable(profile.models);
-        const after = stringifyComparable(merged);
-        if (before === after) {
-          logger.debug(`route ${route}: ${String(live2.length)} live models, no change`);
-          continue;
+        if (profile !== void 0) {
+          const merged = mergeModels(route, live2, capacities);
+          const before = stringifyComparable(profile.models);
+          const after = stringifyComparable(merged);
+          if (before === after) {
+            logger.debug(`route ${route}: ${String(live2.length)} live models, no change`);
+          } else {
+            for (let attempt = 0; ; attempt++) {
+              try {
+                await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", route, "models"], value: merged }], revision());
+                logger.info(`route ${route}: catalog refreshed & enriched from models.dev \u2014 ${String(live2.length)} live models`);
+                break;
+              } catch (error) {
+                const conflict = error;
+                if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
+                throw error;
+              }
+            }
+          }
         }
-        for (let attempt = 0; ; attempt++) {
-          try {
-            await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", route, "models"], value: merged }], revision());
-            logger.info(`route ${route}: catalog refreshed & enriched from models.dev \u2014 ${String(live2.length)} live models`);
-            break;
-          } catch (error) {
-            const conflict = error;
-            if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
-            throw error;
+        if (!catalogRoute) {
+          const previous = readDiscoveredFile(discoveredCachePath()).routes[route];
+          const record = mergeDiscoveredRoute(
+            previous,
+            baseURL,
+            mergeDiscoveredModels(route, live2, capacities),
+            Date.now()
+          );
+          if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
+            logger.debug(`route ${route}: ${String(live2.length)} discovered models, no change`);
+          } else {
+            try {
+              writeDiscoveredRoute(route, record);
+              logger.info(`route ${route}: discovered ${String(live2.length)} models from ${baseURL} (source: discovered)`);
+            } catch (error) {
+              logger.warn(`route ${route}: discovered models could not be cached \u2014 ${error instanceof Error ? error.message : String(error)}`);
+            }
           }
         }
       } catch (error) {
-        logger.warn(`route ${route}: sync failed \u2014 ${error instanceof Error ? error.message : String(error)}`);
+        logger.warn(describeSyncFailure(route, error));
       }
     }
   }
@@ -77976,8 +78179,16 @@ function apply(ctx, config) {
 export {
   Config,
   apply,
+  describeSyncFailure,
+  discoveredCachePath,
+  fetchModels,
   inject,
-  name
+  isCatalogRoute,
+  mergeDiscoveredModels,
+  mergeDiscoveredRoute,
+  name,
+  normalizeListingEntry,
+  writeDiscoveredRoute
 };
 /*! Bundled license information:
 

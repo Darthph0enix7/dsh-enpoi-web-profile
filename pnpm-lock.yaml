@@ -32,6 +32,9 @@ importers:
       dsh-enpoi-cascade:
         specifier: workspace:*
         version: link:packages/enpoi-cascade
+      dsh-enpoi-catalog-rules:
+        specifier: workspace:*
+        version: link:packages/enpoi-catalog-rules
       dsh-enpoi-context-keeper:
         specifier: workspace:*
         version: link:packages/enpoi-context-keeper
@@ -119,6 +122,12 @@ importers:
         version: link:../enpoi-contracts
 
   packages/enpoi-cascade: {}
+
+  packages/enpoi-catalog-rules:
+    dependencies:
+      dsh-enpoi-contracts:
+        specifier: workspace:*
+        version: link:../enpoi-contracts
 
   packages/enpoi-context-keeper:
     dependencies:

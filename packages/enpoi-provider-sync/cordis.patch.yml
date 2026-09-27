@@ -16,11 +16,19 @@
         syncDelayMs: 8000
         # Known endpoints for routes whose profile leaves baseURL to the
         # pi-ai catalog default (baseURL set in the profile always wins).
+        # A route listed here but not yet configured is still fetched: its
+        # models land in the shared discovered-model cache (source:
+        # discovered) so the provider editor can save the preset and the
+        # picker can list them before any models are written to settings.
+        # Kilo is seeded as an endpoint, not as a model list: discovery is
+        # primary because Kilo rotates its free pool server-side, and a
+        # hand-copied :free list would go stale silently. Anonymous, no key.
         endpoints:
           antigravity: http://100.122.163.25:8082/v1
           deepseek: https://api.deepseek.com
           openrouter: https://openrouter.ai/api/v1
           huggingface: https://router.huggingface.co/v1
+          kilo: https://api.kilo.ai/api/gateway
         # Capacity fallbacks for models the live /models endpoint does not
         # describe (most OpenAI-style listings carry only ids). Catalog
         # routes still inherit pi-ai catalog capacities for known ids; these

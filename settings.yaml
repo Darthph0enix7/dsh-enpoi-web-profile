@@ -10316,6 +10316,51 @@ enpoi-orchestration:
     integrator:
       provider: opencode-go
       model: deepseek-v4.1-flash
+  # Dynamic catalogue rules (doc 82 §E5). Rules are data: predicates over the
+  # hourly-synced llm-pi-ai catalogue. Manual pins (uiPreferences.hiddenModels
+  # plus overrides.shown) always win over rules; rules never delete entries.
+  # Privacy seed: Google/Kilo/Mistral free tiers train on content; Groq and
+  # paid Mistral models do not. Anything absent stays "unknown" (never safe).
+  catalogRules:
+    version: 1
+    privacy:
+      providers:
+        google: trains
+        google-ai-studio: trains
+        antigravity: trains
+        kilo: trains
+        kilo-code: trains
+        mistral: trains
+        groq: no-train
+      models:
+        mistral/mistral-large-latest: no-train
+        mistral/mistral-medium-latest: no-train
+        mistral/mistral-small-latest: no-train
+        mistral/codestral-latest: no-train
+    visibility:
+      # `hide` rules add hidden state; the picker renders the reason.
+      hide: []
+    overrides:
+      # Manual visible pins beat hide rules and gating (shown: {provider: [ids]}).
+      shown: {}
+      # Client-side gating (unavailable plan): gated: {providers: [], models: []}.
+      gated:
+        providers: []
+        models: []
+  # Example of a self-maintaining free chain (disabled until enabled here):
+  # explicit links first, then selectors re-evaluated against the live catalogue.
+  chains:
+    free-tools:
+      label: Free + tools (self-maintaining example)
+      links: []
+      selectors:
+        - when:
+            zeroPrice: true
+            tools: true
+            minContextWindow: 32768
+            noTraining: true
+          adopt: true
+      disabled: true
   uiPreferences:
     hiddenModels:
       deepseek:
