@@ -695,11 +695,13 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
 /**
  * The tool names an agent's model-facing surface keeps under its approval
  * policy. An answerable policy (`ask`, or no logged policy) returns every name
- * unchanged. An impossible one (`never`, e.g. a delegated child) drops every
- * tool whose resolution is `ask`: no user can answer it and the executor
- * auto-denies each call, so advertising it only burns a model call. A grant
- * resolves the tool to `allow` in {@link resolvePolicy} and keeps it visible;
- * `allow`/`deny` tools are out of scope here.
+ * unchanged. Under an impossible one (`never`, e.g. a delegated child) only a
+ * tool that can never run is dropped: a `deny` resolution is final — no user can
+ * answer it and the executor hard-denies every call. An `ask` stays visible
+ * because a delegated child's ask is forwarded to the nearest live root (the
+ * doc-55 forwarding path) and resolves there. A grant resolves the tool to
+ * `allow` in {@link resolvePolicy} and keeps it visible; `allow` tools are out
+ * of scope here.
  * @param toolNames - the assembled wire tool names.
  * @param approvalPolicy - the agent's effective approval policy.
  * @param input - resolution context (agent role, permission config, sandbox, MCP catalog).
@@ -716,16 +718,43 @@ export function advertisedToolNames(
   },
 ): string[] {
   if (approvalPolicy !== 'never') return [...toolNames]
-  return toolNames.filter((toolName) => {
-    const decision = resolvePolicy({
-      toolName,
-      agent: input.agent,
-      config: input.config,
-      sandboxMode: input.sandboxMode,
-      mcpServerNames: input.mcpServerNames,
-    })
-    return decision.kind !== 'ask'
+  return toolNames.filter(toolName => !neverRunsTool(toolName, input))
+}
+
+/**
+ * Whether one tool can never run for an agent whose approval policy is
+ * `never`. Only a decision that stays `deny` is impossible — a tool-level deny
+ * row, the unknown-tools deny default, or a role-gated deny — because an `ask`
+ * is forwarded to the nearest live root (the doc-55 forwarding path) and
+ * resolves there. bash is judged by its tool-level row: its command-less
+ * resolution is the empty-command guard, not a policy on bash itself, and its
+ * per-command asks are forwarded like any other ask.
+ * @param toolName - the assembled wire tool name.
+ * @param input - resolution context (agent role, permission config, sandbox, MCP catalog).
+ * @returns whether the tool has no runnable path for that child.
+ */
+function neverRunsTool(
+  toolName: string,
+  input: {
+    agent?: string
+    config: PermissionPolicyConfig
+    sandboxMode?: string
+    mcpServerNames?: readonly string[]
+  },
+): boolean {
+  if (toolName === 'bash') {
+    const agentBash = input.agent !== undefined ? input.config.agents?.[input.agent]?.tools?.bash : undefined
+    const policy = agentBash ?? input.config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? 'ask'
+    return policy === 'deny'
+  }
+  const decision = resolvePolicy({
+    toolName,
+    agent: input.agent,
+    config: input.config,
+    sandboxMode: input.sandboxMode,
+    mcpServerNames: input.mcpServerNames,
   })
+  return decision.kind === 'deny'
 }
 
 /** True when toolName is an MCP-namespaced tool (mcp__server__tool). */

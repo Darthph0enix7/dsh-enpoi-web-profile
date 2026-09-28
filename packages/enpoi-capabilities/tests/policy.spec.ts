@@ -414,17 +414,41 @@ describe('reviewer-exec policy seat', () => {
   })
 })
 
-describe('approval-impossible agents are not advertised unanswerable asks', () => {
-  const TOOLS = ['read', 'bash', 'oracle_review', 'run_code', 'mcp__demo__mutate']
+describe('never-policy tool surface (forwarding makes asks usable)', () => {
+  const TOOLS = ['read', 'bash', 'oracle_review', 'run_code', 'mcp__demo__mutate', 'str_replace_editor']
 
-  it('never-policy drops ask-required-and-ungranted tools and keeps allowed ones', () => {
-    const kept = advertisedToolNames(TOOLS, 'never', { agent: 'fixer', config: { defaults: { unknownTools: 'ask' } } })
-    expect(kept).not.toContain('run_code')
-    expect(kept).not.toContain('mcp__demo__mutate')
+  it('keeps ask tools visible now that their ask forwards, and drops only deny', () => {
+    const kept = advertisedToolNames(TOOLS, 'never', {
+      agent: 'fixer',
+      config: { defaults: { unknownTools: 'ask' }, agents: { fixer: { tools: { run_code: 'deny' } } } },
+    })
+    // 2026-09-28 (doc 55 forwarding): a delegated child's ask is forwarded to
+    // the nearest live root and resolves there, so an ask tool is usable and
+    // must stay advertised — hiding it removed str_replace_editor, MCP tools,
+    // and every unknown tool from the child's surface.
+    expect(kept).toContain('str_replace_editor')
+    expect(kept).toContain('mcp__demo__mutate')
     expect(kept).toContain('read')
     expect(kept).toContain('oracle_review')
     // bash keeps its place: its surface resolution is per-command, not an ask.
     expect(kept).toContain('bash')
+    // A deny resolution can never run for this child, so it stays hidden.
+    expect(kept).not.toContain('run_code')
+  })
+
+  it('drops an unconfigured tool only when the unknown-tools default itself denies', () => {
+    const kept = advertisedToolNames(TOOLS, 'never', { agent: 'fixer', config: { defaults: { unknownTools: 'deny' } } })
+    expect(kept).not.toContain('mcp__demo__mutate')
+    expect(kept).toContain('read')
+    expect(kept).toContain('str_replace_editor')
+  })
+
+  it('drops bash only when its tool-level row denies it, never for the empty-command guard', () => {
+    expect(advertisedToolNames(['bash'], 'never', { agent: 'fixer', config: {} })).toEqual(['bash'])
+    expect(advertisedToolNames(['bash'], 'never', {
+      agent: 'fixer',
+      config: { agents: { fixer: { tools: { bash: 'deny' } } } },
+    })).toEqual([])
   })
 
   it('a standing grant makes the tool usable again and it stays visible', () => {

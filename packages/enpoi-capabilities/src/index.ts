@@ -32,7 +32,7 @@ import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from 
 import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
 import {
-  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf,
+  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam,
   type ApprovalOutcome, type ChildAgentLike, type ParentRailQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from './forwarding'
 
@@ -748,6 +748,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       return typeof depth === 'number' && Number.isSafeInteger(depth) && depth >= 0 ? depth : 1
     },
   })
+  // Finality seam (doc 55): the core tool registry's ask path reads
+  // `forwardedApprovals` so an outer ask or a reviewer denial cannot re-open a
+  // call a forwarded child ask already allowed. Keyed by the requester's
+  // session and the child's call identity; process-local, like the grants.
+  ctx.provide('forwardedApprovals', forwardedApprovalsSeam(approvalForwarding))
 
   const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: AgentLike; signal?: AbortSignal }, next: () => Promise<{ kind: string; reason?: string }>) => {
     // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
@@ -786,21 +791,30 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // the parent's existing machinery. The child suspends on this await and a
       // rejection returns as its corrective tool error; rails and standing
       // consent are decided in forwarding.ts, never here.
-      if (delegatedChildOf(exec.agent as ChildAgentLike | undefined) !== undefined) {
+      const delegated = delegatedChildOf(exec.agent as ChildAgentLike | undefined)
+      if (delegated !== undefined) {
         const resolution = await approvalForwarding.forward({
           agent: exec.agent as ChildAgentLike | undefined,
           toolName: exec.name,
           args: exec.arguments,
           decision,
+          ...exec.callId !== undefined ? { callId: exec.callId } : {},
           ...exec.signal !== undefined ? { signal: exec.signal } : {},
         })
         if (resolution.kind === 'deny') return { kind: 'deny', reason: resolution.reason }
         // The forwarded decision is approval, not the whole gate: downstream
         // pre-execute layers (tool groups, mutation capture) still run. A
         // downstream ask cannot be satisfied from a child's `never` session, so
-        // it fails closed rather than dead-ending in the approval service.
+        // it fails closed rather than dead-ending in the approval service —
+        // UNLESS this exact call is already final: the forwarded ask answered
+        // it, so a downstream layer re-asking (e.g. the Auto reviewer denying
+        // after the human approved) cannot re-open it.
         const downstream = await next()
         if (downstream.kind === 'ask') {
+          if (exec.callId !== undefined
+            && approvalForwarding.resolvesFinalCall(delegated.childSessionId, String(exec.callId), exec.name)) {
+            return { kind: 'allow', reason: 'the forwarded parent decision is final for this call' }
+          }
           return { kind: 'deny', reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` }
         }
         return downstream

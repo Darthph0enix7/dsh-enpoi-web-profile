@@ -9,10 +9,10 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, railHitOf, recommendationOf,
+  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam, railHitOf, recommendationOf,
   type ApprovalOutcome, type ChildAgentLike, type ForwardingDeps, type RootAskQuery, type RootHandle, type RootMode,
 } from '../src/forwarding'
-import { resolvePolicy, type PermissionPolicyConfig } from '../src/policy'
+import { advertisedToolNames, resolvePolicy, type PermissionPolicyConfig } from '../src/policy'
 
 const ROOT: RootHandle = { id: 'root-1', agent: { fake: 'root-agent' } }
 
@@ -269,6 +269,90 @@ describe('grant scoping', () => {
     const result = await f.forwarder.forward({ agent: { session: { header: { id: 'root' } } }, toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
     expect(result.kind).toBe('deny')
     expect(f.asks).toHaveLength(0)
+  })
+})
+
+describe('forwarded-approval finality', () => {
+  /** One ask for a non-bash tool (the strip keeps these under a never policy). */
+  function toolAsk(toolName: string) {
+    const decision = resolvePolicy({ toolName, config: {} })
+    if (decision.kind !== 'ask') throw new Error(`fixture tool did not ask: ${toolName} (${decision.kind})`)
+    return decision
+  }
+
+  it('records an allowed call against the child session, call id, and tool', async () => {
+    const f = fakeDeps({ outcomes: ['allowed-once'] })
+    const result = await f.forwarder.forward({
+      agent: childAgent(), toolName: 'str_replace_editor', args: { file_path: '/ws/a.ts' },
+      decision: toolAsk('str_replace_editor'), callId: 'call-9',
+    })
+    expect(result.kind).toBe('allow')
+    expect(f.forwarder.resolvesFinalCall('child-1', 'call-9', 'str_replace_editor')).toBe(true)
+    // Another session, another call, or another tool reusing the id never matches.
+    expect(f.forwarder.resolvesFinalCall('child-2', 'call-9', 'str_replace_editor')).toBe(false)
+    expect(f.forwarder.resolvesFinalCall('child-1', 'call-10', 'str_replace_editor')).toBe(false)
+    expect(f.forwarder.resolvesFinalCall('child-1', 'call-9', 'write')).toBe(false)
+  })
+
+  it('records the Full access standing decision and a rejection records nothing', async () => {
+    const consent = fakeDeps({ mode: 'full-access' })
+    await consent.forwarder.forward({
+      agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain'), callId: 'call-a',
+    })
+    expect(consent.asks).toHaveLength(0)
+    expect(consent.forwarder.resolvesFinalCall('child-1', 'call-a', 'bash')).toBe(true)
+
+    const denied = fakeDeps({ outcomes: ['rejected'] })
+    const result = await denied.forwarder.forward({
+      agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain'), callId: 'call-b',
+    })
+    expect(result.kind).toBe('deny')
+    expect(denied.forwarder.resolvesFinalCall('child-1', 'call-b', 'bash')).toBe(false)
+  })
+
+  it('a second forward of an already-final call resolves allow without another card', async () => {
+    const f = fakeDeps({ outcomes: ['allowed-once', 'rejected'] })
+    const input = {
+      agent: childAgent(), toolName: 'bash' as const, args: { command: 'rm plain' },
+      decision: bashAsk('rm plain'), callId: 'call-again',
+    }
+    expect((await f.forwarder.forward(input)).kind).toBe('allow')
+    const again = await f.forwarder.forward(input)
+    expect(again.kind).toBe('allow')
+    expect(f.asks).toHaveLength(1)
+  })
+
+  it('without a call identity nothing is recorded (no key to reuse)', async () => {
+    const f = fakeDeps({ outcomes: ['allowed-once'] })
+    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(result.kind).toBe('allow')
+    expect(f.forwarder.resolvesFinalCall('child-1', 'anything', 'bash')).toBe(false)
+  })
+
+  it('serves the core registry facade from the structural session slice', async () => {
+    const f = fakeDeps({ outcomes: ['allowed-once'] })
+    await f.forwarder.forward({
+      agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain'), callId: 'call-7',
+    })
+    const seam = forwardedApprovalsSeam(f.forwarder)
+    expect(seam.resolves({ header: { id: 'child-1' } }, 'call-7', 'bash')).toBe(true)
+    expect(seam.resolves({ header: { id: 'child-2' } }, 'call-7', 'bash')).toBe(false)
+    expect(seam.resolves({ header: { id: 'child-1' } }, 'call-7', 'write')).toBe(false)
+    expect(seam.resolves(undefined, 'call-7', 'bash')).toBe(false)
+    expect(seam.resolves({ header: { id: 'child-1' } }, 7, 'bash')).toBe(false)
+  })
+
+  it('advertises an ask tool under a never policy and forwards its ask', async () => {
+    const names = advertisedToolNames(['str_replace_editor', 'read'], 'never', { agent: 'fixer', config: {} })
+    expect(names).toEqual(['str_replace_editor', 'read'])
+    const f = fakeDeps({ outcomes: ['allowed-once'] })
+    const result = await f.forwarder.forward({
+      agent: childAgent(), toolName: 'str_replace_editor', args: { file_path: '/ws/a.ts' },
+      decision: toolAsk('str_replace_editor'), callId: 'call-3',
+    })
+    expect(result.kind).toBe('allow')
+    expect(f.asks).toHaveLength(1)
+    expect(f.asks[0].toolName).toBe('str_replace_editor')
   })
 })
 

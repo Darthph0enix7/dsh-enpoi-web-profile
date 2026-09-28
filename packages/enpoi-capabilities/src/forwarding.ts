@@ -44,6 +44,13 @@
  * deny because denies terminate in {@link resolvePolicy} before this module runs.
  * A broad allow is asked a SECOND time before it is stored. A child can never
  * self-escalate: this module only maps an ask the child's own policy produced.
+ *
+ * Finality: an ask resolved `allow` is recorded against the requester's own
+ * session and call identity ({@link ChildApprovalForwarder.resolvesFinalCall})
+ * and served to the host as the `forwardedApprovals` service. The core tool
+ * registry's ask path consumes that record, so a later outer ask or a reviewer
+ * denial cannot re-open a call the human (or the root's Full-access mode)
+ * already allowed.
  */
 
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path'
@@ -171,6 +178,8 @@ export interface ChildAskInput {
   readonly toolName: string
   readonly args?: Record<string, unknown>
   readonly decision: AskDecision
+  /** The child's call identity; an allowed ask is recorded against it as final. */
+  readonly callId?: string | number | undefined
   readonly signal?: AbortSignal
 }
 
@@ -412,6 +421,8 @@ interface SubtreeGrant {
 export class ChildApprovalForwarder {
   private readonly grants = new Map<string, SubtreeGrant[]>()
   private readonly pending = new Map<string, Promise<ChildAskResolution>>()
+  /** Calls an allow resolution made final: child session id → call id → tool name. */
+  private readonly allowedCalls = new Map<string, Map<string, string>>()
 
   constructor(private readonly deps: ForwardingDeps) {}
 
@@ -419,11 +430,49 @@ export class ChildApprovalForwarder {
    * Resolve one child ask through the parent. Rails run first and are never
    * card-approvable; then an existing subtree grant; then the root's mode
    * (standing consent / card / fail closed). A rejection is returned as a
-   * corrective deny; nothing here kills the child.
+   * corrective deny; nothing here kills the child. An allow is final for the
+   * exact call identity: {@link resolvesFinalCall} reports it so no later ask
+   * or reviewer denial can re-open what the human (or the root's Full-access
+   * mode) already allowed, and a call already on record resolves allow here
+   * without another card.
    * @param input - the child agent, tool call, and the ask the child's policy produced.
    * @returns the allow/deny resolution for the pre-execute listener.
    */
   async forward(input: ChildAskInput): Promise<ChildAskResolution> {
+    if (input.callId !== undefined) {
+      const child = delegatedChildOf(input.agent)
+      if (child !== undefined && this.resolvesFinalCall(child.childSessionId, String(input.callId), input.toolName)) {
+        return { kind: 'allow', reason: 'this call was already allowed by a forwarded ask' }
+      }
+    }
+    const resolution = await this.resolveAsk(input)
+    if (resolution.kind === 'allow' && input.callId !== undefined) {
+      const child = delegatedChildOf(input.agent)
+      if (child !== undefined) {
+        const calls = this.allowedCalls.get(child.childSessionId) ?? new Map<string, string>()
+        calls.set(String(input.callId), input.toolName)
+        this.allowedCalls.set(child.childSessionId, calls)
+      }
+    }
+    return resolution
+  }
+
+  /**
+   * Whether one exact call from one child session was already allowed by a
+   * forwarded ask. The record is scoped to the requesting child session and
+   * pins the tool name, so a sibling session or another tool reusing the call
+   * id never matches.
+   * @param childSessionId - the requesting child session.
+   * @param callId - the call identity the forwarded ask was recorded under.
+   * @param toolName - the tool the recorded ask resolved for.
+   * @returns `true` when the call is already allowed and final.
+   */
+  resolvesFinalCall(childSessionId: string, callId: string, toolName: string): boolean {
+    return this.allowedCalls.get(childSessionId)?.get(callId) === toolName
+  }
+
+  /** Resolve one child ask through the parent; see {@link forward}. */
+  private async resolveAsk(input: ChildAskInput): Promise<ChildAskResolution> {
     const child = delegatedChildOf(input.agent)
     if (child === undefined) {
       this.deps.report(`deny: non-child ask for ${input.toolName} reached the child forwarder`)
@@ -610,6 +659,34 @@ export class ChildApprovalForwarder {
       grants.push({ proposal, admittedAt: Date.now() })
       this.grants.set(childSessionId, grants)
     }
+  }
+}
+
+/** The session id inside the structural session slice a host passes to the seam. */
+function sessionIdOf(session: unknown): string | undefined {
+  const header = (session as { header?: { id?: unknown } } | undefined)?.header
+  return typeof header?.id === 'string' && header.id !== '' ? header.id : undefined
+}
+
+/**
+ * The `forwardedApprovals` host service one forwarder provides. It answers
+ * whether one exact call was already allowed by a forwarded child ask, keyed by
+ * the requesting session and call identity. The core tool registry consumes it
+ * with `ctx.get('forwardedApprovals')` so an outer ask or a reviewer denial
+ * cannot re-open a call the human (or the root's Full-access mode) already
+ * allowed.
+ * @param forwarder - the live forwarder whose records answer the query.
+ * @returns the resolves-only service facade.
+ */
+export function forwardedApprovalsSeam(forwarder: ChildApprovalForwarder): {
+  resolves(session: unknown, callId: unknown, toolName: unknown): boolean
+} {
+  return {
+    resolves: (session, callId, toolName) => {
+      const childSessionId = sessionIdOf(session)
+      return childSessionId !== undefined && typeof callId === 'string' && typeof toolName === 'string'
+        && forwarder.resolvesFinalCall(childSessionId, callId, toolName)
+    },
   }
 }
 

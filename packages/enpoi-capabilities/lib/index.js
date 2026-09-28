@@ -375,16 +375,22 @@ function resolvePolicy(input) {
 }
 function advertisedToolNames(toolNames, approvalPolicy, input) {
   if (approvalPolicy !== "never") return [...toolNames];
-  return toolNames.filter((toolName) => {
-    const decision = resolvePolicy({
-      toolName,
-      agent: input.agent,
-      config: input.config,
-      sandboxMode: input.sandboxMode,
-      mcpServerNames: input.mcpServerNames
-    });
-    return decision.kind !== "ask";
+  return toolNames.filter((toolName) => !neverRunsTool(toolName, input));
+}
+function neverRunsTool(toolName, input) {
+  if (toolName === "bash") {
+    const agentBash = input.agent !== void 0 ? input.config.agents?.[input.agent]?.tools?.bash : void 0;
+    const policy = agentBash ?? input.config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
+    return policy === "deny";
+  }
+  const decision = resolvePolicy({
+    toolName,
+    agent: input.agent,
+    config: input.config,
+    sandboxMode: input.sandboxMode,
+    mcpServerNames: input.mcpServerNames
   });
+  return decision.kind === "deny";
 }
 function isMcpToolName(toolName) {
   return toolName.startsWith("mcp__");
@@ -1326,15 +1332,53 @@ var ChildApprovalForwarder = class {
   }
   grants = /* @__PURE__ */ new Map();
   pending = /* @__PURE__ */ new Map();
+  /** Calls an allow resolution made final: child session id → call id → tool name. */
+  allowedCalls = /* @__PURE__ */ new Map();
   /**
    * Resolve one child ask through the parent. Rails run first and are never
    * card-approvable; then an existing subtree grant; then the root's mode
    * (standing consent / card / fail closed). A rejection is returned as a
-   * corrective deny; nothing here kills the child.
+   * corrective deny; nothing here kills the child. An allow is final for the
+   * exact call identity: {@link resolvesFinalCall} reports it so no later ask
+   * or reviewer denial can re-open what the human (or the root's Full-access
+   * mode) already allowed, and a call already on record resolves allow here
+   * without another card.
    * @param input - the child agent, tool call, and the ask the child's policy produced.
    * @returns the allow/deny resolution for the pre-execute listener.
    */
   async forward(input) {
+    if (input.callId !== void 0) {
+      const child = delegatedChildOf(input.agent);
+      if (child !== void 0 && this.resolvesFinalCall(child.childSessionId, String(input.callId), input.toolName)) {
+        return { kind: "allow", reason: "this call was already allowed by a forwarded ask" };
+      }
+    }
+    const resolution = await this.resolveAsk(input);
+    if (resolution.kind === "allow" && input.callId !== void 0) {
+      const child = delegatedChildOf(input.agent);
+      if (child !== void 0) {
+        const calls = this.allowedCalls.get(child.childSessionId) ?? /* @__PURE__ */ new Map();
+        calls.set(String(input.callId), input.toolName);
+        this.allowedCalls.set(child.childSessionId, calls);
+      }
+    }
+    return resolution;
+  }
+  /**
+   * Whether one exact call from one child session was already allowed by a
+   * forwarded ask. The record is scoped to the requesting child session and
+   * pins the tool name, so a sibling session or another tool reusing the call
+   * id never matches.
+   * @param childSessionId - the requesting child session.
+   * @param callId - the call identity the forwarded ask was recorded under.
+   * @param toolName - the tool the recorded ask resolved for.
+   * @returns `true` when the call is already allowed and final.
+   */
+  resolvesFinalCall(childSessionId, callId, toolName) {
+    return this.allowedCalls.get(childSessionId)?.get(callId) === toolName;
+  }
+  /** Resolve one child ask through the parent; see {@link forward}. */
+  async resolveAsk(input) {
     const child = delegatedChildOf(input.agent);
     if (child === void 0) {
       this.deps.report(`deny: non-child ask for ${input.toolName} reached the child forwarder`);
@@ -1500,6 +1544,18 @@ var ChildApprovalForwarder = class {
     }
   }
 };
+function sessionIdOf2(session) {
+  const header = session?.header;
+  return typeof header?.id === "string" && header.id !== "" ? header.id : void 0;
+}
+function forwardedApprovalsSeam(forwarder) {
+  return {
+    resolves: (session, callId, toolName) => {
+      const childSessionId = sessionIdOf2(session);
+      return childSessionId !== void 0 && typeof callId === "string" && typeof toolName === "string" && forwarder.resolvesFinalCall(childSessionId, callId, toolName);
+    }
+  };
+}
 function stableJson(value) {
   try {
     return JSON.stringify(value) ?? "";
@@ -1950,6 +2006,7 @@ function apply(ctx, config = {}) {
       return typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : 1;
     }
   });
+  ctx.provide("forwardedApprovals", forwardedApprovalsSeam(approvalForwarding));
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
     const state = initialCapabilitiesState(getGlobalDefaults());
     const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs());
@@ -1975,17 +2032,22 @@ function apply(ctx, config = {}) {
     if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
     const approvalPolicy = readApprovalPolicy(exec.agent);
     if (approvalPolicy?.policy === "never") {
-      if (delegatedChildOf(exec.agent) !== void 0) {
+      const delegated = delegatedChildOf(exec.agent);
+      if (delegated !== void 0) {
         const resolution = await approvalForwarding.forward({
           agent: exec.agent,
           toolName: exec.name,
           args: exec.arguments,
           decision,
+          ...exec.callId !== void 0 ? { callId: exec.callId } : {},
           ...exec.signal !== void 0 ? { signal: exec.signal } : {}
         });
         if (resolution.kind === "deny") return { kind: "deny", reason: resolution.reason };
         const downstream = await next();
         if (downstream.kind === "ask") {
+          if (exec.callId !== void 0 && approvalForwarding.resolvesFinalCall(delegated.childSessionId, String(exec.callId), exec.name)) {
+            return { kind: "allow", reason: "the forwarded parent decision is final for this call" };
+          }
           return { kind: "deny", reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` };
         }
         return downstream;

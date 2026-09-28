@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790550327503
+        checkedAt: 1790580157250
     personas:
       oracle: null
       fixer: null
@@ -2867,15 +2867,10 @@
               medium: medium
           - id: glm-5.1
             name: GLM-5.1
-            contextWindow: 202752
-            maxTokens: 32768
+            contextWindow: 204800
+            maxTokens: 131072
             input:
               - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 1.4
-              output: 4.4
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -2883,6 +2878,15 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 1.4
+              output: 4.4
+            source: configured
           - id: glm-5.2
             name: GLM-5.2
             contextWindow: 1000000
@@ -3009,18 +3013,18 @@
             input:
               - text
               - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.2
-              output: 0.66
             reasoningEfforts:
-              low: low
-              high: high
               minimal: minimal
+              low: low
               medium: medium
+              high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            source: configured
           - id: gpt-5.6-luna
             name: GPT-5.6 Luna
             contextWindow: 1050000
@@ -3100,11 +3104,6 @@
             input:
               - text
               - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.95
-              output: 4
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -3112,6 +3111,15 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.95
+              output: 4
+            source: configured
           - id: kimi-k2.7-code
             name: Kimi K2.7 Code
             contextWindow: 262144
@@ -3228,14 +3236,9 @@
           - id: minimax-m2.5
             name: MiniMax-M2.5
             contextWindow: 204800
-            maxTokens: 65536
+            maxTokens: 131072
             input:
               - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.3
-              output: 1.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -3243,6 +3246,15 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.3
+              output: 1.2
+            source: configured
           - id: minimax-m2.7
             name: MiniMax-M2.7
             contextWindow: 204800
@@ -3342,11 +3354,6 @@
             input:
               - text
               - image
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.5
-              output: 3
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -3354,17 +3361,21 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.5
+              output: 3
+            source: configured
           - id: qwen3.7-max
             name: Qwen3.7 Max
             contextWindow: 1000000
             maxTokens: 65536
             input:
               - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 2.5
-              output: 7.5
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -3372,6 +3383,15 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 2.5
+              output: 7.5
+            source: configured
           - id: qwen3.8-max
             name: Qwen3.8 Max
             contextWindow: 1000000
@@ -4057,11 +4077,6 @@
             maxTokens: 131072
             input:
               - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 1
-              output: 3.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -4069,6 +4084,15 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 1
+              output: 3.2
+            source: configured
           - id: glm-5.1
             name: GLM-5.1
             contextWindow: 204800
@@ -5524,14 +5548,14 @@
           - id: ~deepseek/deepseek-pro-latest
             name: DeepSeek Pro Latest
             contextWindow: 1048576
-            maxTokens: 393216
+            maxTokens: 943718
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0.2442
-              output: 0.7326
+              input: 0.2266
+              output: 4.2
             reasoningEfforts:
               low: low
               high: high
@@ -5546,7 +5570,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.03483
+              input: 0.0295
               output: 0.6
             reasoningEfforts:
               low: low
@@ -5707,7 +5731,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.03483
+              input: 0.0295
               output: 0.6
             reasoningEfforts:
               low: low
@@ -6072,15 +6096,15 @@
           - id: z-ai/glm-5.3-flash
             name: GLM-5.3-Flash
             contextWindow: 1310720
-            maxTokens: 128000
+            maxTokens: 943717
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.045
-              output: 0.14
+              input: 0.15
+              output: 0.5
             reasoningEfforts:
               low: low
               high: high
@@ -6126,15 +6150,15 @@
           - id: deepseek/deepseek-v4-flash-vision-exp
             name: DeepSeek V4 Flash Vision Exp
             contextWindow: 1048576
-            maxTokens: 262144
+            maxTokens: 943717
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.2156
-              output: 0.6468
+              input: 0.44
+              output: 1.32
             reasoningEfforts:
               low: low
               high: high
@@ -6167,14 +6191,14 @@
           - id: ~z-ai/glm-latest
             name: GLM Latest
             contextWindow: 1310720
-            maxTokens: 131072
+            maxTokens: 943718
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0.3556
-              output: 1.1176
+              input: 0.1785
+              output: 2.805
             reasoningEfforts:
               low: low
               high: high
@@ -6380,8 +6404,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.29304
-              output: 3.5
+              input: 0.2266
+              output: 4.2
             reasoningEfforts:
               low: low
               high: high
@@ -7214,8 +7238,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0825
-              output: 0.33
+              input: 0.132
+              output: 0.528
             reasoningEfforts:
               low: low
               high: high
@@ -8162,8 +8186,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.348
-              output: 0.696
+              input: 0.95526
+              output: 1.91052
             reasoningEfforts:
               high: high
               xhigh: xhigh
@@ -8180,8 +8204,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0469
-              output: 0.0938
+              input: 0.14
+              output: 0.28
             reasoningEfforts:
               high: high
               xhigh: xhigh
@@ -8298,8 +8322,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.95
-              output: 4
+              input: 0.65
+              output: 3.41
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -8351,8 +8375,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.9646
-              output: 3.0316
+              input: 1.4
+              output: 4.4
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -8567,14 +8591,14 @@
           - id: minimax/minimax-m2.7
             name: MiniMax-M2.7
             contextWindow: 204800
-            maxTokens: 176947
+            maxTokens: 131072
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0.21
-              output: 0.84
+              input: 0.3
+              output: 1.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -8919,15 +8943,15 @@
           - id: qwen/qwen3.5-35b-a3b
             name: Qwen3.5 35B-A3B
             contextWindow: 262144
-            maxTokens: 16384
+            maxTokens: 65536
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.3125
-              output: 1.25
+              input: 0.1625
+              output: 1.3
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -9782,8 +9806,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.269
-              output: 0.4
+              input: 0.28
+              output: 0.42
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -11464,8 +11488,8 @@
             reasoning: false
             tools: true
             cost:
-              input: 0.25
-              output: 1
+              input: 0.29
+              output: 1.14
           - id: openai/o1-pro
             name: o1-pro
             contextWindow: 200000
@@ -13951,11 +13975,6 @@
             maxTokens: 98304
             input:
               - text
-            reasoning: true
-            tools: true
-            cost:
-              input: 0.6
-              output: 2.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -13963,6 +13982,15 @@
               high: high
               xhigh: xhigh
               max: max
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
+            reasoning: true
+            tools: true
+            cost:
+              input: 0.6
+              output: 2.2
+            source: configured
           - id: Qwen/Qwen3-4B-Thinking-2507
             name: "Qwen: Qwen 3 4B Thinking 2507"
             contextWindow: 262144
@@ -14001,7 +14029,11 @@
             maxTokens: 8192
             input:
               - text
+            compat:
+              chatTemplateKwargs: {}
+              chatTemplateArgs: {}
             reasoning: false
+            source: configured
           - id: NousResearch/Hermes-3-Llama-3.1-70B
             name: "Nous: Hermes 3 70B Instruct"
             contextWindow: 131072
@@ -15128,15 +15160,12 @@
           - id: inkling-small
             name: Inkling Small
             contextWindow: 1048576
-            maxTokens: 1048576
+            maxTokens: 32768
             input:
               - text
               - image
             reasoning: true
             tools: true
-            cost:
-              input: 0.45
-              output: 1.2
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -15431,20 +15460,22 @@
           - id: qwen3.7-flash
             name: Qwen3.7 Flash
             contextWindow: 262144
-            maxTokens: 64000
+            maxTokens: 131072
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.2
-              output: 0.8
+              input: 0.03
+              output: 0.13
             reasoningEfforts:
               minimal: minimal
               low: low
               medium: medium
               high: high
+              xhigh: xhigh
+              max: max
           - id: ternary-bonsai-27b-awq-4bit
             name: Ternary Bonsai 27B AWQ 4bit
             contextWindow: 32768
@@ -17628,7 +17659,7 @@
           - id: z-ai/glm-5.3-flash
             name: GLM-5.3-Flash
             contextWindow: 1310720
-            maxTokens: 128000
+            maxTokens: 943717
             input:
               - text
               - image
@@ -17921,8 +17952,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.14
-              output: 0.28
+              input: 0.07
+              output: 0.14
             reasoningEfforts:
               high: high
             gated: true
@@ -18030,14 +18061,14 @@
           - id: ~deepseek/deepseek-pro-latest
             name: "DeepSeek: DeepSeek Pro Latest"
             contextWindow: 1048576
-            maxTokens: 393216
+            maxTokens: 943718
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0.2442
-              output: 0.7326
+              input: 0.2266
+              output: 4.2
             reasoningEfforts:
               low: low
               high: high
@@ -18054,7 +18085,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.03483
+              input: 0.0295
               output: 0.6
             reasoningEfforts:
               low: low
@@ -18526,7 +18557,7 @@
           - id: deepseek/deepseek-v4-flash-vision-exp
             name: DeepSeek V4 Flash Vision Exp
             contextWindow: 1048576
-            maxTokens: 262144
+            maxTokens: 943717
             input:
               - text
               - image
@@ -18573,14 +18604,14 @@
           - id: ~z-ai/glm-latest
             name: "Z.ai: GLM Latest"
             contextWindow: 1310720
-            maxTokens: 131072
+            maxTokens: 943718
             input:
               - text
             reasoning: true
             tools: true
             cost:
-              input: 0.3556
-              output: 1.1176
+              input: 0.325
+              output: 4.4
             reasoningEfforts:
               low: low
               high: high
@@ -19385,8 +19416,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0825
-              output: 0.33
+              input: 0.13
+              output: 0.53
             reasoningEfforts:
               low: low
               high: high
@@ -20288,8 +20319,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.95
-              output: 4
+              input: 0.65
+              output: 3.41
             reasoningEfforts:
               high: high
             gated: true
@@ -20489,7 +20520,7 @@
           - id: minimax/minimax-m2.7
             name: MiniMax-M2.7
             contextWindow: 204800
-            maxTokens: 176947
+            maxTokens: 131072
             input:
               - text
             reasoning: true
@@ -20774,7 +20805,7 @@
           - id: qwen/qwen3.5-35b-a3b
             name: Qwen3.5 35B-A3B
             contextWindow: 262144
-            maxTokens: 16384
+            maxTokens: 65536
             input:
               - text
               - image
@@ -22864,8 +22895,8 @@
             reasoning: false
             tools: true
             cost:
-              input: 0.25
-              output: 1
+              input: 0.29
+              output: 1.14
             gated: true
             gateReason: sign-in required
           - id: openai/o1-pro
