@@ -19,6 +19,11 @@
   name: "@deepseek-ai/dsh-client-ui-settings-general"
   config:
     welcomeNoticeVersion: 2026-08-13.1
+    onboardingCompleted: 2026-09-28.1
+- id: ui-settings-models
+  name: "@deepseek-ai/dsh-client-ui-settings-models"
+  config:
+    credentialOnboarding: false
 - id: ui-theme
   name: "@deepseek-ai/dsh-client-ui-theme"
   config:
