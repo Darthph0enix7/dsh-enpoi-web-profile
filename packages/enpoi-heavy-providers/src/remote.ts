@@ -15,22 +15,32 @@ import type { HeavyJobView } from './jobs.js'
 import { HeavyJobManager } from './jobs.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
 import {
+  chooseLocalPath,
   configuredProfile,
+  detectInstance,
+  detectRuntimes,
   discoverModels,
+  healthForBase,
   modeBaseURL,
-  modeHealth,
+  overlayManifest,
   probeHealth,
+  readServerOverlay,
   removeProvider,
-  reuseOnServer,
   storeCredential,
+  useDetectedInstance,
   writeRoute,
   type HeavyDeps,
-  type ReuseOutcome,
+  type LocalPathChoice,
   type RemovalSummary,
+  type ReuseOutcome,
+  type RuntimeProbe,
 } from './planner.js'
 
 /** Longest accepted key string (a credential is a bounded token). */
 const MAX_KEY_CHARS = 4096
+
+/** One runtime probe per minute: status serves several rows per page load. */
+const RUNTIME_TTL_MS = 60_000
 
 /** The host seams the service reads lazily (each may mount after this plugin). */
 export interface HeavyServiceOptions {
@@ -58,6 +68,14 @@ export interface StatusValue {
   health: { ok: boolean; status?: number; error?: string; checkedAt: number }
   /** The host platform install steps execute on (`process.platform`). */
   platform: string
+  /** Loopback port an already-running instance answered on, when one did. */
+  detectedPort?: number
+  /** Address the detection found; the UI's "running at — use it" offer. */
+  detectedEndpoint?: string
+  /** Container runtimes the machine has (detection is fail-soft). */
+  runtime: RuntimeProbe
+  /** The platform's best local path for this provider (detection first). */
+  preflight: LocalPathChoice
   unsupported?: HeavyProviderManifest['unsupported']
   job?: HeavyJobView
 }
@@ -112,6 +130,7 @@ export class HeavyProvidersService extends TypertRemoteService {
   static inject: string[] = []
 
   private readonly options: HeavyServiceOptions
+  private runtimeCache: { at: number; value: RuntimeProbe } | undefined
 
   /**
    * @param ctx - owning context (service registration is automatic).
@@ -122,26 +141,54 @@ export class HeavyProvidersService extends TypertRemoteService {
     this.options = options
   }
 
-  /** The declared manifest table plus any structural problems (display only). */
+  /** The machine's container runtimes, memoized for one minute. */
+  private async runtime(): Promise<RuntimeProbe> {
+    const now = Date.now()
+    if (this.runtimeCache !== undefined && now - this.runtimeCache.at < RUNTIME_TTL_MS) {
+      return this.runtimeCache.value
+    }
+    const value = await detectRuntimes(this.options.deps().runStep)
+    this.runtimeCache = { at: now, value }
+    return value
+  }
+
+  /** The manifest with the operator's private overlay applied (read per call). */
+  private effectiveManifest(manifest: HeavyProviderManifest): HeavyProviderManifest {
+    return overlayManifest(manifest, readServerOverlay(this.options.deps().dshHome)[manifest.id])
+  }
+
+  /** The declared manifest table (overlay applied) plus any structural problems. */
   @Remote
   manifests(): ManifestsValue {
-    return { items: HEAVY_MANIFESTS, problems: manifestProblems(), platform: process.platform }
+    const overlay = readServerOverlay(this.options.deps().dshHome)
+    return {
+      items: HEAVY_MANIFESTS.map(manifest => overlayManifest(manifest, overlay[manifest.id])),
+      problems: manifestProblems(),
+      platform: process.platform,
+    }
   }
 
   /**
-   * One provider's configured/health/job state.
+   * One provider's configured/health/job state plus the detection/preflight
+   * fold the UI renders: an answering instance (`detectedEndpoint`), the
+   * container runtimes found, and the platform's best local path.
    * @param request - `{ id }`.
    * @returns the status fold; a probe failure is reported, never thrown.
    */
   @Remote
   async status(request: { id?: unknown }): Promise<StatusValue> {
-    const manifest = requireManifest(request?.id)
+    const manifest = this.effectiveManifest(requireManifest(request?.id))
     const deps = this.options.deps()
     const profile = configuredProfile(deps, manifest.id)
     const configured = profile !== undefined
     const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
     const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
-    const health = await probeHealth(mode === undefined ? manifest.reuse.health : modeHealth(manifest, mode), deps.fetchImpl)
+    const detection = await detectInstance(deps, manifest, configuredBase)
+    const runtime = await this.runtime()
+    const preflight = chooseLocalPath(manifest, process.platform, runtime, detection.ok ? detection.port : undefined)
+    const health = configuredBase === undefined
+      ? detection.health
+      : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
     const job = this.options.jobs.snapshot(manifest.id)
     return {
       id: manifest.id,
@@ -149,25 +196,30 @@ export class HeavyProvidersService extends TypertRemoteService {
       ...mode === undefined ? {} : { mode },
       health,
       platform: process.platform,
+      runtime,
+      preflight,
+      ...detection.ok && detection.port !== undefined ? { detectedPort: detection.port } : {},
+      ...detection.ok ? { detectedEndpoint: detection.baseURL } : {},
       ...manifest.unsupported === undefined ? {} : { unsupported: manifest.unsupported },
       ...job === undefined ? {} : { job },
     }
   }
 
   /**
-   * Add by reuse: probe the server endpoint, discover models, write the route.
+   * Add by detected instance: probe localhost, discover models, write the
+   * route at the detected address.
    * @param request - `{ id, key? }`.
    * @returns the route written, the probe verdict, and whether a key was stored.
    */
   @Remote
   async reuse(request: { id?: unknown; key?: unknown }): Promise<ReuseValue> {
-    const manifest = requireManifest(request?.id)
+    const manifest = this.effectiveManifest(requireManifest(request?.id))
     const key = optionalKey(request?.key)
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
-    const outcome = await reuseOnServer(this.options.deps(), manifest, key)
-    this.options.log?.(`reuse ${manifest.id}: health=${outcome.health.ok ? 'ok' : 'down'} models=${String(outcome.models.length)}`)
+    const outcome = await useDetectedInstance(this.options.deps(), manifest, key)
+    this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? 'ok' : 'down'} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`)
     return { ok: true, ...outcome }
   }
 

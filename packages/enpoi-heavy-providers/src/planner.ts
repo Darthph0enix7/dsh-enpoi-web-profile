@@ -12,7 +12,8 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { HeavyHealth, HeavyProviderManifest, HeavyStep } from './manifests.js'
+import { resolveHeavyInstall } from './manifests.js'
+import type { HeavyHealth, HeavyLocalRuntime, HeavyProviderManifest, HeavyStep } from './manifests.js'
 
 /** The llm-pi-ai settings namespace every route write targets. */
 export const LLM_NS = 'llm-pi-ai'
@@ -78,9 +79,256 @@ export function modeBaseURL(manifest: HeavyProviderManifest, mode: 'reuse' | 'lo
   return mode === 'reuse' ? manifest.reuse.baseURL : manifest.local.baseURL
 }
 
-/** The health probe a configured mode should be checked with. */
-export function modeHealth(manifest: HeavyProviderManifest, mode: 'reuse' | 'local'): HeavyHealth {
-  return mode === 'reuse' ? manifest.reuse.health : manifest.local.health
+/** One HTTP URL's explicit port; undefined when absent or unparsable. */
+export function urlPort(url: string): number | undefined {
+  try {
+    const parsed = new URL(url)
+    if (parsed.port !== '') return Number(parsed.port)
+    return parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The path of an absolute URL, '' when it is the host root. */
+function urlPath(url: string): string {
+  try {
+    const path = new URL(url).pathname
+    return path === '/' ? '' : path
+  } catch {
+    return ''
+  }
+}
+
+/** The loopback health probe for one port (path from the manifest's declared probe). */
+export function instanceHealth(manifest: HeavyProviderManifest, port: number): HeavyHealth {
+  return { ...manifest.local.health, url: `http://127.0.0.1:${port}${urlPath(manifest.local.health.url)}` }
+}
+
+/** The loopback route address for one port (path from the manifest's endpoint). */
+export function instanceBaseURL(manifest: HeavyProviderManifest, port: number): string {
+  return `http://127.0.0.1:${port}${urlPath(manifest.reuse.baseURL)}`
+}
+
+/** The health probe for a configured route address, port substituted. */
+export function healthForBase(manifest: HeavyProviderManifest, baseURL: string): HeavyHealth {
+  try {
+    const base = new URL(baseURL)
+    const declared = new URL(manifest.reuse.health.url)
+    return { ...manifest.reuse.health, url: `${base.protocol}//${base.host}${declared.pathname}` }
+  } catch {
+    return manifest.reuse.health
+  }
+}
+
+/** One endpoint detection probes. */
+export interface InstanceCandidate {
+  /** Probe URL. */
+  url: string
+  /** Route address the instance would be used with. */
+  baseURL: string
+  port?: number
+}
+
+/**
+ * The probe order: the configured/settings address first (its port is the
+ * operator's recorded one), then the manifest's declared endpoint, then the
+ * loopback default port. Exact duplicate URLs are dropped.
+ * @param manifest - heavy manifest.
+ * @param configuredBaseURL - the route address already in settings, when any.
+ * @returns candidates in probe order.
+ */
+export function instanceCandidates(manifest: HeavyProviderManifest, configuredBaseURL?: string): InstanceCandidate[] {
+  const candidates: InstanceCandidate[] = []
+  const add = (baseURL: string, url: string): void => {
+    if (candidates.some(candidate => candidate.url === url)) return
+    const port = urlPort(baseURL)
+    candidates.push({ url, baseURL, ...port === undefined ? {} : { port } })
+  }
+  if (configuredBaseURL !== undefined && configuredBaseURL !== '') {
+    add(configuredBaseURL, healthForBase(manifest, configuredBaseURL).url)
+  }
+  add(manifest.reuse.baseURL, manifest.reuse.health.url)
+  add(instanceBaseURL(manifest, manifest.defaultPort), instanceHealth(manifest, manifest.defaultPort).url)
+  return candidates
+}
+
+/** The detection outcome for one manifest. */
+export interface InstanceDetection {
+  ok: boolean
+  /** Route address to write when this instance is used. */
+  baseURL: string
+  port?: number
+  /** The probe URL that answered (or the first attempted when none did). */
+  url: string
+  health: { ok: boolean; status?: number; error?: string; checkedAt: number }
+}
+
+/**
+ * Probe localhost for an already-running instance: the configured port (when
+ * one is recorded), the manifest's endpoint, and the default port. Fail-soft:
+ * every failure is reported, never thrown, and the declared endpoint is the
+ * fallback address when nothing answers.
+ * @param deps - host seams (fetch).
+ * @param manifest - heavy manifest.
+ * @param configuredBaseURL - the route address already in settings, when any.
+ * @returns the first answering instance, or the first failure.
+ */
+export async function detectInstance(
+  deps: HeavyDeps,
+  manifest: HeavyProviderManifest,
+  configuredBaseURL?: string,
+): Promise<InstanceDetection> {
+  let firstFailure: InstanceDetection | undefined
+  for (const candidate of instanceCandidates(manifest, configuredBaseURL)) {
+    const health = await probeHealth({ ...manifest.reuse.health, url: candidate.url }, deps.fetchImpl)
+    const detection: InstanceDetection = {
+      ok: health.ok,
+      baseURL: candidate.baseURL,
+      ...candidate.port === undefined ? {} : { port: candidate.port },
+      url: candidate.url,
+      health,
+    }
+    if (health.ok) return detection
+    firstFailure ??= detection
+  }
+  return firstFailure ?? {
+    ok: false,
+    baseURL: manifest.reuse.baseURL,
+    url: manifest.reuse.health.url,
+    health: { ok: false, error: 'no probe candidates', checkedAt: Date.now() },
+  }
+}
+
+/** What the machine has for running a local heavy service. */
+export interface RuntimeProbe {
+  docker: boolean
+  podman: boolean
+}
+
+/**
+ * Detect Docker and Podman with one shell probe. Fail-soft: an absent runner
+ * or a failed step reports nothing installed rather than blocking the page.
+ * @param runStep - the host's step runner.
+ * @returns availability of each container runtime.
+ */
+export async function detectRuntimes(runStep: (step: HeavyStep) => Promise<StepOutcome>): Promise<RuntimeProbe> {
+  try {
+    const outcome = await runStep({
+      label: 'Detect container runtimes',
+      command: 'command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; exit 0',
+    })
+    return {
+      docker: /(^|\n)available:docker(\n|$)/.test(outcome.output),
+      podman: /(^|\n)available:podman(\n|$)/.test(outcome.output),
+    }
+  } catch {
+    return { docker: false, podman: false }
+  }
+}
+
+/** One local path's kind. */
+export type LocalPathKind = 'detected' | 'vendor-app' | 'docker' | 'podman' | 'node' | 'unsupported'
+
+/** The preflight verdict for one manifest on the host platform. */
+export interface LocalPathChoice {
+  path: LocalPathKind
+  /** Human label of the chosen (or unavailable) path. */
+  label: string
+  deps: readonly string[]
+  diskHint: string
+  steps: readonly HeavyStep[]
+  /** Machine prerequisites the chosen path needs; empty when none beyond the app. */
+  requires: readonly ('docker' | 'podman')[]
+  /** What is missing when no path is available. */
+  missing: readonly string[]
+}
+
+/** The runtime a platform's variant needs (platform variant, then local default). */
+function declaredRuntime(manifest: HeavyProviderManifest, platform: string): HeavyLocalRuntime {
+  const variant = platform === 'linux' || platform === 'darwin' || platform === 'win32'
+    ? manifest.local.install[platform]
+    : undefined
+  return variant?.runtime ?? manifest.local.runtime ?? 'node'
+}
+
+/**
+ * Choose the platform's best local path: a detected instance first, then the
+ * declared variant when its runtime exists (vendor app, Docker, or Podman as
+ * the Docker-compatible substitute), else the exact missing requirement.
+ * @param manifest - heavy manifest.
+ * @param platform - host platform key.
+ * @param runtime - the container runtimes the machine has.
+ * @param detectedPort - port an already-running instance was found on.
+ * @returns the verdict the UI renders.
+ */
+export function chooseLocalPath(
+  manifest: HeavyProviderManifest,
+  platform: string,
+  runtime: RuntimeProbe,
+  detectedPort?: number,
+): LocalPathChoice {
+  const resolved = resolveHeavyInstall(manifest.local, platform)
+  if (detectedPort !== undefined) {
+    return { path: 'detected', label: 'Use the detected instance', deps: [], diskHint: '', steps: [], requires: [], missing: [] }
+  }
+  const base = { deps: resolved.deps, diskHint: resolved.diskHint, steps: resolved.steps }
+  switch (declaredRuntime(manifest, platform)) {
+    case 'docker':
+      if (runtime.docker) return { path: 'docker', label: resolved.label, ...base, requires: ['docker'], missing: [] }
+      if (runtime.podman) return { path: 'podman', label: resolved.label, ...base, requires: ['podman'], missing: [] }
+      return { path: 'unsupported', label: resolved.label, ...base, requires: ['docker'], missing: ['Docker Engine + Compose (or Podman)'] }
+    case 'podman':
+      return runtime.podman
+        ? { path: 'podman', label: resolved.label, ...base, requires: ['podman'], missing: [] }
+        : { path: 'unsupported', label: resolved.label, ...base, requires: ['podman'], missing: ['Podman'] }
+    case 'vendor-app':
+      return { path: 'vendor-app', label: resolved.label, ...base, requires: [], missing: [] }
+    case 'node':
+      return { path: 'node', label: resolved.label, ...base, requires: [], missing: [] }
+  }
+}
+
+/** One operator-owned override from `$DSH_HOME/heavy-server-overlay.json`. */
+export interface ServerOverlayEntry {
+  reuseBaseURL?: string
+  reuseHealthURL?: string
+  dashboardUrl?: string
+}
+
+/**
+ * Read the private deployment overlay. The file is operator-owned data, never
+ * shipped; an absent or malformed file means "no override" (fail-soft).
+ * @param dshHome - the DSH home directory.
+ * @returns provider id → override entry.
+ */
+export function readServerOverlay(dshHome: string): Record<string, ServerOverlayEntry> {
+  try {
+    const document = JSON.parse(readFileSync(join(dshHome, 'heavy-server-overlay.json'), 'utf8')) as unknown
+    if (document === null || typeof document !== 'object' || Array.isArray(document)) return {}
+    const entries = (document as { providers?: unknown }).providers
+    if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) return {}
+    return entries as Record<string, ServerOverlayEntry>
+  } catch {
+    return {}
+  }
+}
+
+/** Apply one overlay entry; the shipped table is returned untouched without one. */
+export function overlayManifest(
+  manifest: HeavyProviderManifest,
+  entry: ServerOverlayEntry | undefined,
+): HeavyProviderManifest {
+  if (entry === undefined) return manifest
+  return {
+    ...manifest,
+    ...entry.dashboardUrl === undefined ? {} : { dashboardUrl: entry.dashboardUrl },
+    reuse: {
+      ...manifest.reuse,
+      ...entry.reuseBaseURL === undefined ? {} : { baseURL: entry.reuseBaseURL },
+      ...entry.reuseHealthURL === undefined ? {} : { health: { ...manifest.reuse.health, url: entry.reuseHealthURL } },
+    },
+  }
 }
 
 /**
@@ -88,19 +336,25 @@ export function modeHealth(manifest: HeavyProviderManifest, mode: 'reuse' | 'loc
  * writes `keyless`, `placeholder` writes only the reference (llm-pi-ai refuses
  * keyless anthropic routes), and the DSH key pool is NEVER declared — the
  * heavy providers either have their own pool (antigravity) or a single key.
+ * @param manifest - heavy manifest.
+ * @param mode - detected instance or local install.
+ * @param models - discovered models; the fallback model fills an empty list.
+ * @param overrides - detected address written instead of the declared default.
+ * @returns the route profile written to settings.
  */
 export function routeProfile(
   manifest: HeavyProviderManifest,
   mode: 'reuse' | 'local',
   models: ReadonlyArray<{ id: string; name?: string }>,
+  overrides: { baseURL?: string } = {},
 ): HeavyRouteProfile {
   const list = models.length > 0
     ? models.map(model => model.name === undefined ? { id: model.id } : { id: model.id, name: model.name })
     : manifest.fallbackModel === undefined ? [] : [{ id: manifest.fallbackModel }]
   return {
-    displayName: `${manifest.label}${mode === 'reuse' ? ' (server)' : ' (local)'}`,
+    displayName: `${manifest.label}${mode === 'reuse' ? ' (detected)' : ' (local)'}`,
     api: manifest.protocol,
-    baseURL: modeBaseURL(manifest, mode),
+    baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
     ...manifest.auth.apiKeyEnv === undefined ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
     ...manifest.auth.kind === 'none' ? { keyless: true } : {},
     models: list,
@@ -203,10 +457,11 @@ export async function writeRoute(
   manifest: HeavyProviderManifest,
   mode: 'reuse' | 'local',
   models: ReadonlyArray<DiscoveredModel>,
+  overrides: { baseURL?: string } = {},
 ): Promise<HeavyRouteProfile> {
   const settings = deps.settings
   if (settings === undefined) throw new Error('settings seam absent — cannot write the route')
-  const profile = routeProfile(manifest, mode, models)
+  const profile = routeProfile(manifest, mode, models, overrides)
   await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', manifest.id], value: profile }], revisionOf(settings, LLM_NS))
   return profile
 }
@@ -227,23 +482,42 @@ export interface ReuseOutcome {
   health: { ok: boolean; status?: number; error?: string; checkedAt: number }
   models: DiscoveredModel[]
   credentialStored: boolean
+  /** The answering loopback (or overlay) port, when the detection found one. */
+  port?: number
+  /** The address the route was written with. */
+  endpoint: string
 }
 
 /**
- * The recommended add: probe the server endpoint, discover its models, write
- * the route, then store the key when one was supplied. The probe never blocks
- * the add — its verdict is reported for the UI's health badge.
+ * The zero-install add: detect a running instance (configured port, declared
+ * endpoint, then the default port), discover its models, write the route at
+ * the detected address, then store the key when one was supplied. The probe
+ * never blocks the add — its verdict is reported for the UI's health badge.
+ * @param deps - host seams.
+ * @param manifest - heavy manifest.
+ * @param key - optional unified gateway key.
+ * @returns the route written, the probe verdict, and whether a key was stored.
  */
-export async function reuseOnServer(
+export async function useDetectedInstance(
   deps: HeavyDeps,
   manifest: HeavyProviderManifest,
   key?: string,
 ): Promise<ReuseOutcome> {
-  const health = await probeHealth(modeHealth(manifest, 'reuse'), deps.fetchImpl)
-  const models = await discoverModels(modeBaseURL(manifest, 'reuse'), key, deps.fetchImpl)
-  const route = await writeRoute(deps, manifest, 'reuse', models)
+  const profile = configuredProfile(deps, manifest.id)
+  const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
+  const detection = await detectInstance(deps, manifest, configuredBase)
+  const endpoint = detection.ok ? detection.baseURL : manifest.reuse.baseURL
+  const models = await discoverModels(endpoint, key, deps.fetchImpl)
+  const route = await writeRoute(deps, manifest, 'reuse', models, { baseURL: endpoint })
   const credentialStored = await storeCredential(deps, manifest, key)
-  return { route, health, models, credentialStored }
+  return {
+    route,
+    health: detection.health,
+    models,
+    credentialStored,
+    ...detection.ok && detection.port !== undefined ? { port: detection.port } : {},
+    endpoint,
+  }
 }
 
 /* ── removal ─────────────────────────────────────────────────────────────── */

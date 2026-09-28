@@ -1,7 +1,8 @@
 /**
- * Reuse-on-server: health-probe first, write the route, store the key only
- * when one was supplied. The probe is fail-soft — a down service is reported,
- * never used to block the add.
+ * Detected-instance add: detection probes the recorded port, then the
+ * declared endpoint, then the default port; the route is written at the
+ * address that answered, the key is stored only when one was supplied, and
+ * the probe is fail-soft — a down service is reported, never used to block.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,8 +11,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { manifestById } from '../src/manifests.js'
 import {
   discoverModels,
-  reuseOnServer,
   routeProfile,
+  useDetectedInstance,
   type CredentialsSeam,
   type FetchLike,
   type HeavyDeps,
@@ -53,7 +54,7 @@ function depsWith(options: { fetch: FetchLike; withSettings?: boolean; withCrede
   return { deps, mutations, credentialSets }
 }
 
-it('reuse probes health, discovers models, writes the route, and stores the key', async () => {
+it('detection probes loopback, discovers models, writes the route, and stores the key', async () => {
   const calls: string[] = []
   const fetch: FetchLike = vi.fn(async (url) => {
     calls.push(url)
@@ -66,54 +67,90 @@ it('reuse probes health, discovers models, writes the route, and stores the key'
   })
   const { deps, mutations, credentialSets } = depsWith({ fetch })
   const manifest = manifestById('freellmapi')!
-  const outcome = await reuseOnServer(deps, manifest, 'sk-unified')
+  const outcome = await useDetectedInstance(deps, manifest, 'sk-unified')
 
-  expect(calls[0]).toBe('http://100.122.163.25:3002/api/ping')
-  expect(calls[1]).toBe('http://100.122.163.25:3002/v1/models')
+  expect(calls[0]).toBe('http://127.0.0.1:3002/api/ping')
+  expect(calls[1]).toBe('http://127.0.0.1:3002/v1/models')
   expect(outcome.health.ok).toBe(true)
+  expect(outcome.port).toBe(3002)
+  expect(outcome.endpoint).toBe('http://127.0.0.1:3002/v1')
   expect(outcome.models.map(model => model.id)).toEqual(['auto', 'glm-5.2'])
   expect(mutations).toHaveLength(1)
   const written = mutations[0]!.ops[0] as { op: string; path: string[]; value: Record<string, unknown> }
   expect(written.op).toBe('set')
   expect(written.path).toEqual(['providers', 'freellmapi'])
-  expect(written.value.baseURL).toBe('http://100.122.163.25:3002/v1')
+  expect(written.value.baseURL).toBe('http://127.0.0.1:3002/v1')
   expect(written.value.api).toBe('openai-completions')
-  expect(written.value.displayName).toBe('FreeLLMAPI (server)')
+  expect(written.value.displayName).toBe('FreeLLMAPI (detected)')
   expect(written.value.models).toEqual([{ id: 'auto' }, { id: 'glm-5.2', name: 'GLM 5.2' }])
   expect(credentialSets).toEqual([{ ref: 'FREELLMAPI_API_KEY', value: 'sk-unified' }])
 })
 
-it('reuse still writes the route when the health probe is down (fail-soft)', async () => {
+it('detection prefers the port recorded in settings over the default port', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    if (url.endsWith('/api/ping')) {
+      return url.includes(':4555')
+        ? { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+        : { ok: false, status: 404, text: async () => 'nope' }
+    }
+    return { ok: true, status: 200, text: async () => '{"data":[]}' }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const configured: HeavyDeps = {
+    ...deps,
+    settings: {
+      describe: () => [{
+        ns: 'llm-pi-ai',
+        revision: 1,
+        value: { providers: { freellmapi: { baseURL: 'http://127.0.0.1:4555/v1' } } },
+      }],
+      mutate: async (ns, ops) => { mutations.push({ ns, ops }) },
+    },
+  }
+  const outcome = await useDetectedInstance(configured, manifestById('freellmapi')!)
+
+  expect(calls[0]).toBe('http://127.0.0.1:4555/api/ping')
+  expect(outcome.port).toBe(4555)
+  const written = mutations[0]!.ops[0] as { value: { baseURL: string } }
+  expect(written.value.baseURL).toBe('http://127.0.0.1:4555/v1')
+})
+
+it('detection fails soft when nothing answers: the declared endpoint is written and reported down', async () => {
   const fetch: FetchLike = vi.fn(async (url) => {
     if (url.endsWith('/api/ping')) throw new Error('ECONNREFUSED')
     return { ok: false, status: 401, text: async () => 'unauthorized' }
   })
   const { deps, mutations } = depsWith({ fetch })
-  const outcome = await reuseOnServer(deps, manifestById('freellmapi')!, undefined)
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!, undefined)
 
   expect(outcome.health.ok).toBe(false)
   expect(outcome.health.error).toContain('ECONNREFUSED')
+  expect(outcome.port).toBeUndefined()
   expect(mutations).toHaveLength(1)
+  const value = (mutations[0]!.ops[0] as { value: { models: unknown; baseURL: unknown } }).value
+  expect(value.baseURL).toBe('http://127.0.0.1:3002/v1')
   // Discovery was refused (401) → the manifest's fallback model keeps the
   // route resolvable.
-  const value = (mutations[0]!.ops[0] as { value: { models: unknown } }).value
   expect(value.models).toEqual([{ id: 'auto' }])
 })
 
-it('antigravity reuse writes a placeholder anthropic route with no pool and never keyless', () => {
+it('antigravity detection writes a placeholder anthropic route with no pool and never keyless', () => {
   const profile = routeProfile(manifestById('antigravity')!, 'reuse', [])
   expect(profile.api).toBe('anthropic-messages')
   expect(profile.apiKeyEnv).toBe('ANTIGRAVITY_API_KEY')
   expect(profile.keyless).toBeUndefined()
   expect(profile).not.toHaveProperty('pool')
-  expect(profile.baseURL).toBe('http://100.122.163.25:8082')
+  expect(profile.baseURL).toBe('http://127.0.0.1:8082')
+  expect(profile.displayName).toBe('Antigravity Proxy (detected)')
   expect(profile.models).toEqual([{ id: 'gemini-2.5-flash' }])
 })
 
 it('writes nothing (and rejects) when the settings seam is absent', async () => {
   const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
   const { deps, mutations } = depsWith({ fetch, withSettings: false })
-  await expect(reuseOnServer(deps, manifestById('freellmapi')!, undefined)).rejects.toThrow('settings seam absent')
+  await expect(useDetectedInstance(deps, manifestById('freellmapi')!, undefined)).rejects.toThrow('settings seam absent')
   expect(mutations).toHaveLength(0)
 })
 

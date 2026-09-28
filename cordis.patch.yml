@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790589505049
+        checkedAt: 1790591015614
     personas:
       oracle: null
       fixer: null

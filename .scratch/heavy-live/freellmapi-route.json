@@ -1,0 +1,11 @@
+{
+  "displayName": "FreeLLMAPI (detected)",
+  "api": "openai-completions",
+  "baseURL": "http://127.0.0.1:3002/v1",
+  "apiKeyEnv": "FREELLMAPI_API_KEY",
+  "models": [
+    {
+      "id": "auto"
+    }
+  ]
+}

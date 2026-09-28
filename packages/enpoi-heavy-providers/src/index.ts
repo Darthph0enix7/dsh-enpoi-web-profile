@@ -3,12 +3,13 @@
  * profile (recon: `~/dsh-migration/evidence/heavy-providers/`).
  *
  * Heavy providers are listed in Add Provider but install nothing by default.
- * Adding one either reuses the server's running gateway over Tailscale
- * (recommended, zero install) or starts a polled local install job; the route
- * and credential are written only after the probe/install succeeds. Removal
- * runs the manifest teardown plus route/credential/pool-state/cache/chain
- * cleanup. Everything fail-soft: an absent subprocess or settings seam
- * degrades one operation, never the boot.
+ * Adding one either uses an instance detection found running on this device
+ * (zero install) or starts a polled local install job; the route and
+ * credential are written only after the probe/install succeeds. Removal runs
+ * the manifest teardown plus route/credential/pool-state/cache/chain cleanup.
+ * Everything fail-soft: an absent subprocess or settings seam degrades one
+ * operation, never the boot. Operator-specific endpoints live in the private
+ * `$DSH_HOME/heavy-server-overlay.json`, never in the shipped manifests.
  *
  * @module dsh-enpoi-heavy-providers
  */

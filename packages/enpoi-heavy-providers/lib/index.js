@@ -238,23 +238,24 @@ var HEAVY_MANIFESTS = [
     summary: "Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.",
     protocol: "openai-completions",
     auth: { kind: "unified", apiKeyEnv: "FREELLMAPI_API_KEY", keyless: false },
-    dashboardUrl: "http://100.122.163.25:3002",
+    dashboardUrl: "http://127.0.0.1:3002",
     docsUrl: "https://freellmapi.co",
+    defaultPort: 3002,
     requiresBrowser: [
       "First-run setup code and password-reset code appear only in `docker compose logs` \u2014 a browser flow, not automatable",
       "Upstream provider keys are added on the web dashboard"
     ],
     quirks: [
-      "Unified key is the only client auth \u2014 never expose this port through Cloudflare Tunnel",
+      "Unified key is the only client auth \u2014 never expose this port beyond the local machine",
       "Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable",
       "The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves",
       "A missing bind-mounted JSON file is created as a directory by Docker \u2192 boot loop"
     ],
     reuse: {
-      label: "Reuse on server (recommended)",
-      baseURL: "http://100.122.163.25:3002/v1",
-      note: "Zero install: points at the server gateway over Tailscale; one shared key store.",
-      health: { url: "http://100.122.163.25:3002/api/ping", timeoutMs: 5e3 }
+      label: "Use a detected instance",
+      baseURL: "http://127.0.0.1:3002/v1",
+      note: "Zero install: uses a FreeLLMAPI instance already running on this device.",
+      health: { url: "http://127.0.0.1:3002/api/ping", timeoutMs: 5e3 }
     },
     local: {
       label: "Install locally (Docker)",
@@ -262,6 +263,7 @@ var HEAVY_MANIFESTS = [
       deps: ["Docker Engine + Compose"],
       diskHint: "~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU",
       dashboardUrl: "http://127.0.0.1:3002",
+      runtime: "docker",
       install: {
         // Unknown platforms fall back to the manual Docker Compose path.
         default: {
@@ -301,6 +303,7 @@ var HEAVY_MANIFESTS = [
           label: "Install locally (vendor desktop app, no Docker)",
           deps: ["macOS 11+"],
           diskHint: "~250 MB app; data in ~/Library/Application Support/FreeLLMAPI",
+          runtime: "vendor-app",
           steps: [
             {
               label: "Download the latest .dmg",
@@ -327,6 +330,7 @@ var HEAVY_MANIFESTS = [
           label: "Install locally (vendor desktop app, no Docker)",
           deps: ["Windows 10+"],
           diskHint: "~250 MB app; data in %APPDATA%\\FreeLLMAPI",
+          runtime: "vendor-app",
           steps: [
             {
               label: "Download the latest installer",
@@ -370,22 +374,23 @@ var HEAVY_MANIFESTS = [
     // keyless anthropic routes: a placeholder reference is stored, and the
     // route MUST NOT declare a DSH pool — the proxy runs its own sticky one.
     auth: { kind: "placeholder", apiKeyEnv: "ANTIGRAVITY_API_KEY", keyless: false },
-    dashboardUrl: "http://100.122.163.25:8082",
+    dashboardUrl: "http://127.0.0.1:8082",
     docsUrl: "https://www.npmjs.com/package/antigravity-claude-proxy",
+    defaultPort: 8082,
     requiresBrowser: [
-      "Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback \u2014 on a headless host the printed URL must be opened from a machine that can reach the callback (Tailscale/port-forward); it cannot be automated"
+      "Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback \u2014 on a headless host the printed URL must be opened from a machine that can reach the callback (e.g. over an SSH port-forward); it cannot be automated"
     ],
     quirks: [
       "The proxy runs its own sticky account pool with cooldowns \u2014 DSH key pooling MUST stay off for this route",
       "The console at :8082 has no auth (webuiPassword empty) \u2014 trusted networks only",
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED \u2026 resets after 46h" is normal',
-      "Shared with OpenCode \u2014 deleting the service breaks OpenCode too; the systemd unit is dotfiles-managed, so dotfiles must drop it or `op pull` resurrects it"
+      "Other tools on this device may consume the same proxy \u2014 removing the service breaks them too"
     ],
     reuse: {
-      label: "Reuse on server (recommended)",
-      baseURL: "http://100.122.163.25:8082",
-      note: "Zero install: uses the server proxy and its already-configured account pool over Tailscale.",
-      health: { url: "http://100.122.163.25:8082/health", timeoutMs: 5e3 }
+      label: "Use a detected instance",
+      baseURL: "http://127.0.0.1:8082",
+      note: "Zero install: uses the proxy instance already running on this device and its configured account pool.",
+      health: { url: "http://127.0.0.1:8082/health", timeoutMs: 5e3 }
     },
     local: {
       label: "Install locally (npm + systemd user unit)",
@@ -393,6 +398,7 @@ var HEAVY_MANIFESTS = [
       deps: ["Node.js >= 18"],
       diskHint: "~23 MB install, ~78\u2013150 MB RAM, no GPU",
       dashboardUrl: "http://127.0.0.1:8082",
+      runtime: "node",
       install: {
         default: {
           steps: [
@@ -419,8 +425,8 @@ var HEAVY_MANIFESTS = [
         { label: "Remove the config directory (OAuth tokens, presets, usage history)", command: "rm -rf {config}/antigravity-proxy" }
       ],
       warnings: [
-        "OpenCode consumes the same proxy \u2014 its provider entry stops working when the service is removed",
-        "The systemd unit is dotfiles-managed: remove it from dotfiles too or `op pull` resurrects it on the next pull",
+        "Any other tool configured against the same proxy stops working when the service is removed",
+        "If a dotfiles/config repository manages the systemd unit, remove it there too or the next sync resurrects it",
         "Deleting ~/.config/antigravity-proxy destroys every Google OAuth token and the usage history",
         "DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown"
       ]
@@ -433,22 +439,23 @@ var HEAVY_MANIFESTS = [
     summary: "Command Code's CLI-shaped API behind the shared multi-key keypool proxy.",
     protocol: "commandcode/alpha-generate",
     auth: { kind: "none", apiKeyEnv: "COMMANDCODE_API_KEY", keyless: false },
-    dashboardUrl: "http://100.122.163.25:8899/status",
+    dashboardUrl: "http://127.0.0.1:8899/status",
     docsUrl: "https://commandcode.ai",
+    defaultPort: 8899,
     requiresBrowser: [
       "Vendor account and quota dashboard live at commandcode.ai (browser)"
     ],
     quirks: [
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 traffic must go through the keypool with CLI headers',
       'llm-pi-ai cannot speak this API: v1 ships the manifest as "requires the custom provider package (planned)"',
-      "The keypool is shared with the opencode `go` pool \u2014 never stop or remove keypool.service when removing this provider",
+      "The keypool may be shared with other tools \u2014 never stop or remove the shared keypool service when removing this provider",
       "The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI"
     ],
     reuse: {
-      label: "Reuse the server keypool (documented only)",
-      baseURL: "http://100.122.163.25:8899/commandcode",
-      note: "All keys/catalog/sanitizer live once on the server; a DSH route needs the planned custom provider package first.",
-      health: { url: "http://100.122.163.25:8899/healthz", timeoutMs: 5e3 }
+      label: "Use a detected instance",
+      baseURL: "http://127.0.0.1:8899/commandcode",
+      note: "Uses the keypool instance already running on this device; a DSH route needs the planned custom provider package first.",
+      health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
     },
     local: {
       label: "Not supported in v1",
@@ -461,14 +468,14 @@ var HEAVY_MANIFESTS = [
     removal: {
       steps: [],
       warnings: [
-        "Removal drops only DSH state and the commandcode pool keys \u2014 it never stops or removes the shared keypool service (the `go` pool needs it)",
+        "Removal drops only DSH state and the commandcode pool keys \u2014 it never stops or removes the shared keypool service (other tools may need it)",
         "usage.jsonl is keypool-wide and is not touched"
       ]
     },
     unsupported: {
       reason: "llm-pi-ai cannot speak the CLI-shaped /alpha/generate protocol \u2014 a custom provider package is required.",
       plannedWith: "dsh-provider-commandcode (planned)",
-      reuseUrl: "http://100.122.163.25:8899/commandcode"
+      reuseUrl: "http://127.0.0.1:8899/commandcode"
     }
   }
 ];
@@ -485,6 +492,9 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
     seen.add(manifest.id);
     for (const [field, value] of [["label", manifest.label], ["summary", manifest.summary], ["protocol", manifest.protocol]]) {
       if (typeof value !== "string" || value.trim() === "") problems.push(`${where}: ${field} is empty`);
+    }
+    if (!Number.isInteger(manifest.defaultPort) || manifest.defaultPort < 1 || manifest.defaultPort > 65535) {
+      problems.push(`${where}: defaultPort must be a TCP port`);
     }
     if (manifest.reuse.baseURL === "" && manifest.unsupported === void 0) problems.push(`${where}: reuse.baseURL is empty`);
     if (manifest.reuse.health.url === "") problems.push(`${where}: reuse.health.url is empty`);
@@ -528,15 +538,139 @@ function substitute(value, home) {
 function modeBaseURL(manifest, mode) {
   return mode === "reuse" ? manifest.reuse.baseURL : manifest.local.baseURL;
 }
-function modeHealth(manifest, mode) {
-  return mode === "reuse" ? manifest.reuse.health : manifest.local.health;
+function urlPort(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.port !== "") return Number(parsed.port);
+    return parsed.protocol === "https:" ? 443 : parsed.protocol === "http:" ? 80 : void 0;
+  } catch {
+    return void 0;
+  }
 }
-function routeProfile(manifest, mode, models) {
+function urlPath(url) {
+  try {
+    const path = new URL(url).pathname;
+    return path === "/" ? "" : path;
+  } catch {
+    return "";
+  }
+}
+function instanceHealth(manifest, port) {
+  return { ...manifest.local.health, url: `http://127.0.0.1:${port}${urlPath(manifest.local.health.url)}` };
+}
+function instanceBaseURL(manifest, port) {
+  return `http://127.0.0.1:${port}${urlPath(manifest.reuse.baseURL)}`;
+}
+function healthForBase(manifest, baseURL) {
+  try {
+    const base = new URL(baseURL);
+    const declared = new URL(manifest.reuse.health.url);
+    return { ...manifest.reuse.health, url: `${base.protocol}//${base.host}${declared.pathname}` };
+  } catch {
+    return manifest.reuse.health;
+  }
+}
+function instanceCandidates(manifest, configuredBaseURL) {
+  const candidates = [];
+  const add = (baseURL, url) => {
+    if (candidates.some((candidate) => candidate.url === url)) return;
+    const port = urlPort(baseURL);
+    candidates.push({ url, baseURL, ...port === void 0 ? {} : { port } });
+  };
+  if (configuredBaseURL !== void 0 && configuredBaseURL !== "") {
+    add(configuredBaseURL, healthForBase(manifest, configuredBaseURL).url);
+  }
+  add(manifest.reuse.baseURL, manifest.reuse.health.url);
+  add(instanceBaseURL(manifest, manifest.defaultPort), instanceHealth(manifest, manifest.defaultPort).url);
+  return candidates;
+}
+async function detectInstance(deps, manifest, configuredBaseURL) {
+  let firstFailure;
+  for (const candidate of instanceCandidates(manifest, configuredBaseURL)) {
+    const health = await probeHealth({ ...manifest.reuse.health, url: candidate.url }, deps.fetchImpl);
+    const detection = {
+      ok: health.ok,
+      baseURL: candidate.baseURL,
+      ...candidate.port === void 0 ? {} : { port: candidate.port },
+      url: candidate.url,
+      health
+    };
+    if (health.ok) return detection;
+    firstFailure ??= detection;
+  }
+  return firstFailure ?? {
+    ok: false,
+    baseURL: manifest.reuse.baseURL,
+    url: manifest.reuse.health.url,
+    health: { ok: false, error: "no probe candidates", checkedAt: Date.now() }
+  };
+}
+async function detectRuntimes(runStep2) {
+  try {
+    const outcome = await runStep2({
+      label: "Detect container runtimes",
+      command: "command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; exit 0"
+    });
+    return {
+      docker: /(^|\n)available:docker(\n|$)/.test(outcome.output),
+      podman: /(^|\n)available:podman(\n|$)/.test(outcome.output)
+    };
+  } catch {
+    return { docker: false, podman: false };
+  }
+}
+function declaredRuntime(manifest, platform) {
+  const variant = platform === "linux" || platform === "darwin" || platform === "win32" ? manifest.local.install[platform] : void 0;
+  return variant?.runtime ?? manifest.local.runtime ?? "node";
+}
+function chooseLocalPath(manifest, platform, runtime, detectedPort) {
+  const resolved = resolveHeavyInstall(manifest.local, platform);
+  if (detectedPort !== void 0) {
+    return { path: "detected", label: "Use the detected instance", deps: [], diskHint: "", steps: [], requires: [], missing: [] };
+  }
+  const base = { deps: resolved.deps, diskHint: resolved.diskHint, steps: resolved.steps };
+  switch (declaredRuntime(manifest, platform)) {
+    case "docker":
+      if (runtime.docker) return { path: "docker", label: resolved.label, ...base, requires: ["docker"], missing: [] };
+      if (runtime.podman) return { path: "podman", label: resolved.label, ...base, requires: ["podman"], missing: [] };
+      return { path: "unsupported", label: resolved.label, ...base, requires: ["docker"], missing: ["Docker Engine + Compose (or Podman)"] };
+    case "podman":
+      return runtime.podman ? { path: "podman", label: resolved.label, ...base, requires: ["podman"], missing: [] } : { path: "unsupported", label: resolved.label, ...base, requires: ["podman"], missing: ["Podman"] };
+    case "vendor-app":
+      return { path: "vendor-app", label: resolved.label, ...base, requires: [], missing: [] };
+    case "node":
+      return { path: "node", label: resolved.label, ...base, requires: [], missing: [] };
+  }
+}
+function readServerOverlay(dshHome) {
+  try {
+    const document = JSON.parse(readFileSync2(join2(dshHome, "heavy-server-overlay.json"), "utf8"));
+    if (document === null || typeof document !== "object" || Array.isArray(document)) return {};
+    const entries = document.providers;
+    if (entries === null || typeof entries !== "object" || Array.isArray(entries)) return {};
+    return entries;
+  } catch {
+    return {};
+  }
+}
+function overlayManifest(manifest, entry) {
+  if (entry === void 0) return manifest;
+  return {
+    ...manifest,
+    ...entry.dashboardUrl === void 0 ? {} : { dashboardUrl: entry.dashboardUrl },
+    reuse: {
+      ...manifest.reuse,
+      ...entry.reuseBaseURL === void 0 ? {} : { baseURL: entry.reuseBaseURL },
+      ...entry.reuseHealthURL === void 0 ? {} : { health: { ...manifest.reuse.health, url: entry.reuseHealthURL } }
+    }
+  };
+}
+function routeProfile(manifest, mode, models, overrides = {}) {
   const list = models.length > 0 ? models.map((model) => model.name === void 0 ? { id: model.id } : { id: model.id, name: model.name }) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
   return {
-    displayName: `${manifest.label}${mode === "reuse" ? " (server)" : " (local)"}`,
+    displayName: `${manifest.label}${mode === "reuse" ? " (detected)" : " (local)"}`,
     api: manifest.protocol,
-    baseURL: modeBaseURL(manifest, mode),
+    baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
     ...manifest.auth.apiKeyEnv === void 0 ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
     ...manifest.auth.kind === "none" ? { keyless: true } : {},
     models: list
@@ -598,10 +732,10 @@ function configuredProfile(deps, id) {
   if (profile === null || typeof profile !== "object" || Array.isArray(profile)) return void 0;
   return profile;
 }
-async function writeRoute(deps, manifest, mode, models) {
+async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   const settings = deps.settings;
   if (settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
-  const profile = routeProfile(manifest, mode, models);
+  const profile = routeProfile(manifest, mode, models, overrides);
   await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, LLM_NS));
   return profile;
 }
@@ -613,12 +747,22 @@ async function storeCredential(deps, manifest, key) {
   await credentials.set(ref, key.trim());
   return true;
 }
-async function reuseOnServer(deps, manifest, key) {
-  const health = await probeHealth(modeHealth(manifest, "reuse"), deps.fetchImpl);
-  const models = await discoverModels(modeBaseURL(manifest, "reuse"), key, deps.fetchImpl);
-  const route = await writeRoute(deps, manifest, "reuse", models);
+async function useDetectedInstance(deps, manifest, key) {
+  const profile = configuredProfile(deps, manifest.id);
+  const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
+  const detection = await detectInstance(deps, manifest, configuredBase);
+  const endpoint = detection.ok ? detection.baseURL : manifest.reuse.baseURL;
+  const models = await discoverModels(endpoint, key, deps.fetchImpl);
+  const route = await writeRoute(deps, manifest, "reuse", models, { baseURL: endpoint });
   const credentialStored = await storeCredential(deps, manifest, key);
-  return { route, health, models, credentialStored };
+  return {
+    route,
+    health: detection.health,
+    models,
+    credentialStored,
+    ...detection.ok && detection.port !== void 0 ? { port: detection.port } : {},
+    endpoint
+  };
 }
 function discoveredCachePath(deps) {
   const override = process.env.DSH_DISCOVERED_MODELS;
@@ -748,6 +892,7 @@ ${outcome.output}
 // src/remote.ts
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 var MAX_KEY_CHARS = 4096;
+var RUNTIME_TTL_MS = 6e4;
 function requireManifest(value) {
   if (typeof value !== "string" || value === "") {
     throw new RemoteError("gateway/bad-request", "enpoiHeavy: id must be a non-empty string", {});
@@ -774,19 +919,42 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     super(ctx, "enpoiHeavy");
     __runInitializers(_init, 5, this);
     __publicField(this, "options");
+    __publicField(this, "runtimeCache");
     this.options = options;
   }
+  /** The machine's container runtimes, memoized for one minute. */
+  async runtime() {
+    const now = Date.now();
+    if (this.runtimeCache !== void 0 && now - this.runtimeCache.at < RUNTIME_TTL_MS) {
+      return this.runtimeCache.value;
+    }
+    const value = await detectRuntimes(this.options.deps().runStep);
+    this.runtimeCache = { at: now, value };
+    return value;
+  }
+  /** The manifest with the operator's private overlay applied (read per call). */
+  effectiveManifest(manifest) {
+    return overlayManifest(manifest, readServerOverlay(this.options.deps().dshHome)[manifest.id]);
+  }
   manifests() {
-    return { items: HEAVY_MANIFESTS, problems: manifestProblems(), platform: process.platform };
+    const overlay = readServerOverlay(this.options.deps().dshHome);
+    return {
+      items: HEAVY_MANIFESTS.map((manifest) => overlayManifest(manifest, overlay[manifest.id])),
+      problems: manifestProblems(),
+      platform: process.platform
+    };
   }
   async status(request) {
-    const manifest = requireManifest(request?.id);
+    const manifest = this.effectiveManifest(requireManifest(request?.id));
     const deps = this.options.deps();
     const profile = configuredProfile(deps, manifest.id);
     const configured = profile !== void 0;
     const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
     const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";
-    const health = await probeHealth(mode === void 0 ? manifest.reuse.health : modeHealth(manifest, mode), deps.fetchImpl);
+    const detection = await detectInstance(deps, manifest, configuredBase);
+    const runtime = await this.runtime();
+    const preflight = chooseLocalPath(manifest, process.platform, runtime, detection.ok ? detection.port : void 0);
+    const health = configuredBase === void 0 ? detection.health : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl);
     const job = this.options.jobs.snapshot(manifest.id);
     return {
       id: manifest.id,
@@ -794,18 +962,22 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       ...mode === void 0 ? {} : { mode },
       health,
       platform: process.platform,
+      runtime,
+      preflight,
+      ...detection.ok && detection.port !== void 0 ? { detectedPort: detection.port } : {},
+      ...detection.ok ? { detectedEndpoint: detection.baseURL } : {},
       ...manifest.unsupported === void 0 ? {} : { unsupported: manifest.unsupported },
       ...job === void 0 ? {} : { job }
     };
   }
   async reuse(request) {
-    const manifest = requireManifest(request?.id);
+    const manifest = this.effectiveManifest(requireManifest(request?.id));
     const key = optionalKey(request?.key);
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
     }
-    const outcome = await reuseOnServer(this.options.deps(), manifest, key);
-    this.options.log?.(`reuse ${manifest.id}: health=${outcome.health.ok ? "ok" : "down"} models=${String(outcome.models.length)}`);
+    const outcome = await useDetectedInstance(this.options.deps(), manifest, key);
+    this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? "ok" : "down"} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`);
     return { ok: true, ...outcome };
   }
   install(request) {

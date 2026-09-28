@@ -17,18 +17,19 @@ it('keeps every manifest free of DSH key-pool declarations', () => {
   expect(serialized).not.toContain('identities')
 })
 
-it('antigravity is an anthropic route with a placeholder ref, never keyless', () => {
+it('antigravity is a loopback anthropic route with a placeholder ref, never keyless', () => {
   const manifest = manifestById('antigravity')
   expect(manifest?.protocol).toBe('anthropic-messages')
   expect(manifest?.auth).toEqual({ kind: 'placeholder', apiKeyEnv: 'ANTIGRAVITY_API_KEY', keyless: false })
-  expect(manifest?.reuse.baseURL).toBe('http://100.122.163.25:8082')
+  expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:8082')
   expect(manifest?.local.baseURL).toBe('http://127.0.0.1:8082')
+  expect(manifest?.defaultPort).toBe(8082)
 })
 
-it('antigravity removal warns about OpenCode and the dotfiles-managed unit', () => {
+it('antigravity removal warns about other proxy consumers and a synced unit file', () => {
   const warnings = manifestById('antigravity')?.removal.warnings.join('\n') ?? ''
-  expect(warnings).toContain('OpenCode')
-  expect(warnings).toContain('op pull')
+  expect(warnings).toContain('other tool')
+  expect(warnings).toContain('dotfiles')
 })
 
 it('freellmapi removal drops the volume, the image, and the clone directory', () => {
@@ -45,10 +46,10 @@ it('freellmapi surface quirks name the unified key and ENCRYPTION_KEY', () => {
   expect(manifestById('freellmapi')?.requiresBrowser.length).toBeGreaterThan(0)
 })
 
-it('commandcode is unsupported for llm-pi-ai but documents the keypool reuse URL', () => {
+it('commandcode is unsupported for llm-pi-ai but documents the loopback keypool URL', () => {
   const manifest = manifestById('commandcode')
-  expect(manifest?.unsupported?.reuseUrl).toBe('http://100.122.163.25:8899/commandcode')
-  expect(manifest?.reuse.baseURL).toBe('http://100.122.163.25:8899/commandcode')
+  expect(manifest?.unsupported?.reuseUrl).toBe('http://127.0.0.1:8899/commandcode')
+  expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:8899/commandcode')
   expect(manifest?.protocol).toBe('commandcode/alpha-generate')
   expect(manifest?.local.install.default.steps).toEqual([])
 })
