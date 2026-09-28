@@ -4,7 +4,7 @@
  * an explicit unsupported-but-documented reuse path.
  */
 import { expect, it } from 'vitest'
-import { HEAVY_MANIFESTS, manifestById, manifestProblems } from '../src/manifests.js'
+import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall } from '../src/manifests.js'
 
 it('declares the three heavy providers with no structural problems', () => {
   expect(manifestProblems()).toEqual([])
@@ -50,7 +50,7 @@ it('commandcode is unsupported for llm-pi-ai but documents the keypool reuse URL
   expect(manifest?.unsupported?.reuseUrl).toBe('http://100.122.163.25:8899/commandcode')
   expect(manifest?.reuse.baseURL).toBe('http://100.122.163.25:8899/commandcode')
   expect(manifest?.protocol).toBe('commandcode/alpha-generate')
-  expect(manifest?.local.install).toEqual([])
+  expect(manifest?.local.install.default.steps).toEqual([])
 })
 
 it('commandcode removal only touches DSH state, never the shared keypool service', () => {
@@ -59,4 +59,21 @@ it('commandcode removal only touches DSH state, never the shared keypool service
   const text = JSON.stringify(manifest?.removal)
   expect(text).toContain('never stops or removes the shared keypool service')
   expect(text).toContain('usage.jsonl')
+})
+
+it('freellmapi installs are platform-keyed and fall back to the Docker path', () => {
+  const local = manifestById('freellmapi')!.local
+  const linux = resolveHeavyInstall(local, 'linux')
+  expect(linux.steps[0]!.command).toContain('freellmapi.co/install.sh')
+  expect(linux.steps[0]!.command).toContain('PORT=3002')
+  const darwin = resolveHeavyInstall(local, 'darwin')
+  expect(darwin.deps).toEqual(['macOS 11+'])
+  expect(darwin.steps[0]!.command).toContain('.dmg')
+  expect(darwin.steps.map(step => step.command).join('\n')).toContain('"port":3002')
+  const win32 = resolveHeavyInstall(local, 'win32')
+  expect(win32.deps).toEqual(['Windows 10+'])
+  expect(win32.steps[0]!.command).toContain('.exe')
+  const unknown = resolveHeavyInstall(local, 'freebsd')
+  expect(unknown.label).toBe(local.label)
+  expect(unknown.steps[0]!.command).toContain('git clone')
 })

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { HeavyJobManager } from '../src/jobs.js'
-import { manifestById } from '../src/manifests.js'
+import { manifestById, resolveHeavyInstall } from '../src/manifests.js'
 import { writeRoute, type HeavyDeps, type SettingsSeam } from '../src/planner.js'
 
 const scratch: string[] = []
@@ -49,7 +49,7 @@ it('a failed install step writes no route and fails the job', async () => {
   }
   const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
   const manifest = manifestById('freellmapi')!
-  manager.start(manifest.id, 'install', manifest.local.install, async () => {
+  manager.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, '').steps, async () => {
     await writeRoute(deps, manifest, 'local', [])
   })
   // The failed job must never reach the finalizer.
@@ -78,7 +78,7 @@ it('a successful install writes the local route and reports progress', async () 
   const finalize = vi.fn(async () => {
     await writeRoute(deps, manifest, 'local', [{ id: 'gemini-2.5-flash' }])
   })
-  manager.start(manifest.id, 'install', manifest.local.install, finalize)
+  manager.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, '').steps, finalize)
   const job = await settled(manager, manifest.id)
   expect(job.state).toBe('succeeded')
   expect(job.pct).toBe(100)
@@ -95,7 +95,7 @@ it('a failing finalizer marks the job failed instead of a partial success', asyn
     run: async () => ({ exitCode: 0, output: 'ok' }),
   })
   const manifest = manifestById('freellmapi')!
-  manager.start(manifest.id, 'install', manifest.local.install, async () => {
+  manager.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, '').steps, async () => {
     throw new Error('route write refused')
   })
   const job = await settled(manager, manifest.id)

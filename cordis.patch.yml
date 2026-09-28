@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790587373868
+        checkedAt: 1790589505049
     personas:
       oracle: null
       fixer: null
@@ -5578,14 +5578,14 @@
           - id: ~deepseek/deepseek-flash-latest
             name: DeepSeek Flash Latest
             contextWindow: 1048576
-            maxTokens: 943718
+            maxTokens: 384000
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.0245
+              input: 0.02
               output: 0.6
             reasoningEfforts:
               low: low
@@ -5739,14 +5739,14 @@
           - id: deepseek/deepseek-v4.1-flash
             name: DeepSeek V4.1 Flash
             contextWindow: 1048576
-            maxTokens: 943718
+            maxTokens: 384000
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.0245
+              input: 0.02
               output: 0.6
             reasoningEfforts:
               low: low
@@ -6419,7 +6419,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.2523
+              input: 0.3995
               output: 4.2
             reasoningEfforts:
               low: low
@@ -17656,7 +17656,7 @@
           - id: deepseek/deepseek-v4.1-flash
             name: DeepSeek V4.1 Flash
             contextWindow: 1048576
-            maxTokens: 943718
+            maxTokens: 384000
             input:
               - text
               - image
@@ -18093,14 +18093,14 @@
           - id: ~deepseek/deepseek-flash-latest
             name: "DeepSeek: DeepSeek Flash Latest"
             contextWindow: 1048576
-            maxTokens: 943718
+            maxTokens: 384000
             input:
               - text
               - image
             reasoning: true
             tools: true
             cost:
-              input: 0.0245
+              input: 0.02
               output: 0.6
             reasoningEfforts:
               low: low

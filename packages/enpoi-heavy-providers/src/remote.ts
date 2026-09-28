@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { HeavyJobView } from './jobs.js'
 import { HeavyJobManager } from './jobs.js'
-import { HEAVY_MANIFESTS, manifestById, manifestProblems, type HeavyProviderManifest } from './manifests.js'
+import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
 import {
   configuredProfile,
   discoverModels,
@@ -46,6 +46,8 @@ export interface HeavyServiceOptions {
 export interface ManifestsValue {
   items: readonly HeavyProviderManifest[]
   problems: readonly string[]
+  /** The host platform install steps execute on (`process.platform`). */
+  platform: string
 }
 
 /** `enpoiHeavy.status` result. */
@@ -54,6 +56,8 @@ export interface StatusValue {
   configured: boolean
   mode?: 'reuse' | 'local'
   health: { ok: boolean; status?: number; error?: string; checkedAt: number }
+  /** The host platform install steps execute on (`process.platform`). */
+  platform: string
   unsupported?: HeavyProviderManifest['unsupported']
   job?: HeavyJobView
 }
@@ -121,7 +125,7 @@ export class HeavyProvidersService extends TypertRemoteService {
   /** The declared manifest table plus any structural problems (display only). */
   @Remote
   manifests(): ManifestsValue {
-    return { items: HEAVY_MANIFESTS, problems: manifestProblems() }
+    return { items: HEAVY_MANIFESTS, problems: manifestProblems(), platform: process.platform }
   }
 
   /**
@@ -144,6 +148,7 @@ export class HeavyProvidersService extends TypertRemoteService {
       configured,
       ...mode === undefined ? {} : { mode },
       health,
+      platform: process.platform,
       ...manifest.unsupported === undefined ? {} : { unsupported: manifest.unsupported },
       ...job === undefined ? {} : { job },
     }
@@ -179,7 +184,7 @@ export class HeavyProvidersService extends TypertRemoteService {
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
-    const job = this.options.jobs.start(manifest.id, 'install', manifest.local.install, async () => {
+    const job = this.options.jobs.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, process.platform).steps, async () => {
       const deps = this.options.deps()
       const models = await discoverModels(modeBaseURL(manifest, 'local'), key, deps.fetchImpl)
       await writeRoute(deps, manifest, 'local', models)

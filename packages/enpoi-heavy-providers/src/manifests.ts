@@ -42,6 +42,68 @@ export interface HeavyHealth {
   timeoutMs?: number
 }
 
+/** One platform's local install path. */
+export interface HeavyPlatformInstall {
+  /** Human label override; defaults to the local install label. */
+  label?: string
+  /** Dependency hints override; defaults to `local.deps`. */
+  deps?: readonly string[]
+  /** Footprint hint override; defaults to `local.diskHint`. */
+  diskHint?: string
+  /** Steps executed in order for this platform. */
+  steps: readonly HeavyStep[]
+}
+
+/** The platform-keyed local install table; `default` is the fallback. */
+export interface HeavyInstallTable {
+  default: HeavyPlatformInstall
+  linux?: HeavyPlatformInstall
+  darwin?: HeavyPlatformInstall
+  win32?: HeavyPlatformInstall
+}
+
+/** Install path on this device, with platform-keyed variants. */
+export interface HeavyLocalInstall {
+  label: string
+  baseURL: string
+  deps: readonly string[]
+  diskHint: string
+  /** Dashboard served by the local install (defaults to {@link HeavyProviderManifest.dashboardUrl}). */
+  dashboardUrl?: string
+  /** Platform-keyed steps; a platform without an entry uses `default`. */
+  install: HeavyInstallTable
+  health: HeavyHealth
+}
+
+/** The platforms with a declared install variant. */
+export type HeavyPlatform = 'linux' | 'darwin' | 'win32'
+
+/** One platform's install resolved against the local defaults. */
+export interface ResolvedHeavyInstall {
+  label: string
+  deps: readonly string[]
+  diskHint: string
+  steps: readonly HeavyStep[]
+}
+
+/**
+ * Resolve the install path for one platform (`process.platform` on the host).
+ * @param local - the manifest's local install table.
+ * @param platform - the platform key; an unknown key uses `default`.
+ * @returns the platform variant with the local defaults filled in.
+ */
+export function resolveHeavyInstall(local: HeavyLocalInstall, platform: string): ResolvedHeavyInstall {
+  const variant = platform === 'linux' || platform === 'darwin' || platform === 'win32'
+    ? local.install[platform] ?? local.install.default
+    : local.install.default
+  return {
+    label: variant.label ?? local.label,
+    deps: variant.deps ?? local.deps,
+    diskHint: variant.diskHint ?? local.diskHint,
+    steps: variant.steps,
+  }
+}
+
 /** One heavy provider's complete declaration. */
 export interface HeavyProviderManifest {
   id: string
@@ -73,16 +135,7 @@ export interface HeavyProviderManifest {
     health: HeavyHealth
   }
   /** Install path on this device. */
-  local: {
-    label: string
-    baseURL: string
-    deps: readonly string[]
-    diskHint: string
-    /** Dashboard served by the local install (defaults to {@link dashboardUrl}). */
-    dashboardUrl?: string
-    install: readonly HeavyStep[]
-    health: HeavyHealth
-  }
+  local: HeavyLocalInstall
   /** Teardown path; warnings are the explicit confirmations the UI must show. */
   removal: {
     steps: readonly HeavyStep[]
@@ -130,18 +183,90 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       deps: ['Docker Engine + Compose'],
       diskHint: '~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU',
       dashboardUrl: 'http://127.0.0.1:3002',
-      install: [
-        { label: 'Clone FreeLLMAPI', command: 'git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi', weight: 2 },
-        {
-          label: 'Generate ENCRYPTION_KEY',
-          command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3001\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env',
+      install: {
+        // Unknown platforms fall back to the manual Docker Compose path.
+        default: {
+          steps: [
+            { label: 'Clone FreeLLMAPI', command: 'git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi', weight: 2 },
+            {
+              label: 'Generate ENCRYPTION_KEY',
+              // PORT is the HOST port (compose maps ${PORT}:3001); keep it at
+              // 3002 so the local route's baseURL resolves.
+              command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env',
+            },
+            { label: 'Start the stack', command: 'docker compose up -d', cwd: '{home}/freellmapi' },
+            {
+              label: 'Wait for the gateway',
+              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+            },
+          ],
         },
-        { label: 'Start the stack', command: 'docker compose up -d', cwd: '{home}/freellmapi' },
-        {
-          label: 'Wait for the gateway',
-          command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+        // The vendor one-liner is the documented Linux/macOS server install;
+        // PORT=3002 keeps the route baseURL valid.
+        linux: {
+          label: 'Install locally (vendor one-liner, Docker)',
+          steps: [
+            {
+              label: 'Run the FreeLLMAPI one-liner',
+              command: 'curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash',
+              weight: 3,
+            },
+            {
+              label: 'Wait for the gateway',
+              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+            },
+          ],
         },
-      ],
+        // macOS prefers the vendor desktop app: no Docker Desktop overhead.
+        darwin: {
+          label: 'Install locally (vendor desktop app, no Docker)',
+          deps: ['macOS 11+'],
+          diskHint: '~250 MB app; data in ~/Library/Application Support/FreeLLMAPI',
+          steps: [
+            {
+              label: 'Download the latest .dmg',
+              command: 'mkdir -p {home}/Downloads && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\\.dmg"\' | head -1 | cut -d\'"\' -f4 | xargs -I{} curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg {}',
+              weight: 2,
+            },
+            {
+              label: 'Install the app from the disk image',
+              command: 'hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet',
+            },
+            {
+              label: 'Pin the desktop app to port 3002',
+              command: 'mkdir -p {home}/Library/Application\\ Support/FreeLLMAPI && printf \'{"port":3002}\\n\' > {home}/Library/Application\\ Support/FreeLLMAPI/config.json',
+            },
+            { label: 'Launch FreeLLMAPI', command: 'open -a FreeLLMAPI' },
+            {
+              label: 'Wait for the gateway',
+              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+            },
+          ],
+        },
+        // Windows only ships a desktop app (no Docker path in the vendor docs).
+        win32: {
+          label: 'Install locally (vendor desktop app, no Docker)',
+          deps: ['Windows 10+'],
+          diskHint: '~250 MB app; data in %APPDATA%\\FreeLLMAPI',
+          steps: [
+            {
+              label: 'Download the latest installer',
+              command: 'mkdir -p {home}/Downloads && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\\.exe"\' | head -1 | cut -d\'"\' -f4 | xargs -I{} curl -fsSL -o {home}/Downloads/FreeLLMAPI-Setup.exe {}',
+              weight: 2,
+            },
+            { label: 'Install silently', command: 'cmd //c start //wait "" "$HOME/Downloads/FreeLLMAPI-Setup.exe" /S' },
+            {
+              label: 'Pin the desktop app to port 3002',
+              command: 'mkdir -p "$APPDATA/FreeLLMAPI" && printf \'{"port":3002}\\n\' > "$APPDATA/FreeLLMAPI/config.json"',
+            },
+            { label: 'Launch FreeLLMAPI', command: 'cmd //c start "" "$LOCALAPPDATA\\Programs\\FreeLLMAPI\\FreeLLMAPI.exe"' },
+            {
+              label: 'Wait for the gateway',
+              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+            },
+          ],
+        },
+      },
       health: { url: 'http://127.0.0.1:3002/api/ping', timeoutMs: 5000 },
     },
     removal: {
@@ -189,18 +314,22 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       deps: ['Node.js >= 18'],
       diskHint: '~23 MB install, ~78–150 MB RAM, no GPU',
       dashboardUrl: 'http://127.0.0.1:8082',
-      install: [
-        { label: 'Install the proxy package', command: 'npm install -g antigravity-claude-proxy', weight: 2 },
-        {
-          label: 'Write the systemd user unit',
-          command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<\'EOF\'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc \'exec antigravity-claude-proxy\'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF',
+      install: {
+        default: {
+          steps: [
+            { label: 'Install the proxy package', command: 'npm install -g antigravity-claude-proxy', weight: 2 },
+            {
+              label: 'Write the systemd user unit',
+              command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<\'EOF\'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc \'exec antigravity-claude-proxy\'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF',
+            },
+            { label: 'Enable and start the unit', command: 'systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service' },
+            {
+              label: 'Wait for the proxy',
+              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1',
+            },
+          ],
         },
-        { label: 'Enable and start the unit', command: 'systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service' },
-        {
-          label: 'Wait for the proxy',
-          command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1',
-        },
-      ],
+      },
       health: { url: 'http://127.0.0.1:8082/health', timeoutMs: 5000 },
     },
     removal: {
@@ -247,7 +376,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       baseURL: '',
       deps: [],
       diskHint: '',
-      install: [],
+      install: { default: { steps: [] } },
       health: { url: 'http://127.0.0.1:8899/healthz', timeoutMs: 5000 },
     },
     removal: {
@@ -288,10 +417,17 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
     }
     if (manifest.reuse.baseURL === '' && manifest.unsupported === undefined) problems.push(`${where}: reuse.baseURL is empty`)
     if (manifest.reuse.health.url === '') problems.push(`${where}: reuse.health.url is empty`)
+    const variants = [manifest.local.install.default, manifest.local.install.linux, manifest.local.install.darwin, manifest.local.install.win32]
     if (manifest.unsupported === undefined) {
-      if (manifest.local.install.length === 0) problems.push(`${where}: local.install is empty`)
+      if (manifest.local.install.default.steps.length === 0) problems.push(`${where}: local.install.default is empty`)
       if (manifest.local.baseURL === '') problems.push(`${where}: local.baseURL is empty`)
       if (manifest.local.health.url === '') problems.push(`${where}: local.health.url is empty`)
+    }
+    for (const [index, variant] of variants.entries()) {
+      if (variant === undefined) continue
+      if (variant.steps.length === 0 && manifest.unsupported === undefined) {
+        problems.push(`${where}: platform install variant ${String(index)} has no steps`)
+      }
     }
     if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`)
     if (manifest.auth.kind === 'none' && manifest.protocol === 'anthropic-messages') {
@@ -303,7 +439,7 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
     if (manifest.auth.kind === 'placeholder' && manifest.auth.keyless) {
       problems.push(`${where}: a placeholder-auth route cannot be keyless`)
     }
-    for (const step of [...manifest.local.install, ...manifest.removal.steps]) {
+    for (const step of [...variants.flatMap(variant => variant?.steps ?? []), ...manifest.removal.steps]) {
       if (step.command.trim() === '') problems.push(`${where}: a step command is empty (${step.label})`)
     }
   }
