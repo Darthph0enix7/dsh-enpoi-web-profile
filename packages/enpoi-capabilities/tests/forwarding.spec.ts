@@ -9,12 +9,13 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam, railHitOf, recommendationOf,
-  type ApprovalOutcome, type ChildAgentLike, type ForwardingDeps, type RootAskQuery, type RootHandle, type RootMode,
+  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam, hasReasoningMaterial, railHitOf,
+  recommendationOf, workspaceRelationOf,
+  type ApprovalOutcome, type ChildAgentLike, type ForwardingDeps, type RecommendationQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from '../src/forwarding'
 import { advertisedToolNames, resolvePolicy, type PermissionPolicyConfig } from '../src/policy'
 
-const ROOT: RootHandle = { id: 'root-1', agent: { fake: 'root-agent' } }
+const ROOT: RootHandle = { id: 'root-1', agent: { fake: 'root-agent' }, cwd: '/ws' }
 
 function childAgent(overrides: {
   id?: string
@@ -52,10 +53,12 @@ function fakeDeps(overrides: {
   root?: RootHandle | undefined
   railAllows?: boolean
   depthCap?: number
+  recommendation?: ForwardingDeps['recommendation']
 } = {}) {
   const outcomes = [...overrides.outcomes ?? ['rejected']]
   const asks: RootAskQuery[] = []
   const reports: string[] = []
+  const recQueries: RecommendationQuery[] = []
   const deps: ForwardingDeps = {
     findRoot: () => overrides.root === undefined && 'root' in overrides ? undefined : ROOT,
     modeOf: () => overrides.mode ?? 'interactive',
@@ -65,10 +68,16 @@ function fakeDeps(overrides: {
       const outcome = outcomes.shift()
       return outcome === undefined ? Promise.resolve('rejected') : Promise.resolve(outcome)
     },
+    ...overrides.recommendation === undefined ? {} : {
+      recommendation: (query: RecommendationQuery) => {
+        recQueries.push(query)
+        return overrides.recommendation!(query)
+      },
+    },
     report: line => reports.push(line),
     depthCap: () => overrides.depthCap ?? 1,
   }
-  return { forwarder: new ChildApprovalForwarder(deps), asks, reports, outcomes }
+  return { forwarder: new ChildApprovalForwarder(deps), asks, reports, outcomes, recQueries }
 }
 
 describe('delegated provenance', () => {
@@ -357,11 +366,134 @@ describe('forwarded-approval finality', () => {
 })
 
 describe('recommendation text', () => {
-  it('is short and derived, not agent-authored', () => {
+  it('is short and derived, not agent-authored, when the root reasoner is absent', () => {
     expect(recommendationOf({ toolName: 'bash', args: { command: 'ls' }, cwd: '/ws' })).toBe('no filesystem path named')
     expect(recommendationOf({ toolName: 'write', args: { file_path: '/ws/a.txt' }, cwd: '/ws' })).toBe('inside the workspace, looks safe')
   })
+
+  it('decides what has reasoning material (a bare ask never spends a model call)', () => {
+    expect(hasReasoningMaterial(undefined)).toBe(false)
+    expect(hasReasoningMaterial({})).toBe(false)
+    expect(hasReasoningMaterial({ command: '' })).toBe(false)
+    expect(hasReasoningMaterial({ command: '  ' })).toBe(false)
+    expect(hasReasoningMaterial({ paths: [] })).toBe(false)
+    expect(hasReasoningMaterial({ command: 'ls' })).toBe(true)
+    expect(hasReasoningMaterial({ file_path: '/ws/a.txt' })).toBe(true)
+    expect(hasReasoningMaterial({ count: 0 })).toBe(true)
+  })
+
+  it('states the child workspace relation to the root for the prompt', () => {
+    expect(workspaceRelationOf('/ws', '/ws')).toContain("root's own workspace")
+    expect(workspaceRelationOf('/ws/sub', '/ws')).toContain('inside the root workspace')
+    expect(workspaceRelationOf('/elsewhere', '/ws')).toContain('OUTSIDE the root workspace')
+    expect(workspaceRelationOf(undefined, '/ws')).toContain('unknown')
+    expect(workspaceRelationOf('/ws', undefined)).toContain('unknown')
+    expect(workspaceRelationOf(undefined, undefined)).toContain('unknown')
+  })
 })
+
+describe('root-side recommendation (advisory only)', () => {
+  it('renders the model line and suggestion on the card, and reports its provenance inputs', async () => {
+    const f = fakeDeps({
+      outcomes: ['allowed-once'],
+      recommendation: () => Promise.resolve({ text: 'Reads a project file inside the workspace.', suggestion: 'allow-once' }),
+    })
+    const result = await f.forwarder.forward({
+      agent: childAgent({ id: 'child-42', label: 'fixer: repair', depth: 1 }),
+      toolName: 'str_replace_editor', args: { file_path: '/ws/a.txt' }, decision: editorAsk(),
+    })
+    expect(result.kind).toBe('allow')
+    expect(f.asks).toHaveLength(1)
+    const ask = f.asks[0]
+    expect(ask.recommendation).toEqual({
+      text: 'Reads a project file inside the workspace.', source: 'model', suggestion: 'allow-once',
+    })
+    // The audit reason names the model line as advisory; the card headline
+    // carries provenance only (the line is its own element).
+    expect(ask.reason).toContain('Root model recommendation (advisory: allow-once): Reads a project file inside the workspace.')
+    expect(ask.displayReason.en).not.toContain('Reads a project file')
+    // The reasoner saw ask + provenance + rails verdict + workspace relation.
+    expect(f.recQueries).toHaveLength(1)
+    const query = f.recQueries[0]
+    expect(query.toolName).toBe('str_replace_editor')
+    expect(query.args).toEqual({ file_path: '/ws/a.txt' })
+    expect(query.origin.label).toBe('fixer: repair')
+    expect(query.origin.depth).toBe(1)
+    expect(query.rail).toBeUndefined()
+    expect(query.workspaceRelation).toContain("root's own workspace")
+  })
+
+  it('never lets the model suggestion answer the ask: a rejection still denies', async () => {
+    const f = fakeDeps({
+      outcomes: ['rejected'],
+      recommendation: () => Promise.resolve({ text: 'Looks safe.', suggestion: 'allow' }),
+    })
+    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(result.kind).toBe('deny')
+    expect(result.kind === 'deny' && result.reason).toContain('the user rejected')
+  })
+
+  it('falls back to the derived line when the reasoner errors, reporting the failure', async () => {
+    const f = fakeDeps({
+      outcomes: ['rejected'],
+      recommendation: () => Promise.reject(new Error('provider exploded')),
+    })
+    await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(f.asks[0].recommendation).toEqual({ text: 'no filesystem path named', source: 'derived' })
+    expect(f.asks[0].reason).toContain('Parent recommendation: no filesystem path named')
+    expect(f.reports.some(line => line.includes('root reasoner failed') && line.includes('provider exploded'))).toBe(true)
+  })
+
+  it('falls back to the derived line when the reasoner times out (undefined) or answers nothing', async () => {
+    const unanswered = fakeDeps({ outcomes: ['rejected'], recommendation: () => Promise.resolve(undefined) })
+    await unanswered.forwarder.forward({ agent: childAgent(), toolName: 'str_replace_editor', args: { file_path: '/ws/a.txt' }, decision: editorAsk() })
+    expect(unanswered.asks[0].recommendation).toEqual({ text: 'inside the workspace, looks safe', source: 'derived' })
+    expect(unanswered.asks[0].reason).toContain('Parent recommendation: inside the workspace, looks safe')
+    expect(unanswered.reports.some(line => line.includes('produced nothing'))).toBe(true)
+  })
+
+  it('spends no model call on a bare ask (nothing to reason about)', async () => {
+    const f = fakeDeps({ outcomes: ['rejected'], recommendation: () => Promise.resolve({ text: 'never used' }) })
+    await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: {}, decision: bashAsk('rm plain') })
+    expect(f.recQueries).toHaveLength(0)
+    expect(f.asks[0].recommendation).toEqual({ text: 'no filesystem path named', source: 'derived' })
+  })
+
+  it('Full access stays mode-only: no card and no model call (YOLO rule unchanged)', async () => {
+    const f = fakeDeps({
+      mode: 'full-access',
+      recommendation: () => Promise.resolve({ text: 'never used', suggestion: 'reject' }),
+    })
+    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(result.kind).toBe('allow')
+    expect(f.asks).toHaveLength(0)
+    expect(f.recQueries).toHaveLength(0)
+  })
+
+  it('batches identical concurrent asks into one model call and one card', async () => {
+    let calls = 0
+    const f = fakeDeps({
+      outcomes: ['allowed-once', 'allowed-once'],
+      recommendation: () => {
+        calls += 1
+        return new Promise(resolve => setTimeout(() => resolve({ text: 'one answer', suggestion: 'allow-once' }), 5))
+      },
+    })
+    const input = { agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') }
+    const [a, b] = await Promise.all([f.forwarder.forward(input), f.forwarder.forward(input)])
+    expect(a.kind).toBe('allow')
+    expect(b.kind).toBe('allow')
+    expect(f.asks).toHaveLength(1)
+    expect(calls).toBe(1)
+  })
+})
+
+/** One filesystem ask the child's own policy produced (config exposes no write rule). */
+function editorAsk() {
+  const decision = resolvePolicy({ toolName: 'str_replace_editor', config: {} })
+  if (decision.kind !== 'ask') throw new Error(`fixture editor did not ask (${decision.kind})`)
+  return decision
+}
 
 describe('policy integration sanity', () => {
   it('the profile policy ask vocabulary feeds the forwarder (bash rule ask)', () => {

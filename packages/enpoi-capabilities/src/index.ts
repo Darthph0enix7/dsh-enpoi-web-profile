@@ -16,6 +16,7 @@
  */
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import type { CapabilitiesState } from './types'
@@ -34,8 +35,10 @@ import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
 import {
   ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam,
-  type ApprovalOutcome, type ChildAgentLike, type ParentRailQuery, type RootAskQuery, type RootHandle, type RootMode,
+  type ApprovalOutcome, type ChildAgentLike, type ModelRecommendation, type ParentRailQuery,
+  type RecommendationQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from './forwarding'
+import { requestRecommendation, RECOMMENDATION_TIMEOUT_MS } from './recommendation'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -686,7 +689,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       const parentSession = header?.parentSession
       if (parentSession === undefined || parentSession === '') {
         const id = typeof header?.id === 'string' && header.id !== '' ? header.id : (current.id ?? '')
-        return id === '' ? undefined : { id, agent: current }
+        if (id === '') return undefined
+        const cwd = typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
+        return { id, agent: current, ...cwd !== undefined ? { cwd } : {} }
       }
       current = agents.get(String(parentSession))
     }
@@ -748,9 +753,59 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       toolName: query.toolName,
       reason: query.reason,
       displayReason: query.displayReason,
+      // The card renders this as its own highlighted line; it is presentation
+      // only and can never answer the ask (the outcome comes from the human).
+      ...query.recommendation !== undefined ? { recommendation: query.recommendation } : {},
       ...query.broadAllow !== undefined ? { broadAllow: query.broadAllow } : {},
       ...query.signal !== undefined ? { signal: query.signal } : {},
     })
+  }
+
+  /**
+   * ONE bounded root-side recommendation for a forwarded ask: the root
+   * session's default model answers a single JSON question over the same
+   * one-shot seam family as the keeper/oracle calls (`llm.stream` + a tight
+   * deadline). Every miss returns undefined (the forwarder keeps its derived
+   * line): no `llm`, no default-model selection, provider error, timeout, cut,
+   * or unparseable output. The answer is advisory presentation only — it never
+   * resolves the ask, and Full access (no card) never reaches it.
+   */
+  async function forwardedRecommendation(query: RecommendationQuery): Promise<ModelRecommendation | undefined> {
+    const llm = ctx.get('llm') as {
+      stream?: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+    } | undefined
+    if (llm?.stream === undefined) return undefined
+    const selection = (ctx.get('agentDefaultModel') as {
+      currentSelection?: () => { provider?: unknown; model?: unknown }
+    } | undefined)?.currentSelection?.()
+    const provider = selection?.provider
+    const model = selection?.model
+    if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
+      ctx.logger.debug?.('enpoi-capabilities: no default model selection; forwarded ask keeps the derived recommendation')
+      return undefined
+    }
+    return await requestRecommendation(
+      {
+        toolName: query.toolName,
+        ...query.args !== undefined ? { args: query.args } : {},
+        origin: query.origin,
+        workspaceRelation: query.workspaceRelation,
+        ...query.rail !== undefined ? { rail: query.rail } : {},
+        decision: query.decision,
+      },
+      {
+        stream: options => llm.stream!(options),
+        provider,
+        model,
+        timeoutMs: RECOMMENDATION_TIMEOUT_MS,
+        // One observable line per miss (this harness's logger drops debug);
+        // the derived line is kept either way, so the card never suffers.
+        onMiss: reason => process.stderr.write(
+          `[enpoi-capabilities] recommendation miss (${provider}/${model}): ${reason}\n`,
+        ),
+        ...query.signal !== undefined ? { signal: query.signal } : {},
+      },
+    )
   }
 
   const approvalForwarding = new ChildApprovalForwarder({
@@ -758,6 +813,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     modeOf: rootModeOf,
     parentAllowsRail,
     askRoot: requestRootApproval,
+    recommendation: forwardedRecommendation,
     report: (line: string) => process.stderr.write(`[enpoi-capabilities] ${line}\n`),
     depthCap: () => {
       const subagents = ctx.get('subagents') as { resolveMaxDepth?: (configured?: unknown) => number | undefined } | undefined

@@ -53,6 +53,47 @@ var __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use
 var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
+var __using = (stack, value, async) => {
+  if (value != null) {
+    if (typeof value !== "object" && typeof value !== "function") __typeError("Object expected");
+    var dispose, inner;
+    if (async) dispose = value[__knownSymbol("asyncDispose")];
+    if (dispose === void 0) {
+      dispose = value[__knownSymbol("dispose")];
+      if (async) inner = dispose;
+    }
+    if (typeof dispose !== "function") __typeError("Object not disposable");
+    if (inner) dispose = function() {
+      try {
+        inner.call(this);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
+    stack.push([async, dispose, value]);
+  } else if (async) {
+    stack.push([async]);
+  }
+  return value;
+};
+var __callDispose = (stack, error, hasError) => {
+  var E = typeof SuppressedError === "function" ? SuppressedError : function(e, s, m, _) {
+    return _ = Error(m), _.name = "SuppressedError", _.error = e, _.suppressed = s, _;
+  };
+  var fail = (e) => error = hasError ? new E(e, error, "An error was suppressed during disposal") : (hasError = true, e);
+  var next = (it) => {
+    while (it = stack.pop()) {
+      try {
+        var result = it[1] && it[1].call(it[2]);
+        if (it[0]) return Promise.resolve(result).then(next, (e) => (fail(e), next()));
+      } catch (e) {
+        fail(e);
+      }
+    }
+    if (hasError) throw error;
+  };
+  return next();
+};
 
 // src/policy.ts
 function splitCompoundCommand(command) {
@@ -1349,13 +1390,38 @@ function recommendationOf(input) {
   if (paths.length === 0) return "no filesystem path named";
   return "inside the workspace, looks safe";
 }
-function forwardedAskReason(origin, decision, recommendation) {
-  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. Parent recommendation: ${recommendation}.`;
+function hasReasoningMaterial(args) {
+  if (args === void 0) return false;
+  for (const value of Object.values(args)) {
+    if (value === void 0 || value === null) continue;
+    if (typeof value === "string") {
+      if (value.trim() !== "") return true;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 0) return true;
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
-function forwardedAskDisplayReason(origin, decision, recommendation) {
+function workspaceRelationOf(childCwd, parentCwd) {
+  if (childCwd === void 0 && parentCwd === void 0) return "both workspace roots are unknown";
+  if (childCwd === void 0) return `the child workspace is unknown; the root runs in ${parentCwd}`;
+  if (parentCwd === void 0) return `the child runs in ${childCwd}; the root workspace is unknown`;
+  if (childCwd === parentCwd) return `the child runs in the root's own workspace (${childCwd})`;
+  return isOutsideWorkspace(childCwd, parentCwd) ? `the child workspace ${childCwd} is OUTSIDE the root workspace ${parentCwd}` : `the child workspace ${childCwd} is inside the root workspace ${parentCwd}`;
+}
+function forwardedAskReason(origin, decision, recommendation) {
+  const label = recommendation.source === "model" ? `Root model recommendation (advisory${recommendation.suggestion !== void 0 ? `: ${recommendation.suggestion}` : ""})` : "Parent recommendation";
+  const text = recommendation.text.replace(/[.\s]+$/, "");
+  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. ${label}: ${text}.`;
+}
+function forwardedAskDisplayReason(origin, decision) {
   return {
-    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}. ${recommendation}.`,
-    zh: `\u6765\u81EA ${origin.label} \u7684\u8F6C\u53D1\u8BF7\u6C42\uFF08\u6DF1\u5EA6 ${origin.depth}\uFF09\uFF1A${decision.reason}\u3002${recommendation}\u3002`
+    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}.`,
+    zh: `\u6765\u81EA ${origin.label} \u7684\u8F6C\u53D1\u8BF7\u6C42\uFF08\u6DF1\u5EA6 ${origin.depth}\uFF09\uFF1A${decision.reason}\u3002`
   };
 }
 var ChildApprovalForwarder = class {
@@ -1461,11 +1527,10 @@ var ChildApprovalForwarder = class {
         mode === void 0 ? "parent session mode is unknown" : "parent runs unattended with approval prompts disabled"
       );
     }
-    const recommendation = recommendationOf({ toolName: input.toolName, args: input.args, cwd: child.cwd });
     const batchKey = `${child.childSessionId}\0${input.toolName}\0${command ?? stableJson(input.args)}`;
     const inFlight = this.pending.get(batchKey);
     if (inFlight !== void 0) return await inFlight;
-    const run = this.askThroughCard(input, root, origin, proposal, recommendation);
+    const run = this.askThroughCard(input, root, origin, proposal, rail);
     this.pending.set(batchKey, run);
     try {
       return await run;
@@ -1473,8 +1538,49 @@ var ChildApprovalForwarder = class {
       this.pending.delete(batchKey);
     }
   }
+  /**
+   * The card's recommendation line: ONE bounded root-side model call when the
+   * host provides the seam and the ask carries something to reason about;
+   * every miss (absent seam, error, timeout, empty answer) keeps the derived
+   * heuristic. The returned suggestion is advisory presentation only — nothing
+   * here reads it into a resolution, so a model's words can never approve a
+   * child's ask.
+   */
+  async cardRecommendation(input, root, origin, rail) {
+    const derived = {
+      text: recommendationOf({ toolName: input.toolName, args: input.args, cwd: origin.cwd }),
+      source: "derived"
+    };
+    if (this.deps.recommendation === void 0 || !hasReasoningMaterial(input.args)) return derived;
+    try {
+      const answer = await this.deps.recommendation({
+        toolName: input.toolName,
+        ...input.args !== void 0 ? { args: input.args } : {},
+        origin,
+        workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
+        ...rail !== void 0 ? { rail } : {},
+        decision: input.decision,
+        ...input.signal !== void 0 ? { signal: input.signal } : {}
+      });
+      if (answer === void 0 || answer.text.trim() === "") {
+        this.deps.report(`recommendation: root reasoner produced nothing for ${input.toolName}; keeping the derived line`);
+        return derived;
+      }
+      return {
+        text: answer.text.trim(),
+        source: "model",
+        ...answer.suggestion !== void 0 ? { suggestion: answer.suggestion } : {}
+      };
+    } catch (error) {
+      this.deps.report(
+        `recommendation: root reasoner failed for ${input.toolName} (${error instanceof Error ? error.message : String(error)}); keeping the derived line`
+      );
+      return derived;
+    }
+  }
   /** Forward the ask as one root-session card and map its outcome. */
-  async askThroughCard(input, root, origin, proposal, recommendation) {
+  async askThroughCard(input, root, origin, proposal, rail) {
+    const recommendation = await this.cardRecommendation(input, root, origin, rail);
     const reason = forwardedAskReason(origin, input.decision, recommendation);
     let outcome;
     try {
@@ -1482,9 +1588,10 @@ var ChildApprovalForwarder = class {
         root,
         toolName: input.toolName,
         reason,
-        displayReason: forwardedAskDisplayReason(origin, input.decision, recommendation),
+        displayReason: forwardedAskDisplayReason(origin, input.decision),
         ...input.decision.broadAllow !== void 0 ? { broadAllow: input.decision.broadAllow } : {},
         ...input.signal !== void 0 ? { signal: input.signal } : {},
+        recommendation,
         origin
       });
     } catch (error) {
@@ -1593,6 +1700,114 @@ function stableJson(value) {
     return JSON.stringify(value) ?? "";
   } catch {
     return "<unserializable>";
+  }
+}
+
+// src/recommendation.ts
+import {
+  BlockAssembler,
+  createUserMessage
+} from "@deepseek-ai/dsh-llm";
+import { deadline } from "@deepseek-ai/dsh-timeout";
+var RECOMMENDATION_TIMEOUT_MS = 6e3;
+var RECOMMENDATION_MAX_TOKENS = 96;
+var RECOMMENDATION_MAX_CHARS = 240;
+var ARGUMENTS_MAX_CHARS = 600;
+var SUGGESTIONS = ["allow", "reject", "allow-once"];
+var SYSTEM_PROMPT = [
+  "You advise the root session on one approval request forwarded from a delegated subagent.",
+  "Answer with ONE JSON object and nothing else:",
+  '{"text": "<one short sentence, at most 160 characters>", "suggestion": "allow" | "reject" | "allow-once"}',
+  'Judge only from the facts given. "allow-once" = the action looks safe to run once; "allow" = safe and repeatable; "reject" = risky.',
+  "Your answer is advisory: the human answers the card. Never output code, commands, or tool calls."
+].join("\n");
+function shortId2(id) {
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+function boundedArguments(args) {
+  if (args === void 0) return "(none)";
+  let serialized;
+  try {
+    serialized = JSON.stringify(args) ?? "(unserializable)";
+  } catch {
+    serialized = "(unserializable)";
+  }
+  return serialized.length > ARGUMENTS_MAX_CHARS ? `${serialized.slice(0, ARGUMENTS_MAX_CHARS - 1)}\u2026` : serialized;
+}
+function buildRecommendationPrompt(ask) {
+  const rail = ask.rail === void 0 ? "no never-approvable class matched" : `matched ${ask.rail.rail} (${ask.rail.evidence})`;
+  const user = [
+    "Forwarded child ask",
+    `tool: ${ask.toolName}`,
+    `arguments: ${boundedArguments(ask.args)}`,
+    `child: ${ask.origin.label} (depth ${ask.origin.depth}, session ${shortId2(ask.origin.childSessionId)})`,
+    `why it asked: ${ask.decision.reason}`,
+    `matched rule: ${ask.decision.source}`,
+    `rails verdict: ${rail}`,
+    `workspace: ${ask.workspaceRelation}`
+  ].join("\n");
+  return { system: SYSTEM_PROMPT, user };
+}
+function parseRecommendationAnswer(raw) {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end <= start) return void 0;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return void 0;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return void 0;
+  const record = parsed;
+  if (typeof record.text !== "string") return void 0;
+  const text = record.text.replace(/\s+/g, " ").trim();
+  if (text === "") return void 0;
+  const clipped = text.length > RECOMMENDATION_MAX_CHARS ? `${text.slice(0, RECOMMENDATION_MAX_CHARS - 1)}\u2026` : text;
+  const candidate = typeof record.suggestion === "string" ? record.suggestion.trim().toLowerCase() : void 0;
+  const suggestion = candidate !== void 0 && SUGGESTIONS.includes(candidate) ? candidate : void 0;
+  return { text: clipped, ...suggestion !== void 0 ? { suggestion } : {} };
+}
+async function requestRecommendation(ask, call) {
+  var _stack = [];
+  try {
+    const prompt = buildRecommendationPrompt(ask);
+    const callDeadline = __using(_stack, deadline(call.signal, call.timeoutMs ?? RECOMMENDATION_TIMEOUT_MS, "ENPOI_FORWARDED_RECOMMENDATION"));
+    const assembler = new BlockAssembler();
+    try {
+      for await (const chunk of call.stream({
+        provider: call.provider,
+        model: call.model,
+        messages: [createUserMessage({
+          content: [{ type: "text", text: prompt.user }],
+          source: { kind: "enpoi-recommendation" }
+        })],
+        system: prompt.system,
+        maxTokens: RECOMMENDATION_MAX_TOKENS,
+        temperature: 0,
+        signal: callDeadline.signal
+      })) {
+        callDeadline.signal.throwIfAborted();
+        assembler.push(chunk);
+      }
+      callDeadline.signal.throwIfAborted();
+    } catch (error) {
+      call.onMiss?.(error instanceof Error ? error.message : String(error));
+      return void 0;
+    }
+    if (assembler.finish.kind !== "stop") {
+      call.onMiss?.(`finish ${assembler.finish.kind}`);
+      return void 0;
+    }
+    const blocks = assembler.blocks();
+    const text = blocks.filter((block) => block.type === "text").map((block) => block.text).join(" ").trim();
+    const parsed = parseRecommendationAnswer(text);
+    if (parsed === void 0) call.onMiss?.(`unparseable answer: ${text.slice(0, 120)}`);
+    return parsed;
+  } catch (_) {
+    var _error = _, _hasError = true;
+  } finally {
+    __callDispose(_stack, _error, _hasError);
   }
 }
 
@@ -1988,7 +2203,9 @@ function apply(ctx, config = {}) {
       const parentSession = header?.parentSession;
       if (parentSession === void 0 || parentSession === "") {
         const id = typeof header?.id === "string" && header.id !== "" ? header.id : current.id ?? "";
-        return id === "" ? void 0 : { id, agent: current };
+        if (id === "") return void 0;
+        const cwd = typeof header?.cwd === "string" && header.cwd !== "" ? header.cwd : void 0;
+        return { id, agent: current, ...cwd !== void 0 ? { cwd } : {} };
       }
       current = agents.get(String(parentSession));
     }
@@ -2026,15 +2243,53 @@ function apply(ctx, config = {}) {
       toolName: query.toolName,
       reason: query.reason,
       displayReason: query.displayReason,
+      // The card renders this as its own highlighted line; it is presentation
+      // only and can never answer the ask (the outcome comes from the human).
+      ...query.recommendation !== void 0 ? { recommendation: query.recommendation } : {},
       ...query.broadAllow !== void 0 ? { broadAllow: query.broadAllow } : {},
       ...query.signal !== void 0 ? { signal: query.signal } : {}
     });
+  }
+  async function forwardedRecommendation(query) {
+    const llm = ctx.get("llm");
+    if (llm?.stream === void 0) return void 0;
+    const selection = ctx.get("agentDefaultModel")?.currentSelection?.();
+    const provider = selection?.provider;
+    const model = selection?.model;
+    if (typeof provider !== "string" || provider === "" || typeof model !== "string" || model === "") {
+      ctx.logger.debug?.("enpoi-capabilities: no default model selection; forwarded ask keeps the derived recommendation");
+      return void 0;
+    }
+    return await requestRecommendation(
+      {
+        toolName: query.toolName,
+        ...query.args !== void 0 ? { args: query.args } : {},
+        origin: query.origin,
+        workspaceRelation: query.workspaceRelation,
+        ...query.rail !== void 0 ? { rail: query.rail } : {},
+        decision: query.decision
+      },
+      {
+        stream: (options) => llm.stream(options),
+        provider,
+        model,
+        timeoutMs: RECOMMENDATION_TIMEOUT_MS,
+        // One observable line per miss (this harness's logger drops debug);
+        // the derived line is kept either way, so the card never suffers.
+        onMiss: (reason) => process.stderr.write(
+          `[enpoi-capabilities] recommendation miss (${provider}/${model}): ${reason}
+`
+        ),
+        ...query.signal !== void 0 ? { signal: query.signal } : {}
+      }
+    );
   }
   const approvalForwarding = new ChildApprovalForwarder({
     findRoot: liveRootOf,
     modeOf: rootModeOf,
     parentAllowsRail,
     askRoot: requestRootApproval,
+    recommendation: forwardedRecommendation,
     report: (line) => process.stderr.write(`[enpoi-capabilities] ${line}
 `),
     depthCap: () => {

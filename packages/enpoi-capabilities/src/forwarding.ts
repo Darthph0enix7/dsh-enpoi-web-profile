@@ -28,10 +28,15 @@
  *      closed (unattended approval `never` without full access).
  *   4. Interactive: the ask is forwarded into the ROOT session as the existing
  *      approval card (`ctx.approval.request` on the root agent), carrying
- *      provenance (origin session, agent label, depth, matched rule) plus a short
- *      derived recommendation in the reason. The reply routes back by request id
- *      and the waiting child suspends on it; no agent may answer (this module has
- *      no model channel by construction).
+ *      provenance (origin session, agent label, depth, matched rule) plus a
+ *      recommendation line the card renders on its own. The line comes from ONE
+ *      bounded root-side model call (the {@link ForwardingDeps.recommendation}
+ *      seam; see recommendation.ts) and falls back to the derived
+ *      {@link recommendationOf} heuristic on error, timeout, or nothing to
+ *      reason about. The reply routes back by request id and the waiting child
+ *      suspends on it; only the human card may answer. The model's suggestion is
+ *      advisory presentation — this module never reads it into a resolution, so
+ *      no agent's words can approve a child's ask.
  *
  * Failure semantics: a rejection is a corrective tool error the child adapts to,
  * never its death. An unanswered/undeliverable ask fails closed with a quiet
@@ -133,6 +138,42 @@ export interface RootHandle {
   readonly id: string
   /** The exact live Agent the host passes to `ApprovalService.request`. */
   readonly agent: unknown
+  /** The root session's workspace root, for the recommendation's relation line. */
+  readonly cwd?: string
+}
+
+/** The closed advisory vocabulary a root-side recommendation may carry. */
+export type RecommendationSuggestion = 'allow' | 'reject' | 'allow-once'
+
+/** One recommendation answer: a short sentence plus an advisory suggestion. */
+export interface ModelRecommendation {
+  /** The one short sentence the card shows. */
+  readonly text: string
+  /** The model's advisory suggestion; never applied by this module. */
+  readonly suggestion?: RecommendationSuggestion
+}
+
+/** One card recommendation line: the answer plus where it came from. */
+export interface CardRecommendation extends ModelRecommendation {
+  /** `model` when the root-side reasoner produced the line; `derived` on the heuristic. */
+  readonly source: 'model' | 'derived'
+}
+
+/** What one root-side recommendation call is given (ask + provenance + rails + workspace). */
+export interface RecommendationQuery {
+  readonly toolName: string
+  readonly args?: Record<string, unknown> | undefined
+  readonly origin: ForwardingOrigin
+  /** The child's workspace relation to the root's, precomputed for the prompt. */
+  readonly workspaceRelation: string
+  /**
+   * The rails verdict for this ask. The card path is only reached after the
+   * rails ran and matched nothing, so this stays absent on every forwarded card
+   * today; it travels so the reasoner sees the verdict rather than inferring it.
+   */
+  readonly rail?: RailHit | undefined
+  readonly decision: AskDecision
+  readonly signal?: AbortSignal | undefined
 }
 
 /** One card dispatch on the root agent. */
@@ -144,6 +185,12 @@ export interface RootAskQuery {
   readonly broadAllow?: { readonly label: string }
   /** True for the second card that confirms a broad standing grant. */
   readonly secondConfirmation?: boolean
+  /**
+   * The distinct recommendation line the card renders (model or derived) plus
+   * its advisory hint. Presentation only: the card's answer, never this field,
+   * resolves the ask.
+   */
+  readonly recommendation?: CardRecommendation
   readonly signal?: AbortSignal
   readonly origin: ForwardingOrigin
 }
@@ -166,6 +213,15 @@ export interface ForwardingDeps {
   parentAllowsRail(query: ParentRailQuery): boolean
   /** Dispatch one approval card on the root agent and await its outcome. */
   askRoot(query: RootAskQuery): Promise<ApprovalOutcome>
+  /**
+   * ONE bounded root-side model recommendation for a forwarded ask (the
+   * keeper/oracle one-shot seam family; the host owns the model, route,
+   * timeout, and parsing). Advisory only: the answer is rendered on the card
+   * and can never resolve the ask. Absent, throwing, slow, or empty calls keep
+   * the derived {@link recommendationOf} line, so the card never blocks and is
+   * never empty.
+   */
+  recommendation?(query: RecommendationQuery): Promise<ModelRecommendation | undefined>
   /** Quiet audit/notification line; never wakes the root. */
   report(line: string): void
   /** The deployment's delegation depth cap (`ctx.subagents.resolveMaxDepth`). */
@@ -371,10 +427,12 @@ export function railHitOf(input: {
 }
 
 /**
- * The short recommendation line the card carries, derived by the forwarder from
- * the parent's policy facts — never from an agent model (no agent's words can
- * influence a child's approval). Boundary escapes never reach here (the rail
- * handles them), so a named path is inside the workspace.
+ * The short DERIVED recommendation line, computed from the parent's policy
+ * facts. This is the fallback when the root-side model reasoner is absent,
+ * errors, times out, or has nothing to reason about; it is presentation text
+ * and never influences the resolution (only the card's answer does). Boundary
+ * escapes never reach here (the rail handles them), so a named path is inside
+ * the workspace.
  * @param input - tool name, call arguments, and the child's workspace root.
  * @returns a short recommendation sentence.
  */
@@ -388,22 +446,77 @@ export function recommendationOf(input: {
   return 'inside the workspace, looks safe'
 }
 
-/** The audited reason one forwarded ask carries (full provenance). */
-export function forwardedAskReason(origin: ForwardingOrigin, decision: AskDecision, recommendation: string): string {
-  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, `
-    + `agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. `
-    + `Parent recommendation: ${recommendation}.`
+/**
+ * Whether one ask carries anything worth a bounded model look. A bare call
+ * (no arguments, or only empty ones) has nothing to reason about, so the
+ * derived line is kept and no model call is spent.
+ * @param args - the tool call arguments, as the registry received them.
+ * @returns `true` when at least one argument carries a value.
+ */
+export function hasReasoningMaterial(args: Record<string, unknown> | undefined): boolean {
+  if (args === undefined) return false
+  for (const value of Object.values(args)) {
+    if (value === undefined || value === null) continue
+    if (typeof value === 'string') {
+      if (value.trim() !== '') return true
+      continue
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 0) return true
+      continue
+    }
+    return true
+  }
+  return false
 }
 
-/** The card's localized headline, keeping provenance short. */
+/**
+ * One-line relation of the child's workspace to the root's, for the
+ * recommendation prompt. Both roots come from session headers and may be absent
+ * (structural slices), so unknown sides are named as unknown rather than
+ * guessed.
+ * @param childCwd - the child session's workspace root, when known.
+ * @param parentCwd - the root session's workspace root, when known.
+ * @returns a short human-readable relation line.
+ */
+export function workspaceRelationOf(childCwd: string | undefined, parentCwd: string | undefined): string {
+  if (childCwd === undefined && parentCwd === undefined) return 'both workspace roots are unknown'
+  if (childCwd === undefined) return `the child workspace is unknown; the root runs in ${parentCwd}`
+  if (parentCwd === undefined) return `the child runs in ${childCwd}; the root workspace is unknown`
+  if (childCwd === parentCwd) return `the child runs in the root's own workspace (${childCwd})`
+  return isOutsideWorkspace(childCwd, parentCwd)
+    ? `the child workspace ${childCwd} is OUTSIDE the root workspace ${parentCwd}`
+    : `the child workspace ${childCwd} is inside the root workspace ${parentCwd}`
+}
+
+/** The audited reason one forwarded ask carries (full provenance). */
+export function forwardedAskReason(
+  origin: ForwardingOrigin,
+  decision: AskDecision,
+  recommendation: CardRecommendation,
+): string {
+  const label = recommendation.source === 'model'
+    ? `Root model recommendation (advisory${recommendation.suggestion !== undefined ? `: ${recommendation.suggestion}` : ''})`
+    : 'Parent recommendation'
+  // The answer is a sentence of its own; join it with exactly one period.
+  const text = recommendation.text.replace(/[.\s]+$/, '')
+  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, `
+    + `agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. `
+    + `${label}: ${text}.`
+}
+
+/**
+ * The card's localized headline, keeping provenance short. The recommendation
+ * is NOT inlined here any more: the card renders it as its own highlighted
+ * element from {@link RootAskQuery.recommendation}.
+ */
 export function forwardedAskDisplayReason(
   origin: ForwardingOrigin,
   decision: AskDecision,
-  recommendation: string,
 ): { readonly en: string; readonly zh: string } {
   return {
-    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}. ${recommendation}.`,
-    zh: `来自 ${origin.label} 的转发请求（深度 ${origin.depth}）：${decision.reason}。${recommendation}。`,
+    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}.`,
+    zh: `来自 ${origin.label} 的转发请求（深度 ${origin.depth}）：${decision.reason}。`,
   }
 }
 
@@ -535,16 +648,62 @@ export class ChildApprovalForwarder {
       )
     }
 
-    const recommendation = recommendationOf({ toolName: input.toolName, args: input.args, cwd: child.cwd })
     const batchKey = `${child.childSessionId}\u0000${input.toolName}\u0000${command ?? stableJson(input.args)}`
     const inFlight = this.pending.get(batchKey)
     if (inFlight !== undefined) return await inFlight
-    const run = this.askThroughCard(input, root, origin, proposal, recommendation)
+    const run = this.askThroughCard(input, root, origin, proposal, rail)
     this.pending.set(batchKey, run)
     try {
       return await run
     } finally {
       this.pending.delete(batchKey)
+    }
+  }
+
+  /**
+   * The card's recommendation line: ONE bounded root-side model call when the
+   * host provides the seam and the ask carries something to reason about;
+   * every miss (absent seam, error, timeout, empty answer) keeps the derived
+   * heuristic. The returned suggestion is advisory presentation only — nothing
+   * here reads it into a resolution, so a model's words can never approve a
+   * child's ask.
+   */
+  private async cardRecommendation(
+    input: ChildAskInput,
+    root: RootHandle,
+    origin: ForwardingOrigin,
+    rail: RailHit | undefined,
+  ): Promise<CardRecommendation> {
+    const derived: CardRecommendation = {
+      text: recommendationOf({ toolName: input.toolName, args: input.args, cwd: origin.cwd }),
+      source: 'derived',
+    }
+    if (this.deps.recommendation === undefined || !hasReasoningMaterial(input.args)) return derived
+    try {
+      const answer = await this.deps.recommendation({
+        toolName: input.toolName,
+        ...input.args !== undefined ? { args: input.args } : {},
+        origin,
+        workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
+        ...rail !== undefined ? { rail } : {},
+        decision: input.decision,
+        ...input.signal !== undefined ? { signal: input.signal } : {},
+      })
+      if (answer === undefined || answer.text.trim() === '') {
+        this.deps.report(`recommendation: root reasoner produced nothing for ${input.toolName}; keeping the derived line`)
+        return derived
+      }
+      return {
+        text: answer.text.trim(),
+        source: 'model',
+        ...answer.suggestion !== undefined ? { suggestion: answer.suggestion } : {},
+      }
+    } catch (error) {
+      this.deps.report(
+        `recommendation: root reasoner failed for ${input.toolName} `
+        + `(${error instanceof Error ? error.message : String(error)}); keeping the derived line`,
+      )
+      return derived
     }
   }
 
@@ -554,8 +713,9 @@ export class ChildApprovalForwarder {
     root: RootHandle,
     origin: ForwardingOrigin,
     proposal: GrantProposal,
-    recommendation: string,
+    rail: RailHit | undefined,
   ): Promise<ChildAskResolution> {
+    const recommendation = await this.cardRecommendation(input, root, origin, rail)
     const reason = forwardedAskReason(origin, input.decision, recommendation)
     let outcome: ApprovalOutcome
     try {
@@ -563,9 +723,10 @@ export class ChildApprovalForwarder {
         root,
         toolName: input.toolName,
         reason,
-        displayReason: forwardedAskDisplayReason(origin, input.decision, recommendation),
+        displayReason: forwardedAskDisplayReason(origin, input.decision),
         ...input.decision.broadAllow !== undefined ? { broadAllow: input.decision.broadAllow } : {},
         ...input.signal !== undefined ? { signal: input.signal } : {},
+        recommendation,
         origin,
       })
     } catch (error) {

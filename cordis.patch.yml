@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790583383443
+        checkedAt: 1790585478480
     personas:
       oracle: null
       fixer: null
@@ -5569,8 +5569,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.2266
-              output: 4.2
+              input: 0.128
+              output: 1.9584
             reasoningEfforts:
               low: low
               high: high
@@ -5585,7 +5585,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0295
+              input: 0.0245
               output: 0.6
             reasoningEfforts:
               low: low
@@ -5746,7 +5746,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0295
+              input: 0.0245
               output: 0.6
             reasoningEfforts:
               low: low
@@ -6419,7 +6419,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.2266
+              input: 0.2523
               output: 4.2
             reasoningEfforts:
               low: low
@@ -8409,8 +8409,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0675
-              output: 0.225
+              input: 0.09
+              output: 0.3
             reasoningEfforts:
               minimal: minimal
               low: low
@@ -18082,8 +18082,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.2266
-              output: 4.2
+              input: 0.128
+              output: 1.9584
             reasoningEfforts:
               low: low
               high: high
@@ -18100,7 +18100,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.0295
+              input: 0.0245
               output: 0.6
             reasoningEfforts:
               low: low
@@ -18625,8 +18625,8 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.325
-              output: 4.4
+              input: 0.1785
+              output: 2.805
             reasoningEfforts:
               low: low
               high: high
