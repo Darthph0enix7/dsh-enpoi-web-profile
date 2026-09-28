@@ -231,6 +231,7 @@ function resolveHeavyInstall(local, platform) {
     steps: variant.steps
   };
 }
+var LLM_PI_AI_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
 var HEAVY_MANIFESTS = [
   {
     id: "freellmapi",
@@ -436,47 +437,76 @@ var HEAVY_MANIFESTS = [
   {
     id: "commandcode",
     label: "Command Code (keypool)",
-    summary: "Command Code's CLI-shaped API behind the shared multi-key keypool proxy.",
+    summary: "Command Code's CLI-shaped API behind the shared multi-key keypool proxy, served by the DSH provider package.",
     protocol: "commandcode/alpha-generate",
-    auth: { kind: "none", apiKeyEnv: "COMMANDCODE_API_KEY", keyless: false },
+    // The keypool owns the real keys and replaces the Authorization header per
+    // request, so the DSH route is keyless; COMMANDCODE_API_KEY remains the
+    // reference a direct (non-keypool) route would name.
+    auth: { kind: "none", apiKeyEnv: "COMMANDCODE_API_KEY", keyless: true },
     dashboardUrl: "http://127.0.0.1:8899/status",
     docsUrl: "https://commandcode.ai",
     defaultPort: 8899,
+    // Served by `dsh-enpoi-commandcode-provider` (ctx.llm.registerAdapter), not
+    // llm-pi-ai: the CLI-shaped protocol has no llm-pi-ai entry, so the route
+    // profile must never be written into the llm-pi-ai schema.
+    settingsNs: "commandcode-provider",
     requiresBrowser: [
       "Vendor account and quota dashboard live at commandcode.ai (browser)"
     ],
     quirks: [
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 traffic must go through the keypool with CLI headers',
-      'llm-pi-ai cannot speak this API: v1 ships the manifest as "requires the custom provider package (planned)"',
+      "DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it",
       "The keypool may be shared with other tools \u2014 never stop or remove the shared keypool service when removing this provider",
-      "The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI"
+      "The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI",
+      "The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer \u2014 clients must not duplicate it"
     ],
     reuse: {
       label: "Use a detected instance",
       baseURL: "http://127.0.0.1:8899/commandcode",
-      note: "Uses the keypool instance already running on this device; a DSH route needs the planned custom provider package first.",
+      note: "Uses the keypool already running on this device; the provider package speaks the CLI protocol and fetches the 83-model catalog from /commandcode/catalog.json.",
       health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
     },
     local: {
-      label: "Not supported in v1",
-      baseURL: "",
-      deps: [],
-      diskHint: "",
-      install: { default: { steps: [] } },
+      label: "Install locally (provider package + keypool)",
+      baseURL: "http://127.0.0.1:8899/commandcode",
+      deps: ["Node.js 22", "systemd user units"],
+      diskHint: "~5 MB provider package, ~150 MB RAM for the keypool, no GPU",
+      dashboardUrl: "http://127.0.0.1:8899/status",
+      runtime: "node",
+      install: {
+        default: {
+          steps: [
+            { label: "Build and link the DSH provider package", command: "node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs {home}/.dsh/profiles/web", weight: 3 },
+            { label: "Seed the commandcode pool in pools.json", command: "node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs" },
+            { label: "Deploy the keypool proxy from dotfiles", command: 'test -f {home}/dotfiles/opencode-dotfiles/keypool/proxy.js || { echo "keypool proxy.js not found \u2014 sync dotfiles (opencode-dotfiles/keypool) first"; exit 1; }; install -Dm644 {home}/dotfiles/opencode-dotfiles/keypool/proxy.js {config}/opencode/keypool/proxy.js' },
+            {
+              label: "Write the keypool systemd user unit",
+              command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<'EOF'\n[Unit]\nDescription=OpenCode KeyPool \u2014 multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc 'exec node %h/.config/opencode/keypool/proxy.js'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF"
+            },
+            { label: "Enable and start the keypool", command: "systemctl --user daemon-reload && systemctl --user enable --now keypool.service", optional: true },
+            {
+              label: "Wait for the keypool",
+              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s"; exit 1'
+            }
+          ]
+        }
+      },
       health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
     },
     removal: {
-      steps: [],
+      steps: [
+        // Drops only the commandcode pool entry; the keypool rereads pools.json
+        // per request, so the shared service (and the `go` pool) is never
+        // stopped, restarted, or otherwise touched.
+        { label: "Drop only pools.commandcode (keypool and other pools stay)", command: "node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs", optional: true }
+      ],
       warnings: [
         "Removal drops only DSH state and the commandcode pool keys \u2014 it never stops or removes the shared keypool service (other tools may need it)",
-        "usage.jsonl is keypool-wide and is not touched"
+        "usage.jsonl is keypool-wide and is not touched",
+        "The provider package and its profile entry stay installed; delete the entry only when no route declares it"
       ]
     },
-    unsupported: {
-      reason: "llm-pi-ai cannot speak the CLI-shaped /alpha/generate protocol \u2014 a custom provider package is required.",
-      plannedWith: "dsh-provider-commandcode (planned)",
-      reuseUrl: "http://127.0.0.1:8899/commandcode"
-    }
+    fallbackModel: "deepseek/deepseek-v4.1-flash"
   }
 ];
 function manifestById(id) {
@@ -509,6 +539,12 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
       if (variant.steps.length === 0 && manifest.unsupported === void 0) {
         problems.push(`${where}: platform install variant ${String(index)} has no steps`);
       }
+    }
+    if (manifest.settingsNs !== void 0 && !/^[a-z0-9][a-z0-9-]*$/.test(manifest.settingsNs)) {
+      problems.push(`${where}: settingsNs must be a lowercase plugin entry id`);
+    }
+    if (manifest.unsupported === void 0 && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === void 0) {
+      problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`);
     }
     if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`);
     if (manifest.auth.kind === "none" && manifest.protocol === "anthropic-messages") {
@@ -724,8 +760,11 @@ function readNamespace(settings, ns) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
   return value;
 }
-function configuredProfile(deps, id) {
-  const section = readNamespace(deps.settings, LLM_NS);
+function routeSettingsNs(manifest) {
+  return manifest.settingsNs ?? LLM_NS;
+}
+function configuredProfile(deps, id, settingsNs = LLM_NS) {
+  const section = readNamespace(deps.settings, settingsNs);
   const providers = section?.providers;
   if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return void 0;
   const profile = providers[id];
@@ -736,7 +775,8 @@ async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   const settings = deps.settings;
   if (settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
   const profile = routeProfile(manifest, mode, models, overrides);
-  await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, LLM_NS));
+  const settingsNs = routeSettingsNs(manifest);
+  await settings.mutate(settingsNs, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, settingsNs));
   return profile;
 }
 async function storeCredential(deps, manifest, key) {
@@ -748,7 +788,7 @@ async function storeCredential(deps, manifest, key) {
   return true;
 }
 async function useDetectedInstance(deps, manifest, key) {
-  const profile = configuredProfile(deps, manifest.id);
+  const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest));
   const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
   const detection = await detectInstance(deps, manifest, configuredBase);
   const endpoint = detection.ok ? detection.baseURL : manifest.reuse.baseURL;
@@ -861,9 +901,10 @@ ${outcome.output}
     teardown = { ran: true, ok, ...failedStep === void 0 ? {} : { failedStep }, output };
   }
   let routeRemoved = false;
-  if (deps.settings !== void 0 && configuredProfile(deps, manifest.id) !== void 0) {
+  const settingsNs = routeSettingsNs(manifest);
+  if (deps.settings !== void 0 && configuredProfile(deps, manifest.id, settingsNs) !== void 0) {
     try {
-      await deps.settings.mutate(LLM_NS, [{ op: "unset", path: ["providers", manifest.id] }], revisionOf(deps.settings, LLM_NS));
+      await deps.settings.mutate(settingsNs, [{ op: "unset", path: ["providers", manifest.id] }], revisionOf(deps.settings, settingsNs));
       routeRemoved = true;
     } catch (error) {
       errors.push(`route: ${error instanceof Error ? error.message : String(error)}`);
@@ -947,7 +988,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
   async status(request) {
     const manifest = this.effectiveManifest(requireManifest(request?.id));
     const deps = this.options.deps();
-    const profile = configuredProfile(deps, manifest.id);
+    const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest));
     const configured = profile !== void 0;
     const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
     const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";

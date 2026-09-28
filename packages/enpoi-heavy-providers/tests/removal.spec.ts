@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { manifestById } from '../src/manifests.js'
-import { removeProvider, type HeavyDeps, type SettingsSeam, type StepOutcome } from '../src/planner.js'
+import { removeProvider, routeSettingsNs, type HeavyDeps, type SettingsSeam, type StepOutcome } from '../src/planner.js'
 
 const scratch: string[] = []
 afterEach(() => {
@@ -35,8 +35,9 @@ function world(id: string): {
 
   const mutations: Array<{ ns: string; ops: readonly Record<string, unknown>[] }> = []
   const credentialUnsets: string[] = []
+  const routeNs = routeSettingsNs(manifestById(id)!)
   const document = {
-    'llm-pi-ai': { providers: { [id]: { baseURL: 'x', models: [] } } },
+    [routeNs]: { providers: { [id]: { baseURL: 'x', models: [] } } },
     'enpoi-orchestration': {
       chains: {
         stable: { label: 'Stable', links: [{ provider: id, model: 'auto' }, { provider: 'deepseek', model: 'deepseek-v4-flash' }] },
@@ -104,13 +105,20 @@ it('removal without uninstall keeps the local install but still clears DSH state
   expect(summary.poolStateRemoved).toBe(true)
 })
 
-it('commandcode removal has no steps and never names the keypool service', async () => {
-  const { deps, stepped } = world('commandcode')
+it('commandcode removal drops only the commandcode pool and never touches the keypool service', async () => {
+  const { deps, mutations, stepped } = world('commandcode')
   const summary = await removeProvider(deps, manifestById('commandcode')!, { uninstall: true })
-  expect(summary.teardown.ran).toBe(false)
-  expect(stepped).toEqual([])
+  expect(summary.teardown.ran).toBe(true)
+  expect(summary.teardown.ok).toBe(true)
+  expect(stepped).toEqual(['Drop only pools.commandcode (keypool and other pools stay)'])
+  const script = manifestById('commandcode')!.removal.steps[0]!.command
+  expect(script).toContain('keypool-remove.mjs')
+  expect(script).not.toContain('systemctl')
+  expect(summary.routeRemoved).toBe(true)
   expect(summary.poolStateRemoved).toBe(true)
   expect(summary.credentialRemoved).toBe(true)
+  const routeOps = mutations.find(entry => entry.ns === 'commandcode-provider')?.ops ?? []
+  expect(routeOps).toEqual([{ op: 'unset', path: ['providers', 'commandcode'] }])
 })
 
 it('a failing required teardown step is reported without aborting state cleanup', async () => {

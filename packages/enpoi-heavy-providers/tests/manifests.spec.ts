@@ -46,17 +46,35 @@ it('freellmapi surface quirks name the unified key and ENCRYPTION_KEY', () => {
   expect(manifestById('freellmapi')?.requiresBrowser.length).toBeGreaterThan(0)
 })
 
-it('commandcode is unsupported for llm-pi-ai but documents the loopback keypool URL', () => {
+it('commandcode is a served custom-protocol route on its own settings namespace', () => {
   const manifest = manifestById('commandcode')
-  expect(manifest?.unsupported?.reuseUrl).toBe('http://127.0.0.1:8899/commandcode')
+  expect(manifest?.unsupported).toBeUndefined()
   expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:8899/commandcode')
   expect(manifest?.protocol).toBe('commandcode/alpha-generate')
-  expect(manifest?.local.install.default.steps).toEqual([])
+  // llm-pi-ai cannot parse this protocol; the profile must go elsewhere.
+  expect(manifest?.settingsNs).toBe('commandcode-provider')
+  expect(manifest?.local.baseURL).toBe('http://127.0.0.1:8899/commandcode')
+  expect(manifest?.local.install.default.steps.length).toBeGreaterThan(0)
 })
 
-it('commandcode removal only touches DSH state, never the shared keypool service', () => {
+it('commandcode local install wires the provider package and the keypool', () => {
+  const commands = manifestById('commandcode')!.local.install.default.steps.map(step => step.command).join('\n')
+  expect(commands).toContain('enpoi-commandcode-provider/scripts/install.mjs')
+  expect(commands).toContain('keypool-seed.mjs')
+  expect(commands).toContain('keypool.service')
+})
+
+it('a served non-llm-pi-ai protocol without settingsNs is a manifest problem', () => {
+  const broken = { ...manifestById('commandcode')!, settingsNs: undefined }
+  expect(manifestProblems([broken]).some(problem => problem.includes('settingsNs'))).toBe(true)
+})
+
+it('commandcode removal drops only the commandcode pool, never the shared keypool service', () => {
   const manifest = manifestById('commandcode')
-  expect(manifest?.removal.steps).toEqual([])
+  const commands = manifest?.removal.steps.map(step => step.command).join('\n') ?? ''
+  expect(commands).toContain('keypool-remove.mjs')
+  expect(commands).not.toContain('systemctl')
+  expect(commands).not.toContain('rm -rf')
   const text = JSON.stringify(manifest?.removal)
   expect(text).toContain('never stops or removes the shared keypool service')
   expect(text).toContain('usage.jsonl')

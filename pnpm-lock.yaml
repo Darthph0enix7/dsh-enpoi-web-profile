@@ -35,6 +35,9 @@ importers:
       dsh-enpoi-catalog-rules:
         specifier: workspace:*
         version: link:packages/enpoi-catalog-rules
+      dsh-enpoi-commandcode-provider:
+        specifier: workspace:*
+        version: link:packages/enpoi-commandcode-provider
       dsh-enpoi-context-keeper:
         specifier: workspace:*
         version: link:packages/enpoi-context-keeper
@@ -131,6 +134,8 @@ importers:
       dsh-enpoi-contracts:
         specifier: workspace:*
         version: link:../enpoi-contracts
+
+  packages/enpoi-commandcode-provider: {}
 
   packages/enpoi-context-keeper:
     dependencies:

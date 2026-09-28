@@ -438,9 +438,24 @@ export function readNamespace(settings: SettingsSeam | undefined, ns: string): R
   return value as Record<string, unknown>
 }
 
+/**
+ * The settings namespace one manifest's route profile is written to. Defaults
+ * to llm-pi-ai; a custom-protocol provider names its own adapter plugin's
+ * entry id so the profile never reaches a schema that cannot parse it.
+ * @param manifest - heavy manifest.
+ * @returns the plugin entry id whose settings section owns the route.
+ */
+export function routeSettingsNs(manifest: HeavyProviderManifest): string {
+  return manifest.settingsNs ?? LLM_NS
+}
+
 /** The route profile already configured for one id, when any. */
-export function configuredProfile(deps: HeavyDeps, id: string): Record<string, unknown> | undefined {
-  const section = readNamespace(deps.settings, LLM_NS)
+export function configuredProfile(
+  deps: HeavyDeps,
+  id: string,
+  settingsNs: string = LLM_NS,
+): Record<string, unknown> | undefined {
+  const section = readNamespace(deps.settings, settingsNs)
   const providers = section?.providers
   if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) return undefined
   const profile = (providers as Record<string, unknown>)[id]
@@ -462,7 +477,8 @@ export async function writeRoute(
   const settings = deps.settings
   if (settings === undefined) throw new Error('settings seam absent — cannot write the route')
   const profile = routeProfile(manifest, mode, models, overrides)
-  await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', manifest.id], value: profile }], revisionOf(settings, LLM_NS))
+  const settingsNs = routeSettingsNs(manifest)
+  await settings.mutate(settingsNs, [{ op: 'set', path: ['providers', manifest.id], value: profile }], revisionOf(settings, settingsNs))
   return profile
 }
 
@@ -503,7 +519,7 @@ export async function useDetectedInstance(
   manifest: HeavyProviderManifest,
   key?: string,
 ): Promise<ReuseOutcome> {
-  const profile = configuredProfile(deps, manifest.id)
+  const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest))
   const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
   const detection = await detectInstance(deps, manifest, configuredBase)
   const endpoint = detection.ok ? detection.baseURL : manifest.reuse.baseURL
@@ -653,9 +669,10 @@ export async function removeProvider(
   }
 
   let routeRemoved = false
-  if (deps.settings !== undefined && configuredProfile(deps, manifest.id) !== undefined) {
+  const settingsNs = routeSettingsNs(manifest)
+  if (deps.settings !== undefined && configuredProfile(deps, manifest.id, settingsNs) !== undefined) {
     try {
-      await deps.settings.mutate(LLM_NS, [{ op: 'unset', path: ['providers', manifest.id] }], revisionOf(deps.settings, LLM_NS))
+      await deps.settings.mutate(settingsNs, [{ op: 'unset', path: ['providers', manifest.id] }], revisionOf(deps.settings, settingsNs))
       routeRemoved = true
     } catch (error) {
       errors.push(`route: ${error instanceof Error ? error.message : String(error)}`)

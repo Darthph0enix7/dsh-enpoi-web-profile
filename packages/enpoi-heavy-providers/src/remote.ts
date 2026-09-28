@@ -26,6 +26,7 @@ import {
   probeHealth,
   readServerOverlay,
   removeProvider,
+  routeSettingsNs,
   storeCredential,
   useDetectedInstance,
   writeRoute,
@@ -179,7 +180,7 @@ export class HeavyProvidersService extends TypertRemoteService {
   async status(request: { id?: unknown }): Promise<StatusValue> {
     const manifest = this.effectiveManifest(requireManifest(request?.id))
     const deps = this.options.deps()
-    const profile = configuredProfile(deps, manifest.id)
+    const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest))
     const configured = profile !== undefined
     const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
     const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
