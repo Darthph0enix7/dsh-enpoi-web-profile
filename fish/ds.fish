@@ -747,6 +747,10 @@ case "pull"
             echo "  ds pool [provider]  Show live multi-key pool status"
             echo "  ds reset-cooldown   Reset rate-limit cooldown for a key"
             echo "  ds update           Rebuild & update harness from source"
+            echo "  ds backfill         Reindex derived per-session projection caches (context insights)"
+            echo "                      status | run [--keys k1,k2] [--limit N] [--plugin-fallback]"
+            echo "  ds repair           Verify the install and fix the safe breaks (--check reports only)"
+            echo "  ds uninstall        Remove the install (default keeps \$HOME/.dsh; --purge removes all)"
             echo ""
             echo "Cross-Device Sync:"
             echo "  ds sync             Push global configs (settings/presets/skills/packages/patches) to dotfiles repo"
@@ -798,6 +802,16 @@ case "pull"
                 node "$HOME/.local/bin/dsh-memory.mjs" $sub $rest
             else
                 echo "Error: dsh-memory.mjs not found"
+            end
+
+        case "backfill"
+            # Projection-cache reindex CLI (status/run) — context insights data layer
+            if test -x "$HOME/.local/bin/dsh-projections-backfill.mjs"
+                node "$HOME/.local/bin/dsh-projections-backfill.mjs" $argv[2..-1]
+            else if test -f "$g_dsh_home/profiles/web/scripts/dsh-projections-backfill.mjs"
+                node "$g_dsh_home/profiles/web/scripts/dsh-projections-backfill.mjs" $argv[2..-1]
+            else
+                echo "Error: dsh-projections-backfill.mjs not found"
             end
 
         case "*"
