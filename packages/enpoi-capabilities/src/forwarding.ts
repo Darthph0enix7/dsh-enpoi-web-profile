@@ -16,14 +16,17 @@
  *      the parent's own effective policy: an `allow` there passes, anything else
  *      denies with the rail named. The child asking nicely can never lift them.
  *   2. Subtree grants answered earlier on a forwarded card (this session only).
- *   3. MODE-AWARE STANDING CONSENT — Adam's rule, a DELIBERATE deviation from the
- *      field's unified "only a human answers a child's ask":
- *      when the ROOT session runs in Full access / no-restrictions mode
- *      (sandbox `danger-full-access` + approval `never`), the operator has
- *      already pre-approved the session's whole risk envelope. The parent's mode
- *      IS the standing answer: the ask resolves `allowed-once` with no human card.
- *      The field's rule exists so no AGENT can answer for the human; an
- *      operator-selected mode is the human's own pre-answer, not an agent reply.
+ *   3. FULL ACCESS = PARENT JUDGEMENT (Adam, doc 82 item 8): when the ROOT
+ *      session runs in Full access / no-restrictions mode (sandbox
+ *      `danger-full-access` + approval `never`), the parent's own bounded
+ *      reasoner judges each forwarded ask and the judgement is APPLIED in the
+ *      operator's place: an allow resolves `allowed-once` with the parent's
+ *      reason; a reject returns the corrective denial carrying that reason. A
+ *      missed judgement (absent seam, error, timeout, unparseable, no
+ *      suggestion) falls back to the derived risk check ({@link derivedRiskOf})
+ *      — a clean ask allows with a named reason, a found risk signal denies with
+ *      the signal named. There is no card in this mode and never a silent allow;
+ *      one judgement per ask, batched, and capped per root turn.
  *      In EVERY other mode the human card appears (interactive) or the ask fails
  *      closed (unattended approval `never` without full access).
  *   4. Interactive: the ask is forwarded into the ROOT session as the existing
@@ -34,9 +37,11 @@
  *      seam; see recommendation.ts) and falls back to the derived
  *      {@link recommendationOf} heuristic on error, timeout, or nothing to
  *      reason about. The reply routes back by request id and the waiting child
- *      suspends on it; only the human card may answer. The model's suggestion is
- *      advisory presentation — this module never reads it into a resolution, so
- *      no agent's words can approve a child's ask.
+ *      suspends on it; only the human card may answer. On the card the model's
+ *      suggestion is advisory presentation — this module never reads it into a
+ *      resolution, so no agent's words can approve a child's ask. The SAME
+ *      judgement seam IS applied in Full access (item 3): the operator's mode
+ *      delegates the answer to the parent agent rather than to a human.
  *
  * Failure semantics: a rejection is a corrective tool error the child adapts to,
  * never its death. An unanswered/undeliverable ask fails closed with a quiet
@@ -147,9 +152,9 @@ export type RecommendationSuggestion = 'allow' | 'reject' | 'allow-once'
 
 /** One recommendation answer: a short sentence plus an advisory suggestion. */
 export interface ModelRecommendation {
-  /** The one short sentence the card shows. */
+  /** The one short sentence the card shows / the judgement carries. */
   readonly text: string
-  /** The model's advisory suggestion; never applied by this module. */
+  /** The model's suggestion: advisory on the card, APPLIED in Full access. */
   readonly suggestion?: RecommendationSuggestion
 }
 
@@ -174,6 +179,11 @@ export interface RecommendationQuery {
   readonly rail?: RailHit | undefined
   readonly decision: AskDecision
   readonly signal?: AbortSignal | undefined
+  /**
+   * True when this answer is APPLIED as the decision (the Full-access parent
+   * judgement), not rendered as card advice; the prompt says so explicitly.
+   */
+  readonly applied?: boolean | undefined
 }
 
 /** One card dispatch on the root agent. */
@@ -214,14 +224,22 @@ export interface ForwardingDeps {
   /** Dispatch one approval card on the root agent and await its outcome. */
   askRoot(query: RootAskQuery): Promise<ApprovalOutcome>
   /**
-   * ONE bounded root-side model recommendation for a forwarded ask (the
+   * ONE bounded root-side model judgement for a forwarded ask (the
    * keeper/oracle one-shot seam family; the host owns the model, route,
-   * timeout, and parsing). Advisory only: the answer is rendered on the card
-   * and can never resolve the ask. Absent, throwing, slow, or empty calls keep
-   * the derived {@link recommendationOf} line, so the card never blocks and is
-   * never empty.
+   * timeout, and parsing). On the card the answer is rendered as advice and can
+   * never resolve the ask; in Full access the returned suggestion IS applied as
+   * the parent's decision (see {@link ForwardingDeps.turnOf} for the cap).
+   * Absent, throwing, slow, or empty calls keep the derived
+   * {@link recommendationOf} / {@link derivedRiskOf} path, so an ask never
+   * blocks and is never silently allowed.
    */
   recommendation?(query: RecommendationQuery): Promise<ModelRecommendation | undefined>
+  /**
+   * The root's current turn identity, for the per-turn parent-judgement budget.
+   * Resets when the root starts a new turn; absent means the budget stays
+   * per-root-session (still capped, never unlimited).
+   */
+  turnOf?(root: RootHandle): string | undefined
   /** Quiet audit/notification line; never wakes the root. */
   report(line: string): void
   /** The deployment's delegation depth cap (`ctx.subagents.resolveMaxDepth`). */
@@ -251,6 +269,13 @@ export type ChildAskResolution =
  */
 export const FORWARDED_ASK_MARKER = '[forwarded child ask]'
 
+/**
+ * Most parent judgements one root turn may spend in Full access. Identical
+ * concurrent asks share one judgement; beyond the cap the forwarder denies
+ * with a named reason instead of queueing judgements forever.
+ */
+export const PARENT_JUDGEMENT_BUDGET_PER_TURN = 8
+
 /** Path-argument keys scanned for credential and boundary rails. */
 const PATH_ARG_KEYS: readonly string[] = [
   'file_path', 'filePath', 'path', 'paths', 'target', 'destination', 'source', 'file', 'dir', 'directory',
@@ -267,6 +292,13 @@ const EXFILTRATORS: ReadonlySet<string> = new Set(['scp', 'sftp', 'ftp', 'lftp',
 
 /** Interpreters that turn a pipe or process substitution into code execution. */
 const PIPE_INTERPRETER = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/
+
+/**
+ * Destructive verbs the rails already classify by class. When one appears
+ * WITHOUT a full rail match (a plain `rm file`, not `rm -rf`), the derived
+ * Full-access fallback treats the command as rail-adjacent and denies.
+ */
+const RAIL_ADJACENT_BASH = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/
 
 /** Read-only filesystem capability that still touches a path argument. */
 const FS_PATH_TOOLS: ReadonlySet<string> = new Set([
@@ -447,6 +479,43 @@ export function recommendationOf(input: {
 }
 
 /**
+ * The derived RISK check the Full-access fallback applies when the parent
+ * judgement misses. It reads the same raw facts {@link recommendationOf}
+ * renders for the card, but for risk instead of presentation: a rail that
+ * slipped through, a bash command adjacent to a never-approvable class, a path
+ * outside the child workspace, or any filesystem path named is a signal; an
+ * ask with none of those is clean. The result is never silent: the caller names
+ * this string in the denial (or allows with the named "no risk signal" reason).
+ * @param input - tool name, call arguments, and the child's workspace root.
+ * @returns the named risk signal, or undefined when the derived check finds none.
+ */
+export function derivedRiskOf(input: {
+  toolName: string
+  args?: Record<string, unknown> | undefined
+  cwd?: string | undefined
+}): string | undefined {
+  // Defense in depth: rails resolve before the mode, so a hit here means the
+  // ask reached the fallback with an unhandled class. Treat it as a signal.
+  const rail = railHitOf(input)
+  if (rail !== undefined) return `rail ${rail.rail} (${rail.evidence})`
+  if (input.toolName === 'bash') {
+    const command = typeof input.args?.command === 'string' ? input.args.command : ''
+    const adjacent = RAIL_ADJACENT_BASH.exec(command)
+    if (adjacent !== null) return `bash command is adjacent to a never-approvable class (${adjacent[0]})`
+    for (const token of command.split(/\s+/)) {
+      if (!token.startsWith('/') || token.startsWith('//')) continue
+      if (isOutsideWorkspace(token, input.cwd)) return `path ${token} outside the child workspace`
+    }
+    return undefined
+  }
+  const paths = pathArguments(input.args)
+  for (const path of paths) {
+    if (isOutsideWorkspace(path, input.cwd)) return `path ${path} outside the child workspace`
+  }
+  return paths.length === 0 ? undefined : `filesystem path ${paths[0]} named`
+}
+
+/**
  * Whether one ask carries anything worth a bounded model look. A bare call
  * (no arguments, or only empty ones) has nothing to reason about, so the
  * derived line is kept and no model call is spent.
@@ -536,18 +605,21 @@ export class ChildApprovalForwarder {
   private readonly pending = new Map<string, Promise<ChildAskResolution>>()
   /** Calls an allow resolution made final: child session id → call id → tool name. */
   private readonly allowedCalls = new Map<string, Map<string, string>>()
+  /** Per-root judgement budget: the turn it counts against and how much it spent. */
+  private readonly judgementBudget = new Map<string, { turn: string; count: number }>()
 
   constructor(private readonly deps: ForwardingDeps) {}
 
   /**
    * Resolve one child ask through the parent. Rails run first and are never
-   * card-approvable; then an existing subtree grant; then the root's mode
-   * (standing consent / card / fail closed). A rejection is returned as a
-   * corrective deny; nothing here kills the child. An allow is final for the
-   * exact call identity: {@link resolvesFinalCall} reports it so no later ask
-   * or reviewer denial can re-open what the human (or the root's Full-access
-   * mode) already allowed, and a call already on record resolves allow here
-   * without another card.
+   * card-approvable; then an existing subtree grant; then the root's mode:
+   * interactive dispatches the human card, Full access applies one bounded
+   * parent judgement (allow / corrective denial), unattended mode fails closed.
+   * A rejection is returned as a corrective deny; nothing here kills the child.
+   * An allow is final for the exact call identity: {@link resolvesFinalCall}
+   * reports it so no later ask or reviewer denial can re-open what the human
+   * (or the parent's Full-access judgement) already allowed, and a call already
+   * on record resolves allow here without another judgement.
    * @param input - the child agent, tool call, and the ask the child's policy produced.
    * @returns the allow/deny resolution for the pre-execute listener.
    */
@@ -630,17 +702,7 @@ export class ChildApprovalForwarder {
     }
 
     const mode = this.deps.modeOf(root)
-    if (mode === 'full-access') {
-      // MODE-AWARE STANDING CONSENT (Adam's rule): the operator picked Full
-      // access / no restrictions for the root session — the pre-approval of the
-      // session's risk envelope. Resolve the ask inside that policy, with no card.
-      this.deps.report(
-        `allow: standing consent (root ${shortId(root.id)} is Full access / no restrictions) for ${input.toolName} `
-        + `from child ${shortId(child.childSessionId)}`,
-      )
-      return { kind: 'allow', reason: "approved by the parent session's Full access standing consent" }
-    }
-    if (mode !== 'interactive') {
+    if (mode !== 'interactive' && mode !== 'full-access') {
       return this.failClosed(
         child.childSessionId,
         input.toolName,
@@ -648,10 +710,14 @@ export class ChildApprovalForwarder {
       )
     }
 
+    // Identical concurrent asks share ONE judgement (Full access) or ONE card
+    // (interactive); the batch key is per child session, tool, and call shape.
     const batchKey = `${child.childSessionId}\u0000${input.toolName}\u0000${command ?? stableJson(input.args)}`
     const inFlight = this.pending.get(batchKey)
     if (inFlight !== undefined) return await inFlight
-    const run = this.askThroughCard(input, root, origin, proposal, rail)
+    const run = mode === 'full-access'
+      ? this.fullAccessDecision(input, root, origin, rail)
+      : this.askThroughCard(input, root, origin, proposal, rail)
     this.pending.set(batchKey, run)
     try {
       return await run
@@ -661,12 +727,161 @@ export class ChildApprovalForwarder {
   }
 
   /**
+   * The shared recommendation query both the card's advisory line and the
+   * Full-access judgement are built from, so the reasoner sees identical facts
+   * either way (`applied` is the only difference: it is the decision there).
+   */
+  private recommendationQuery(
+    input: ChildAskInput,
+    root: RootHandle,
+    origin: ForwardingOrigin,
+    rail: RailHit | undefined,
+    applied?: boolean,
+  ): RecommendationQuery {
+    return {
+      toolName: input.toolName,
+      ...input.args !== undefined ? { args: input.args } : {},
+      origin,
+      workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
+      ...rail !== undefined ? { rail } : {},
+      decision: input.decision,
+      ...input.signal !== undefined ? { signal: input.signal } : {},
+      ...applied === true ? { applied: true } : {},
+    }
+  }
+
+  /**
+   * FULL ACCESS = PARENT JUDGEMENT (Adam, doc 82 item 8). The operator's
+   * Full-access mode delegates the answer to the parent agent: the SAME bounded
+   * root-side one-shot the card path uses judges this ask and its suggestion is
+   * APPLIED in the operator's place — an allow resolves `allowed-once` with the
+   * parent's reason, a reject returns the corrective denial carrying that
+   * reason. A missed judgement falls back to {@link derivedRiskOf}: clean asks
+   * allow with a named reason, risk signals deny with the signal named — never
+   * a silent allow. Rails never reach here (they resolve above, through the
+   * parent's own policy). One judgement per ask (identical concurrent asks
+   * share it) and at most {@link PARENT_JUDGEMENT_BUDGET_PER_TURN} per root turn.
+   */
+  private async fullAccessDecision(
+    input: ChildAskInput,
+    root: RootHandle,
+    origin: ForwardingOrigin,
+    rail: RailHit | undefined,
+  ): Promise<ChildAskResolution> {
+    const child = shortId(origin.childSessionId)
+    if (!this.consumeJudgementBudget(root)) {
+      this.deps.report(
+        `audit: parent refused ${input.toolName} for child ${child} (${origin.label}) because parent judgement `
+        + 'budget exhausted this turn — Full access',
+      )
+      return {
+        kind: 'deny',
+        reason: `approval for ${input.toolName} was denied: parent judgement budget exhausted this turn `
+          + `(${PARENT_JUDGEMENT_BUDGET_PER_TURN} per root turn). Adapt the task or report the limitation instead of retrying.`,
+      }
+    }
+    const judgement = await this.fullAccessJudgement(input, root, origin, rail)
+    if (judgement !== undefined && (judgement.suggestion === 'allow' || judgement.suggestion === 'allow-once')) {
+      const text = judgement.text.trim()
+      this.deps.report(
+        `audit: parent approved ${input.toolName} for child ${child} (${origin.label}) because ${text} — Full access (model judgement)`,
+      )
+      return { kind: 'allow', reason: `parent approved (Full access): ${text}` }
+    }
+    if (judgement !== undefined && judgement.suggestion === 'reject') {
+      const text = judgement.text.trim()
+      this.deps.report(
+        `audit: parent refused ${input.toolName} for child ${child} (${origin.label}) because ${text} — Full access (model judgement)`,
+      )
+      // The answer is a sentence of its own; join it with exactly one period.
+      return {
+        kind: 'deny',
+        reason: `the parent (Full access) refused ${input.toolName}: ${text.replace(/[.\s]+$/, '')}. It required approval because: `
+          + `${input.decision.reason}. Adapt the task or report the limitation instead of retrying.`,
+      }
+    }
+    const risk = derivedRiskOf({
+      toolName: input.toolName,
+      ...input.args !== undefined ? { args: input.args } : {},
+      cwd: origin.cwd,
+    })
+    if (risk === undefined) {
+      this.deps.report(
+        `audit: parent approved ${input.toolName} for child ${child} (${origin.label}) because the derived check `
+        + 'found no risk signal — Full access (derived fallback)',
+      )
+      return { kind: 'allow', reason: 'derived: no risk signal (Full access)' }
+    }
+    this.deps.report(
+      `audit: parent refused ${input.toolName} for child ${child} (${origin.label}) because the derived check `
+      + `found a risk signal: ${risk} — Full access (derived fallback)`,
+    )
+    return {
+      kind: 'deny',
+      reason: `the parent (Full access) could not judge ${input.toolName}; the derived check found a risk signal: `
+        + `${risk}. Adapt the task or report the limitation instead of retrying.`,
+    }
+  }
+
+  /**
+   * ONE bounded root-side judgement for a Full-access ask. Unlike the card's
+   * advisory line it is not skipped for a bare ask: here the judgement IS the
+   * decision. A miss (absent seam, throw, undefined answer, empty text) returns
+   * undefined; an answer without a usable suggestion falls through to the same
+   * fallback in the caller. The caller then applies the derived risk check
+   * rather than any default.
+   */
+  private async fullAccessJudgement(
+    input: ChildAskInput,
+    root: RootHandle,
+    origin: ForwardingOrigin,
+    rail: RailHit | undefined,
+  ): Promise<ModelRecommendation | undefined> {
+    if (this.deps.recommendation === undefined) {
+      this.deps.report(`judgement: no root-side reasoner is wired for ${input.toolName}; applying the derived check (Full access)`)
+      return undefined
+    }
+    try {
+      const answer = await this.deps.recommendation(this.recommendationQuery(input, root, origin, rail, true))
+      if (answer === undefined || answer.text.trim() === '') {
+        this.deps.report(`judgement: root reasoner produced nothing for ${input.toolName}; applying the derived check (Full access)`)
+        return undefined
+      }
+      return answer
+    } catch (error) {
+      this.deps.report(
+        `judgement: root reasoner failed for ${input.toolName} `
+        + `(${error instanceof Error ? error.message : String(error)}); applying the derived check (Full access)`,
+      )
+      return undefined
+    }
+  }
+
+  /**
+   * Whether this root may spend another parent judgement in its current turn.
+   * The turn identity comes from the host ({@link ForwardingDeps.turnOf}); when
+   * the host provides none the budget stays per-root-session, so the cap holds
+   * rather than being lifted.
+   */
+  private consumeJudgementBudget(root: RootHandle): boolean {
+    const turn = this.deps.turnOf?.(root) ?? 'current'
+    const record = this.judgementBudget.get(root.id)
+    if (record === undefined || record.turn !== turn) {
+      this.judgementBudget.set(root.id, { turn, count: 1 })
+      return true
+    }
+    if (record.count >= PARENT_JUDGEMENT_BUDGET_PER_TURN) return false
+    record.count += 1
+    return true
+  }
+
+  /**
    * The card's recommendation line: ONE bounded root-side model call when the
    * host provides the seam and the ask carries something to reason about;
    * every miss (absent seam, error, timeout, empty answer) keeps the derived
    * heuristic. The returned suggestion is advisory presentation only — nothing
    * here reads it into a resolution, so a model's words can never approve a
-   * child's ask.
+   * child's ask on the card.
    */
   private async cardRecommendation(
     input: ChildAskInput,
@@ -680,15 +895,7 @@ export class ChildApprovalForwarder {
     }
     if (this.deps.recommendation === undefined || !hasReasoningMaterial(input.args)) return derived
     try {
-      const answer = await this.deps.recommendation({
-        toolName: input.toolName,
-        ...input.args !== undefined ? { args: input.args } : {},
-        origin,
-        workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
-        ...rail !== undefined ? { rail } : {},
-        decision: input.decision,
-        ...input.signal !== undefined ? { signal: input.signal } : {},
-      })
+      const answer = await this.deps.recommendation(this.recommendationQuery(input, root, origin, rail))
       if (answer === undefined || answer.text.trim() === '') {
         this.deps.report(`recommendation: root reasoner produced nothing for ${input.toolName}; keeping the derived line`)
         return derived

@@ -59,6 +59,9 @@ importers:
       dsh-enpoi-git:
         specifier: workspace:*
         version: link:packages/enpoi-git
+      dsh-enpoi-heavy-providers:
+        specifier: workspace:*
+        version: link:packages/enpoi-heavy-providers
       dsh-enpoi-living-brief:
         specifier: workspace:*
         version: link:packages/enpoi-living-brief
@@ -166,6 +169,8 @@ importers:
   packages/enpoi-fs-ops: {}
 
   packages/enpoi-git: {}
+
+  packages/enpoi-heavy-providers: {}
 
   packages/enpoi-living-brief:
     dependencies:

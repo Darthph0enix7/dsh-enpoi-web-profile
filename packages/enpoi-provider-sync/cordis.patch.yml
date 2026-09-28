@@ -23,8 +23,13 @@
         # Kilo is seeded as an endpoint, not as a model list: discovery is
         # primary because Kilo rotates its free pool server-side, and a
         # hand-copied :free list would go stale silently. Anonymous, no key.
+        #
+        # HEAVY providers (freellmapi, antigravity, commandcode) are NOT
+        # seeded here: they are preset-only until the operator adds one, and
+        # an uninstalled heavy route must never be probed/written by the
+        # hourly pass. Once added, the route itself is configured and syncs
+        # through `baseURL` like every other route.
         endpoints:
-          antigravity: http://100.122.163.25:8082/v1
           deepseek: https://api.deepseek.com
           openrouter: https://openrouter.ai/api/v1
           huggingface: https://router.huggingface.co/v1

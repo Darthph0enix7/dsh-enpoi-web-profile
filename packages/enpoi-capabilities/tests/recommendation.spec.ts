@@ -71,6 +71,13 @@ describe('recommendation prompt', () => {
     expect(prompt.user.length).toBeLessThan(1200)
     expect(prompt.user).toContain('…')
   })
+
+  it('marks an APPLIED judgement (Full access) as the decision, not card advice', () => {
+    const applied = buildRecommendationPrompt(ask({ applied: true }))
+    expect(applied.system).toContain('Full access')
+    expect(applied.system).toContain('APPLIED')
+    expect(buildRecommendationPrompt(ask()).system).not.toContain('APPLIED')
+  })
 })
 
 describe('recommendation parsing (untrusted model output)', () => {

@@ -666,8 +666,8 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // A delegated child's approval policy is pinned `never`, so its asks used to
   // dead-end. The forwarder resolves them through the nearest live ROOT session:
   // rails first, then a session-scoped grant, then the root's mode — Full access
-  // standing consent or the existing human card. See forwarding.ts for why the
-  // Full access rule deliberately deviates from the field's human-only rule.
+  // applies one bounded parent judgement in the operator's place (doc 82 item 8),
+  // every other mode keeps the existing human card. See forwarding.ts.
 
   /** Live Agent slice the root walk reads (structural `ctx.get('agents')`). */
   interface LiveAgentLike {
@@ -700,9 +700,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
 
   /**
    * The root's effective mode for a forwarded ask: Full access / no restrictions
-   * (sandbox `danger-full-access` + approval `never`) is standing consent;
-   * approval `never` without full access is unattended (no card possible);
-   * everything else is interactive.
+   * (sandbox `danger-full-access` + approval `never`) applies one bounded parent
+   * judgement in the operator's place (doc 82 item 8); approval `never` without
+   * full access is unattended (no card possible); everything else is interactive.
    */
   function rootModeOf(root: RootHandle): RootMode | undefined {
     const agent = root.agent as AgentLike
@@ -767,8 +767,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
    * one-shot seam family as the keeper/oracle calls (`llm.stream` + a tight
    * deadline). Every miss returns undefined (the forwarder keeps its derived
    * line): no `llm`, no default-model selection, provider error, timeout, cut,
-   * or unparseable output. The answer is advisory presentation only — it never
-   * resolves the ask, and Full access (no card) never reaches it.
+   * or unparseable output. On the card the answer is advisory presentation
+   * only; in Full access (no card) the forwarder APPLIES the suggestion as the
+   * parent's judgement, and `query.applied` tells the prompt so.
    */
   async function forwardedRecommendation(query: RecommendationQuery): Promise<ModelRecommendation | undefined> {
     const llm = ctx.get('llm') as {
@@ -792,6 +793,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         workspaceRelation: query.workspaceRelation,
         ...query.rail !== undefined ? { rail: query.rail } : {},
         decision: query.decision,
+        ...query.applied === true ? { applied: true } : {},
       },
       {
         stream: options => llm.stream!(options),
@@ -808,12 +810,32 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     )
   }
 
+  // Per-turn judgement budget (Full access, doc 82 item 8): the forwarder caps
+  // how many parent judgements one root turn may spend. `turn/start` bumps the
+  // root session's turn identity; the forwarder resets its budget on the bump.
+  const rootTurns = new Map<string, number>()
+  ctx.effect(() => {
+    const disposeTurn = ctx.on('session/event', ((session: { id?: string }, event: { type?: string }) => {
+      if (event?.type !== 'turn/start' || typeof session?.id !== 'string' || session.id === '') return undefined
+      rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1)
+      return undefined
+    }) as never)
+    const disposeDisposed = ctx.on('session/disposed', ((session: { id?: string }) => {
+      if (typeof session?.id === 'string') rootTurns.delete(session.id)
+    }) as never)
+    return () => {
+      disposeTurn()
+      disposeDisposed()
+    }
+  }, 'enpoi-capabilities: forwarded-ask turn budget')
+
   const approvalForwarding = new ChildApprovalForwarder({
     findRoot: liveRootOf,
     modeOf: rootModeOf,
     parentAllowsRail,
     askRoot: requestRootApproval,
     recommendation: forwardedRecommendation,
+    turnOf: (root: RootHandle) => String(rootTurns.get(root.id) ?? 0),
     report: (line: string) => process.stderr.write(`[enpoi-capabilities] ${line}\n`),
     depthCap: () => {
       const subagents = ctx.get('subagents') as { resolveMaxDepth?: (configured?: unknown) => number | undefined } | undefined

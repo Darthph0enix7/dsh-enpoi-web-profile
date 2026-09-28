@@ -6,10 +6,11 @@
  * (the keeper/oracle one-shot seam family: `llm.stream` plus a tight
  * `deadline`): given the ask, its provenance, the rails verdict, and the
  * child's workspace relation, return one short sentence plus an advisory
- * suggestion (`allow` / `reject` / `allow-once`). The answer is PRESENTATION
- * ONLY — the card renders it as its own line and the human's answer resolves
- * the ask; the suggestion is never applied automatically, and not even in Full
- * access (where there is no card and no model call at all).
+ * suggestion (`allow` / `reject` / `allow-once`). On an interactive card the
+ * answer is PRESENTATION ONLY — the card renders it as its own line and the
+ * human's answer resolves the ask. In Full access (no card) the SAME call is
+ * the parent's judgement and its suggestion IS applied in the operator's place
+ * (forwarding.ts); the prompt says so when `applied` is set.
  *
  * Bounds: the call is deadline-bounded ({@link RECOMMENDATION_TIMEOUT_MS}),
  * caps its output tokens, and answers `undefined` on ANY failure (error,
@@ -58,6 +59,12 @@ const SYSTEM_PROMPT = [
   'Your answer is advisory: the human answers the card. Never output code, commands, or tool calls.',
 ].join('\n')
 
+/** Appended when the answer is applied as the decision (Full access, no card). */
+const APPLIED_PROMPT = [
+  'This request comes from a root session in Full access: there is no human card, and your suggestion is APPLIED as the decision in the operator\'s place.',
+  'Judge accordingly: reject anything you are not certain is safe.',
+].join('\n')
+
 /** The facts one root-side recommendation call is made from. */
 export interface RecommendationAsk {
   readonly toolName: string
@@ -70,6 +77,11 @@ export interface RecommendationAsk {
   readonly rail?: RailHit | undefined
   /** The ask the child's own policy produced (why it asked + matched rule). */
   readonly decision: AskDecision
+  /**
+   * True when this answer is APPLIED as the decision (the Full-access parent
+   * judgement) rather than rendered as card advice; the prompt says so.
+   */
+  readonly applied?: boolean | undefined
 }
 
 /** The host-owned model call the one recommendation attempt runs through. */
@@ -128,7 +140,7 @@ export function buildRecommendationPrompt(ask: RecommendationAsk): { system: str
     `rails verdict: ${rail}`,
     `workspace: ${ask.workspaceRelation}`,
   ].join('\n')
-  return { system: SYSTEM_PROMPT, user }
+  return { system: ask.applied === true ? `${SYSTEM_PROMPT}\n${APPLIED_PROMPT}` : SYSTEM_PROMPT, user }
 }
 
 /**

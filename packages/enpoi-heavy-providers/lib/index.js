@@ -1,0 +1,808 @@
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var __decoratorStart = (base) => [, , , __create(base?.[__knownSymbol("metadata")] ?? null)];
+var __decoratorStrings = ["class", "method", "getter", "setter", "accessor", "field", "value", "get", "set"];
+var __expectFn = (fn) => fn !== void 0 && typeof fn !== "function" ? __typeError("Function expected") : fn;
+var __decoratorContext = (kind, name2, done, metadata, fns) => ({ kind: __decoratorStrings[kind], name: name2, metadata, addInitializer: (fn) => done._ ? __typeError("Already initialized") : fns.push(__expectFn(fn || null)) });
+var __decoratorMetadata = (array, target) => __defNormalProp(target, __knownSymbol("metadata"), array[3]);
+var __runInitializers = (array, flags, self, value) => {
+  for (var i = 0, fns = array[flags >> 1], n = fns && fns.length; i < n; i++) flags & 1 ? fns[i].call(self) : value = fns[i].call(self, value);
+  return value;
+};
+var __decorateElement = (array, flags, name2, decorators, target, extra) => {
+  var fn, it, done, ctx, access, k = flags & 7, s = !!(flags & 8), p = !!(flags & 16);
+  var j = k > 3 ? array.length + 1 : k ? s ? 1 : 2 : 0, key = __decoratorStrings[k + 5];
+  var initializers = k > 3 && (array[j - 1] = []), extraInitializers = array[j] || (array[j] = []);
+  var desc = k && (!p && !s && (target = target.prototype), k < 5 && (k > 3 || !p) && __getOwnPropDesc(k < 4 ? target : { get [name2]() {
+    return __privateGet(this, extra);
+  }, set [name2](x) {
+    return __privateSet(this, extra, x);
+  } }, name2));
+  k ? p && k < 4 && __name(extra, (k > 2 ? "set " : k > 1 ? "get " : "") + name2) : __name(target, name2);
+  for (var i = decorators.length - 1; i >= 0; i--) {
+    ctx = __decoratorContext(k, name2, done = {}, array[3], extraInitializers);
+    if (k) {
+      ctx.static = s, ctx.private = p, access = ctx.access = { has: p ? (x) => __privateIn(target, x) : (x) => name2 in x };
+      if (k ^ 3) access.get = p ? (x) => (k ^ 1 ? __privateGet : __privateMethod)(x, target, k ^ 4 ? extra : desc.get) : (x) => x[name2];
+      if (k > 2) access.set = p ? (x, y) => __privateSet(x, target, y, k ^ 4 ? extra : desc.set) : (x, y) => x[name2] = y;
+    }
+    it = (0, decorators[i])(k ? k < 4 ? p ? extra : desc[key] : k > 4 ? void 0 : { get: desc.get, set: desc.set } : target, ctx), done._ = 1;
+    if (k ^ 4 || it === void 0) __expectFn(it) && (k > 4 ? initializers.unshift(it) : k ? p ? extra = it : desc[key] = it : target = it);
+    else if (typeof it !== "object" || it === null) __typeError("Object expected");
+    else __expectFn(fn = it.get) && (desc.get = fn), __expectFn(fn = it.set) && (desc.set = fn), __expectFn(fn = it.init) && initializers.unshift(fn);
+  }
+  return k || __decoratorMetadata(array, target), desc && __defProp(target, name2, desc), p ? k ^ 4 ? extra : desc : target;
+};
+var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the "in" operator on this value') : member.has(obj);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
+
+// src/index.ts
+import { homedir } from "node:os";
+import { join as join3 } from "node:path";
+
+// src/jobs.ts
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+var LOG_CAP_BYTES = 8192;
+var HeavyJobManager = class {
+  jobs = /* @__PURE__ */ new Map();
+  running = /* @__PURE__ */ new Set();
+  dir;
+  run;
+  now;
+  /**
+   * @param options - cache directory, step runner, and a clock seam for tests.
+   */
+  constructor(options) {
+    this.dir = options.dir;
+    this.run = options.run;
+    this.now = options.now ?? Date.now;
+    this.recoverInterrupted();
+  }
+  /**
+   * A job persisted as `running` belongs to a previous process: the runner
+   * died with it, so the file is rewritten as failed instead of leaving the
+   * UI polling a job nothing will ever finish.
+   */
+  recoverInterrupted() {
+    try {
+      readdirSync(this.dir).filter((name2) => name2.endsWith(".json")).forEach((name2) => {
+        const path = join(this.dir, name2);
+        try {
+          const view = JSON.parse(readFileSync(path, "utf8"));
+          if (view?.state === "running") {
+            view.state = "failed";
+            view.error = "interrupted by harness restart";
+            view.finishedAt = this.now();
+            this.persist(view);
+          }
+        } catch {
+        }
+      });
+    } catch {
+    }
+  }
+  /**
+   * Start a job unless one is already running for that id. The returned view
+   * is the initial snapshot; `finalize` runs only after all required steps
+   * succeed, and its failure marks the job failed.
+   * @param id - provider id (the job file name).
+   * @param kind - install or teardown.
+   * @param steps - declared steps in order.
+   * @param finalize - success action (route write); absent means none.
+   * @returns the initial job snapshot.
+   */
+  start(id, kind, steps, finalize) {
+    if (this.running.has(id)) return this.snapshot(id) ?? failed(id, "job already running");
+    const total = steps.reduce((sum, step) => sum + (step.weight ?? 1), 0);
+    const view = {
+      id,
+      kind,
+      state: "running",
+      stage: steps[0]?.label ?? "Finishing",
+      stageIndex: 0,
+      stageCount: steps.length,
+      pct: 0,
+      logTail: "",
+      startedAt: this.now()
+    };
+    this.jobs.set(id, view);
+    this.running.add(id);
+    this.persist(view);
+    void this.runAll(view, steps, total, finalize);
+    return { ...view };
+  }
+  /** The latest snapshot: in-memory first, then the persisted file (survives a restart). */
+  snapshot(id) {
+    const memory = this.jobs.get(id);
+    if (memory !== void 0) return { ...memory };
+    try {
+      const raw = JSON.parse(readFileSync(join(this.dir, `${id}.json`), "utf8"));
+      return raw !== null && typeof raw === "object" ? raw : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  appendLog(view, chunk) {
+    view.logTail = `${view.logTail}${chunk}`.slice(-LOG_CAP_BYTES);
+  }
+  persist(view) {
+    try {
+      mkdirSync(this.dir, { recursive: true });
+      const path = join(this.dir, `${view.id}.json`);
+      const temporary = `${path}.tmp-${String(process.pid)}`;
+      writeFileSync(temporary, JSON.stringify(view), "utf8");
+      renameSync(temporary, path);
+    } catch {
+    }
+  }
+  async runAll(view, steps, total, finalize) {
+    let done = 0;
+    for (const [index, step] of steps.entries()) {
+      view.stage = step.label;
+      view.stageIndex = index;
+      this.persist(view);
+      let outcome;
+      try {
+        outcome = await this.run(step);
+      } catch (error) {
+        if (step.optional === true) {
+          this.appendLog(view, `$ ${step.label}: optional step failed \u2014 ${error instanceof Error ? error.message : String(error)}
+`);
+          done += step.weight ?? 1;
+          view.pct = Math.min(99, Math.round(done / total * 99));
+          continue;
+        }
+        this.fail(view, `${step.label}: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      this.appendLog(view, `$ ${step.label}
+${outcome.output}
+`);
+      if (outcome.exitCode !== 0) {
+        if (step.optional === true) {
+          this.appendLog(view, `$ ${step.label}: optional step exited ${String(outcome.exitCode)}
+`);
+        } else {
+          this.fail(view, `${step.label}: exit ${String(outcome.exitCode)}`);
+          return;
+        }
+      }
+      done += step.weight ?? 1;
+      view.pct = Math.min(99, Math.round(done / total * 99));
+      this.persist(view);
+    }
+    view.stage = "Finishing";
+    this.persist(view);
+    try {
+      await finalize?.();
+    } catch (error) {
+      this.fail(view, error instanceof Error ? error.message : String(error));
+      return;
+    }
+    view.state = "succeeded";
+    view.pct = 100;
+    view.finishedAt = this.now();
+    this.running.delete(view.id);
+    this.persist(view);
+  }
+  fail(view, error) {
+    view.state = "failed";
+    view.error = error;
+    view.finishedAt = this.now();
+    this.running.delete(view.id);
+    this.persist(view);
+  }
+};
+function failed(id, error) {
+  return {
+    id,
+    kind: "install",
+    state: "failed",
+    stage: "rejected",
+    stageIndex: 0,
+    stageCount: 0,
+    pct: 0,
+    logTail: "",
+    startedAt: 0,
+    finishedAt: 0,
+    error
+  };
+}
+
+// src/manifests.ts
+var HEAVY_MANIFESTS = [
+  {
+    id: "freellmapi",
+    label: "FreeLLMAPI",
+    summary: "Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.",
+    protocol: "openai-completions",
+    auth: { kind: "unified", apiKeyEnv: "FREELLMAPI_API_KEY", keyless: false },
+    dashboardUrl: "http://100.122.163.25:3002",
+    docsUrl: "https://freellmapi.co",
+    requiresBrowser: [
+      "First-run setup code and password-reset code appear only in `docker compose logs` \u2014 a browser flow, not automatable",
+      "Upstream provider keys are added on the web dashboard"
+    ],
+    quirks: [
+      "Unified key is the only client auth \u2014 never expose this port through Cloudflare Tunnel",
+      "Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable",
+      "The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves",
+      "A missing bind-mounted JSON file is created as a directory by Docker \u2192 boot loop"
+    ],
+    reuse: {
+      label: "Reuse on server (recommended)",
+      baseURL: "http://100.122.163.25:3002/v1",
+      note: "Zero install: points at the server gateway over Tailscale; one shared key store.",
+      health: { url: "http://100.122.163.25:3002/api/ping", timeoutMs: 5e3 }
+    },
+    local: {
+      label: "Install locally (Docker)",
+      baseURL: "http://127.0.0.1:3002/v1",
+      deps: ["Docker Engine + Compose"],
+      diskHint: "~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU",
+      dashboardUrl: "http://127.0.0.1:3002",
+      install: [
+        { label: "Clone FreeLLMAPI", command: "git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi", weight: 2 },
+        {
+          label: "Generate ENCRYPTION_KEY",
+          command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3001\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env'
+        },
+        { label: "Start the stack", command: "docker compose up -d", cwd: "{home}/freellmapi" },
+        {
+          label: "Wait for the gateway",
+          command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
+        }
+      ],
+      health: { url: "http://127.0.0.1:3002/api/ping", timeoutMs: 5e3 }
+    },
+    removal: {
+      steps: [
+        { label: "Stop the stack and drop its volume", command: "docker compose down -v", cwd: "{home}/freellmapi", optional: true },
+        { label: "Remove the container image", command: "docker image rm ghcr.io/tashfeenahmed/freellmapi:latest", optional: true },
+        { label: "Remove the clone directory", command: "rm -rf {home}/freellmapi" }
+      ],
+      warnings: [
+        "`docker compose down -v` deletes volume freellmapi_freellmapi-data \u2014 every upstream key and the unified key die with it",
+        "~/freellmapi/.env holds ENCRYPTION_KEY; back it up if the volume data is kept anywhere"
+      ]
+    },
+    fallbackModel: "auto"
+  },
+  {
+    id: "antigravity",
+    label: "Antigravity Proxy",
+    summary: "Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.",
+    protocol: "anthropic-messages",
+    // The proxy itself needs no client key, but llm-pi-ai refuses
+    // keyless anthropic routes: a placeholder reference is stored, and the
+    // route MUST NOT declare a DSH pool — the proxy runs its own sticky one.
+    auth: { kind: "placeholder", apiKeyEnv: "ANTIGRAVITY_API_KEY", keyless: false },
+    dashboardUrl: "http://100.122.163.25:8082",
+    docsUrl: "https://www.npmjs.com/package/antigravity-claude-proxy",
+    requiresBrowser: [
+      "Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback \u2014 on a headless host the printed URL must be opened from a machine that can reach the callback (Tailscale/port-forward); it cannot be automated"
+    ],
+    quirks: [
+      "The proxy runs its own sticky account pool with cooldowns \u2014 DSH key pooling MUST stay off for this route",
+      "The console at :8082 has no auth (webuiPassword empty) \u2014 trusted networks only",
+      'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED \u2026 resets after 46h" is normal',
+      "Shared with OpenCode \u2014 deleting the service breaks OpenCode too; the systemd unit is dotfiles-managed, so dotfiles must drop it or `op pull` resurrects it"
+    ],
+    reuse: {
+      label: "Reuse on server (recommended)",
+      baseURL: "http://100.122.163.25:8082",
+      note: "Zero install: uses the server proxy and its already-configured account pool over Tailscale.",
+      health: { url: "http://100.122.163.25:8082/health", timeoutMs: 5e3 }
+    },
+    local: {
+      label: "Install locally (npm + systemd user unit)",
+      baseURL: "http://127.0.0.1:8082",
+      deps: ["Node.js >= 18"],
+      diskHint: "~23 MB install, ~78\u2013150 MB RAM, no GPU",
+      dashboardUrl: "http://127.0.0.1:8082",
+      install: [
+        { label: "Install the proxy package", command: "npm install -g antigravity-claude-proxy", weight: 2 },
+        {
+          label: "Write the systemd user unit",
+          command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc 'exec antigravity-claude-proxy'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF"
+        },
+        { label: "Enable and start the unit", command: "systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service" },
+        {
+          label: "Wait for the proxy",
+          command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1'
+        }
+      ],
+      health: { url: "http://127.0.0.1:8082/health", timeoutMs: 5e3 }
+    },
+    removal: {
+      steps: [
+        { label: "Stop and disable the unit", command: "systemctl --user disable --now antigravity-proxy.service", optional: true },
+        { label: "Remove the unit file", command: "rm -f {config}/systemd/user/antigravity-proxy.service && systemctl --user daemon-reload", optional: true },
+        { label: "Uninstall the package", command: "npm uninstall -g antigravity-claude-proxy", optional: true },
+        { label: "Remove the config directory (OAuth tokens, presets, usage history)", command: "rm -rf {config}/antigravity-proxy" }
+      ],
+      warnings: [
+        "OpenCode consumes the same proxy \u2014 its provider entry stops working when the service is removed",
+        "The systemd unit is dotfiles-managed: remove it from dotfiles too or `op pull` resurrects it on the next pull",
+        "Deleting ~/.config/antigravity-proxy destroys every Google OAuth token and the usage history",
+        "DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown"
+      ]
+    },
+    fallbackModel: "gemini-2.5-flash"
+  },
+  {
+    id: "commandcode",
+    label: "Command Code (keypool)",
+    summary: "Command Code's CLI-shaped API behind the shared multi-key keypool proxy.",
+    protocol: "commandcode/alpha-generate",
+    auth: { kind: "none", apiKeyEnv: "COMMANDCODE_API_KEY", keyless: false },
+    dashboardUrl: "http://100.122.163.25:8899/status",
+    docsUrl: "https://commandcode.ai",
+    requiresBrowser: [
+      "Vendor account and quota dashboard live at commandcode.ai (browser)"
+    ],
+    quirks: [
+      'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 traffic must go through the keypool with CLI headers',
+      'llm-pi-ai cannot speak this API: v1 ships the manifest as "requires the custom provider package (planned)"',
+      "The keypool is shared with the opencode `go` pool \u2014 never stop or remove keypool.service when removing this provider",
+      "The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI"
+    ],
+    reuse: {
+      label: "Reuse the server keypool (documented only)",
+      baseURL: "http://100.122.163.25:8899/commandcode",
+      note: "All keys/catalog/sanitizer live once on the server; a DSH route needs the planned custom provider package first.",
+      health: { url: "http://100.122.163.25:8899/healthz", timeoutMs: 5e3 }
+    },
+    local: {
+      label: "Not supported in v1",
+      baseURL: "",
+      deps: [],
+      diskHint: "",
+      install: [],
+      health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
+    },
+    removal: {
+      steps: [],
+      warnings: [
+        "Removal drops only DSH state and the commandcode pool keys \u2014 it never stops or removes the shared keypool service (the `go` pool needs it)",
+        "usage.jsonl is keypool-wide and is not touched"
+      ]
+    },
+    unsupported: {
+      reason: "llm-pi-ai cannot speak the CLI-shaped /alpha/generate protocol \u2014 a custom provider package is required.",
+      plannedWith: "dsh-provider-commandcode (planned)",
+      reuseUrl: "http://100.122.163.25:8899/commandcode"
+    }
+  }
+];
+function manifestById(id) {
+  return HEAVY_MANIFESTS.find((manifest) => manifest.id === id);
+}
+function manifestProblems(manifests = HEAVY_MANIFESTS) {
+  const problems = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const manifest of manifests) {
+    const where = `manifest "${manifest.id}"`;
+    if (manifest.id === "") problems.push(`${where}: id is empty`);
+    if (seen.has(manifest.id)) problems.push(`${where}: duplicate id`);
+    seen.add(manifest.id);
+    for (const [field, value] of [["label", manifest.label], ["summary", manifest.summary], ["protocol", manifest.protocol]]) {
+      if (typeof value !== "string" || value.trim() === "") problems.push(`${where}: ${field} is empty`);
+    }
+    if (manifest.reuse.baseURL === "" && manifest.unsupported === void 0) problems.push(`${where}: reuse.baseURL is empty`);
+    if (manifest.reuse.health.url === "") problems.push(`${where}: reuse.health.url is empty`);
+    if (manifest.unsupported === void 0) {
+      if (manifest.local.install.length === 0) problems.push(`${where}: local.install is empty`);
+      if (manifest.local.baseURL === "") problems.push(`${where}: local.baseURL is empty`);
+      if (manifest.local.health.url === "") problems.push(`${where}: local.health.url is empty`);
+    }
+    if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`);
+    if (manifest.auth.kind === "none" && manifest.protocol === "anthropic-messages") {
+      problems.push(`${where}: keyless anthropic routes are refused by llm-pi-ai`);
+    }
+    if (manifest.auth.kind !== "none" && (manifest.auth.apiKeyEnv === void 0 || !/^[A-Z_][A-Z0-9_]*$/.test(manifest.auth.apiKeyEnv))) {
+      problems.push(`${where}: apiKeyEnv must be an uppercase credential reference`);
+    }
+    if (manifest.auth.kind === "placeholder" && manifest.auth.keyless) {
+      problems.push(`${where}: a placeholder-auth route cannot be keyless`);
+    }
+    for (const step of [...manifest.local.install, ...manifest.removal.steps]) {
+      if (step.command.trim() === "") problems.push(`${where}: a step command is empty (${step.label})`);
+    }
+  }
+  return problems;
+}
+
+// src/planner.ts
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname, join as join2 } from "node:path";
+var LLM_NS = "llm-pi-ai";
+var ORCHESTRATION_NS = "enpoi-orchestration";
+function substitute(value, home) {
+  return value.replaceAll("{home}", home).replaceAll("{config}", join2(home, ".config"));
+}
+function modeBaseURL(manifest, mode) {
+  return mode === "reuse" ? manifest.reuse.baseURL : manifest.local.baseURL;
+}
+function modeHealth(manifest, mode) {
+  return mode === "reuse" ? manifest.reuse.health : manifest.local.health;
+}
+function routeProfile(manifest, mode, models) {
+  const list = models.length > 0 ? models.map((model) => model.name === void 0 ? { id: model.id } : { id: model.id, name: model.name }) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
+  return {
+    displayName: `${manifest.label}${mode === "reuse" ? " (server)" : " (local)"}`,
+    api: manifest.protocol,
+    baseURL: modeBaseURL(manifest, mode),
+    ...manifest.auth.apiKeyEnv === void 0 ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
+    ...manifest.auth.kind === "none" ? { keyless: true } : {},
+    models: list
+  };
+}
+async function probeHealth(probe, fetchImpl = globalThis.fetch, now = Date.now) {
+  const checkedAt = now();
+  try {
+    const response = await fetchImpl(probe.url, { signal: AbortSignal.timeout(probe.timeoutMs ?? 5e3) });
+    const accepted = probe.expectStatus ?? void 0;
+    const statusOk = accepted === void 0 ? response.status >= 200 && response.status < 300 : accepted.includes(response.status);
+    if (!statusOk) return { ok: false, status: response.status, error: `HTTP ${String(response.status)}`, checkedAt };
+    if (probe.expectBody !== void 0 && !(await response.text()).includes(probe.expectBody)) {
+      return { ok: false, status: response.status, error: `body missing "${probe.expectBody}"`, checkedAt };
+    }
+    return { ok: true, status: response.status, checkedAt };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error), checkedAt };
+  }
+}
+async function discoverModels(baseURL, apiKey, fetchImpl = globalThis.fetch) {
+  const url = `${baseURL.replace(/\/+$/, "")}/models`;
+  const headers = { accept: "application/json" };
+  if (apiKey !== void 0 && apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`;
+  try {
+    const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(15e3) });
+    if (!response.ok) return [];
+    const body = JSON.parse(await response.text());
+    const rows = Array.isArray(body) ? body : body.data;
+    if (!Array.isArray(rows)) return [];
+    const seen = /* @__PURE__ */ new Set();
+    const models = [];
+    for (const row of rows.slice(0, 2e3)) {
+      if (row === null || typeof row !== "object") continue;
+      const id = row.id;
+      if (typeof id !== "string" || id === "" || seen.has(id)) continue;
+      seen.add(id);
+      const name2 = row.name;
+      models.push(typeof name2 === "string" && name2 !== "" ? { id, name: name2 } : { id });
+    }
+    return models;
+  } catch {
+    return [];
+  }
+}
+function revisionOf(settings, ns) {
+  return settings.describe?.().find((entry) => entry.ns === ns)?.revision;
+}
+function readNamespace(settings, ns) {
+  const value = settings?.describe?.().find((entry) => entry.ns === ns)?.value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  return value;
+}
+function configuredProfile(deps, id) {
+  const section = readNamespace(deps.settings, LLM_NS);
+  const providers = section?.providers;
+  if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return void 0;
+  const profile = providers[id];
+  if (profile === null || typeof profile !== "object" || Array.isArray(profile)) return void 0;
+  return profile;
+}
+async function writeRoute(deps, manifest, mode, models) {
+  const settings = deps.settings;
+  if (settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
+  const profile = routeProfile(manifest, mode, models);
+  await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, LLM_NS));
+  return profile;
+}
+async function storeCredential(deps, manifest, key) {
+  const ref = manifest.auth.apiKeyEnv;
+  if (key === void 0 || key.trim() === "" || ref === void 0) return false;
+  const credentials = deps.credentials;
+  if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
+  await credentials.set(ref, key.trim());
+  return true;
+}
+async function reuseOnServer(deps, manifest, key) {
+  const health = await probeHealth(modeHealth(manifest, "reuse"), deps.fetchImpl);
+  const models = await discoverModels(modeBaseURL(manifest, "reuse"), key, deps.fetchImpl);
+  const route = await writeRoute(deps, manifest, "reuse", models);
+  const credentialStored = await storeCredential(deps, manifest, key);
+  return { route, health, models, credentialStored };
+}
+function discoveredCachePath(deps) {
+  const override = process.env.DSH_DISCOVERED_MODELS;
+  if (override !== void 0 && override.length > 0) return override;
+  return join2(deps.dshHome, "cache", "discovered-models.json");
+}
+function removeDiscoveredEntry(deps, id) {
+  const path = discoveredCachePath(deps);
+  if (!existsSync(path)) return false;
+  try {
+    const document = JSON.parse(readFileSync2(path, "utf8"));
+    const routes = document.routes;
+    if (routes === null || typeof routes !== "object" || routes === void 0) return false;
+    if (!(id in routes)) return false;
+    delete routes[id];
+    mkdirSync2(dirname(path), { recursive: true });
+    const temporary = `${path}.tmp-${String(process.pid)}`;
+    writeFileSync2(temporary, JSON.stringify(document), "utf8");
+    renameSync2(temporary, path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function removePoolState(deps, id) {
+  const path = join2(deps.dshHome, "pools", `${id}.json`);
+  if (!existsSync(path)) return false;
+  try {
+    rmSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function linkReferences(link, id) {
+  return link !== null && typeof link === "object" && link.provider === id;
+}
+async function removeChainReferences(deps, id) {
+  const settings = deps.settings;
+  const document = readNamespace(settings, ORCHESTRATION_NS);
+  const chains = document?.chains;
+  if (chains === null || typeof chains !== "object" || Array.isArray(chains)) return 0;
+  let removed = 0;
+  const next = {};
+  for (const [chainId, raw] of Object.entries(chains)) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      next[chainId] = raw;
+      continue;
+    }
+    const chain = raw;
+    const links = Array.isArray(chain.links) ? chain.links : [];
+    const kept = links.filter((link) => {
+      const drop = linkReferences(link, id);
+      if (drop) removed += 1;
+      return !drop;
+    });
+    const selectors = Array.isArray(chain.selectors) ? chain.selectors : [];
+    if (kept.length === 0 && selectors.length === 0 && links.length > 0) continue;
+    next[chainId] = kept.length === links.length ? chain : { ...chain, links: kept };
+  }
+  if (removed === 0 || settings === void 0) return removed;
+  await settings.mutate(ORCHESTRATION_NS, [{ op: "set", path: ["chains"], value: next }], revisionOf(settings, ORCHESTRATION_NS));
+  return removed;
+}
+async function removeProvider(deps, manifest, options = {}) {
+  const errors = [];
+  let teardown = { ran: false, ok: true, output: "" };
+  if (options.uninstall === true && manifest.removal.steps.length > 0) {
+    let output = "";
+    let ok = true;
+    let failedStep;
+    for (const step of manifest.removal.steps) {
+      try {
+        const outcome = await deps.runStep(step);
+        output += `$ ${step.label}
+${outcome.output}
+`;
+        if (outcome.exitCode !== 0 && step.optional !== true) {
+          ok = false;
+          failedStep = step.label;
+          break;
+        }
+      } catch (error) {
+        if (step.optional === true) {
+          output += `$ ${step.label} (optional, failed: ${error instanceof Error ? error.message : String(error)})
+`;
+          continue;
+        }
+        ok = false;
+        failedStep = step.label;
+        output += `$ ${step.label} (failed: ${error instanceof Error ? error.message : String(error)})
+`;
+        break;
+      }
+    }
+    teardown = { ran: true, ok, ...failedStep === void 0 ? {} : { failedStep }, output };
+  }
+  let routeRemoved = false;
+  if (deps.settings !== void 0 && configuredProfile(deps, manifest.id) !== void 0) {
+    try {
+      await deps.settings.mutate(LLM_NS, [{ op: "unset", path: ["providers", manifest.id] }], revisionOf(deps.settings, LLM_NS));
+      routeRemoved = true;
+    } catch (error) {
+      errors.push(`route: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  let credentialRemoved = false;
+  if (deps.credentials !== void 0 && manifest.auth.apiKeyEnv !== void 0) {
+    try {
+      await deps.credentials.unset(manifest.auth.apiKeyEnv);
+      credentialRemoved = true;
+    } catch (error) {
+      errors.push(`credential: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const poolStateRemoved = removePoolState(deps, manifest.id);
+  const cacheEntryRemoved = removeDiscoveredEntry(deps, manifest.id);
+  let chainLinksRemoved = 0;
+  try {
+    chainLinksRemoved = await removeChainReferences(deps, manifest.id);
+  } catch (error) {
+    errors.push(`chains: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, errors };
+}
+
+// src/remote.ts
+import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+var MAX_KEY_CHARS = 4096;
+function requireManifest(value) {
+  if (typeof value !== "string" || value === "") {
+    throw new RemoteError("gateway/bad-request", "enpoiHeavy: id must be a non-empty string", {});
+  }
+  const manifest = manifestById(value);
+  if (manifest === void 0) {
+    throw new RemoteError("gateway/bad-request", `enpoiHeavy: unknown heavy provider "${value}"`, {});
+  }
+  return manifest;
+}
+function optionalKey(value) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "string") throw new RemoteError("gateway/bad-request", "enpoiHeavy: key must be a string", {});
+  if (value.length > MAX_KEY_CHARS) throw new RemoteError("gateway/bad-request", "enpoiHeavy: key is too long", {});
+  return value;
+}
+var _remove_dec, _job_dec, _install_dec, _reuse_dec, _status_dec, _manifests_dec, _a, _init;
+var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_dec = [Remote], _status_dec = [Remote], _reuse_dec = [Remote], _install_dec = [Remote], _job_dec = [Remote], _remove_dec = [Remote], _a) {
+  /**
+   * @param ctx - owning context (service registration is automatic).
+   * @param options - deps accessor, job manager, and optional log sink.
+   */
+  constructor(ctx, options) {
+    super(ctx, "enpoiHeavy");
+    __runInitializers(_init, 5, this);
+    __publicField(this, "options");
+    this.options = options;
+  }
+  manifests() {
+    return { items: HEAVY_MANIFESTS, problems: manifestProblems() };
+  }
+  async status(request) {
+    const manifest = requireManifest(request?.id);
+    const deps = this.options.deps();
+    const profile = configuredProfile(deps, manifest.id);
+    const configured = profile !== void 0;
+    const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
+    const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";
+    const health = await probeHealth(mode === void 0 ? manifest.reuse.health : modeHealth(manifest, mode), deps.fetchImpl);
+    const job = this.options.jobs.snapshot(manifest.id);
+    return {
+      id: manifest.id,
+      configured,
+      ...mode === void 0 ? {} : { mode },
+      health,
+      ...manifest.unsupported === void 0 ? {} : { unsupported: manifest.unsupported },
+      ...job === void 0 ? {} : { job }
+    };
+  }
+  async reuse(request) {
+    const manifest = requireManifest(request?.id);
+    const key = optionalKey(request?.key);
+    if (manifest.unsupported !== void 0) {
+      return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
+    }
+    const outcome = await reuseOnServer(this.options.deps(), manifest, key);
+    this.options.log?.(`reuse ${manifest.id}: health=${outcome.health.ok ? "ok" : "down"} models=${String(outcome.models.length)}`);
+    return { ok: true, ...outcome };
+  }
+  install(request) {
+    const manifest = requireManifest(request?.id);
+    const key = optionalKey(request?.key);
+    if (manifest.unsupported !== void 0) {
+      return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
+    }
+    const job = this.options.jobs.start(manifest.id, "install", manifest.local.install, async () => {
+      const deps = this.options.deps();
+      const models = await discoverModels(modeBaseURL(manifest, "local"), key, deps.fetchImpl);
+      await writeRoute(deps, manifest, "local", models);
+      await storeCredential(deps, manifest, key);
+    });
+    return { ok: true, job };
+  }
+  job(request) {
+    const manifest = requireManifest(request?.id);
+    const job = this.options.jobs.snapshot(manifest.id);
+    return job === void 0 ? {} : { job };
+  }
+  async remove(request) {
+    const manifest = requireManifest(request?.id);
+    if (request?.uninstall !== void 0 && typeof request.uninstall !== "boolean") {
+      throw new RemoteError("gateway/bad-request", "enpoiHeavy: uninstall must be a boolean", {});
+    }
+    const summary = await removeProvider(this.options.deps(), manifest, { uninstall: request?.uninstall === true });
+    this.options.log?.(`remove ${manifest.id}: route=${String(summary.routeRemoved)} pool=${String(summary.poolStateRemoved)} cache=${String(summary.cacheEntryRemoved)} teardown=${String(summary.teardown.ok)}`);
+    return { ok: summary.errors.length === 0, summary };
+  }
+};
+_init = __decoratorStart(_a);
+__decorateElement(_init, 1, "manifests", _manifests_dec, HeavyProvidersService);
+__decorateElement(_init, 1, "status", _status_dec, HeavyProvidersService);
+__decorateElement(_init, 1, "reuse", _reuse_dec, HeavyProvidersService);
+__decorateElement(_init, 1, "install", _install_dec, HeavyProvidersService);
+__decorateElement(_init, 1, "job", _job_dec, HeavyProvidersService);
+__decorateElement(_init, 1, "remove", _remove_dec, HeavyProvidersService);
+__decoratorMetadata(_init, HeavyProvidersService);
+/** Nothing is injected into the service fiber; the plugin passes its deps. */
+__publicField(HeavyProvidersService, "inject", []);
+
+// src/index.ts
+var name = "enpoi-heavy-providers";
+var inject = [];
+async function runStep(ctx, step, home) {
+  const subprocess = ctx.get("subprocess");
+  if (subprocess === void 0) throw new Error("subprocess seam absent \u2014 cannot run install steps");
+  const handle = subprocess.spawn({
+    argv: ["/bin/bash", "-lc", substitute(step.command, home)],
+    cwd: step.cwd === void 0 ? home : substitute(step.cwd, home),
+    stdio: {
+      stdin: "ignore",
+      stdout: { maxBytes: 65536 },
+      stderr: { maxBytes: 65536 }
+    },
+    graceMs: 1e4
+  });
+  const outcome = await handle.done;
+  const stdout = handle.collected.stdout?.readFrom(0).text ?? "";
+  const stderr = handle.collected.stderr?.readFrom(0).text ?? "";
+  return { exitCode: outcome.exitCode, output: `${stdout}${stderr}`.slice(-16384) };
+}
+function apply(ctx) {
+  const logger = ctx.logger("enpoi-heavy-providers");
+  const home = process.env.HOME ?? homedir();
+  const dshHome = process.env.DSH_HOME !== void 0 && process.env.DSH_HOME !== "" ? process.env.DSH_HOME : join3(home, ".dsh");
+  const problems = manifestProblems();
+  if (problems.length > 0) {
+    for (const problem of problems) logger.warn(`[enpoi-heavy-providers] ${problem}`);
+  }
+  const jobs = new HeavyJobManager({
+    dir: join3(dshHome, "cache", "heavy-jobs"),
+    run: (step) => runStep(ctx, step, home)
+  });
+  new HeavyProvidersService(ctx, {
+    deps: () => ({
+      home,
+      dshHome,
+      settings: ctx.get("settings"),
+      credentials: ctx.get("credentials"),
+      fetchImpl: globalThis.fetch,
+      runStep: (step) => runStep(ctx, step, home)
+    }),
+    jobs,
+    log: (line) => logger.info(`[enpoi-heavy-providers] ${line}`)
+  });
+}
+export {
+  apply,
+  inject,
+  name
+};

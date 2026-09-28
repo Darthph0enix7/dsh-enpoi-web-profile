@@ -1,15 +1,17 @@
 /**
- * Forwarded child approvals — decision-rule suite (doc 82 §E7).
+ * Forwarded child approvals — decision-rule suite (doc 82 §E7, item 8).
  *
  * Every rule the design fixes is pinned here: rails are never card-approvable,
- * Full access is standing consent, every other mode cards or fails closed,
+ * Full access applies one bounded parent judgement (with a fail-safe derived
+ * fallback and a per-turn cap), every other mode cards or fails closed,
  * grants are requester-session scoped, broad grants need a second confirmation,
  * and failures are corrective rather than terminal.
  */
 
 import { describe, expect, it } from 'vitest'
 import {
-  ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam, hasReasoningMaterial, railHitOf,
+  ChildApprovalForwarder, FORWARDED_ASK_MARKER, PARENT_JUDGEMENT_BUDGET_PER_TURN, delegatedChildOf, derivedRiskOf,
+  forwardedApprovalsSeam, hasReasoningMaterial, railHitOf,
   recommendationOf, workspaceRelationOf,
   type ApprovalOutcome, type ChildAgentLike, type ForwardingDeps, type RecommendationQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from '../src/forwarding'
@@ -54,6 +56,7 @@ function fakeDeps(overrides: {
   railAllows?: boolean
   depthCap?: number
   recommendation?: ForwardingDeps['recommendation']
+  turnOf?: ((root: RootHandle) => string | undefined) | undefined
 } = {}) {
   const outcomes = [...overrides.outcomes ?? ['rejected']]
   const asks: RootAskQuery[] = []
@@ -74,6 +77,7 @@ function fakeDeps(overrides: {
         return overrides.recommendation!(query)
       },
     },
+    ...overrides.turnOf === undefined ? {} : { turnOf: overrides.turnOf },
     report: line => reports.push(line),
     depthCap: () => overrides.depthCap ?? 1,
   }
@@ -139,14 +143,120 @@ describe('rails are never card-approvable', () => {
   })
 })
 
-describe('mode-aware standing consent (Adam’s rule)', () => {
-  it('Full access resolves the ask as approved with no card', async () => {
-    const f = fakeDeps({ mode: 'full-access' })
-    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'cat x' }, decision: bashAsk('rm plain') })
+describe('Full access = applied parent judgement (Adam’s rule, doc 82 item 8)', () => {
+  it('applies an allow judgement: allowed-once, named reason, no card, audited', async () => {
+    const f = fakeDeps({
+      mode: 'full-access',
+      recommendation: () => Promise.resolve({ text: 'Reads a project file inside the workspace.', suggestion: 'allow-once' }),
+    })
+    const result = await f.forwarder.forward({
+      agent: childAgent({ id: 'child-42', label: 'fixer: repair' }), toolName: 'str_replace_editor',
+      args: { file_path: '/ws/a.txt' }, decision: editorAsk(),
+    })
     expect(result.kind).toBe('allow')
-    expect(result.kind === 'allow' && result.reason).toContain('standing consent')
+    expect(result.kind === 'allow' && result.reason).toBe('parent approved (Full access): Reads a project file inside the workspace.')
     expect(f.asks).toHaveLength(0)
-    expect(f.reports.some(line => line.startsWith('allow: standing consent'))).toBe(true)
+    expect(f.recQueries).toHaveLength(1)
+    expect(f.recQueries[0].applied).toBe(true)
+    expect(f.reports.some(line => line.includes('audit: parent approved') && line.includes('— Full access'))).toBe(true)
+  })
+
+  it('applies a reject judgement as the corrective denial carrying the parent’s reason', async () => {
+    const f = fakeDeps({
+      mode: 'full-access',
+      recommendation: () => Promise.resolve({ text: 'Deletes files; not certain it is safe.', suggestion: 'reject' }),
+    })
+    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(result.kind).toBe('deny')
+    expect(result.kind === 'deny' && result.reason).toContain('the parent (Full access) refused bash')
+    expect(result.kind === 'deny' && result.reason).toContain('Deletes files; not certain it is safe')
+    expect(f.asks).toHaveLength(0)
+    expect(f.reports.some(line => line.includes('audit: parent refused') && line.includes('— Full access'))).toBe(true)
+  })
+
+  it('falls back to the derived check when the judgement misses: a clean ask allows, reason named', async () => {
+    const missed = fakeDeps({ mode: 'full-access', recommendation: () => Promise.resolve(undefined) })
+    const result = await missed.forwarder.forward({ agent: childAgent(), toolName: 'str_replace_editor', args: {}, decision: editorAsk() })
+    expect(result.kind).toBe('allow')
+    expect(result.kind === 'allow' && result.reason).toBe('derived: no risk signal (Full access)')
+    expect(missed.asks).toHaveLength(0)
+    expect(missed.reports.some(line => line.includes('derived fallback'))).toBe(true)
+
+    // No seam at all is the same miss, never a silent allow.
+    const noSeam = fakeDeps({ mode: 'full-access' })
+    const bare = await noSeam.forwarder.forward({ agent: childAgent(), toolName: 'str_replace_editor', args: {}, decision: editorAsk() })
+    expect(bare.kind).toBe('allow')
+    expect(noSeam.reports.some(line => line.includes('no root-side reasoner'))).toBe(true)
+  })
+
+  it('falls back to the derived check when the judgement fails: a risk signal denies, named', async () => {
+    const failed = fakeDeps({ mode: 'full-access', recommendation: () => Promise.reject(new Error('provider exploded')) })
+    const result = await failed.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(result.kind).toBe('deny')
+    expect(result.kind === 'deny' && result.reason).toContain('derived check found a risk signal')
+    expect(result.kind === 'deny' && result.reason).toContain('adjacent')
+    expect(failed.asks).toHaveLength(0)
+    expect(failed.reports.some(line => line.includes('provider exploded') && line.includes('derived check'))).toBe(true)
+    expect(failed.reports.some(line => line.includes('audit: parent refused') && line.includes('— Full access'))).toBe(true)
+  })
+
+  it('never silent-allows on an answer without a suggestion', async () => {
+    const f = fakeDeps({ mode: 'full-access', recommendation: () => Promise.resolve({ text: 'Looks fine.' }) })
+    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
+    expect(result.kind).toBe('deny')
+    expect(f.reports.some(line => line.includes('derived fallback'))).toBe(true)
+  })
+
+  it('reads risk from the derived facts: clean bash passes, paths and rail adjacency are signals', () => {
+    expect(derivedRiskOf({ toolName: 'bash', args: { command: 'cat x' }, cwd: '/ws' })).toBeUndefined()
+    expect(derivedRiskOf({ toolName: 'bash', args: { command: 'cat /etc/passwd' }, cwd: '/ws' })).toContain('outside the child workspace')
+    expect(derivedRiskOf({ toolName: 'write', args: { file_path: '/ws/a.txt' }, cwd: '/ws' })).toContain('filesystem path')
+    expect(derivedRiskOf({ toolName: 'write', args: { file_path: '/etc/passwd' }, cwd: '/ws' })).toContain('/etc/passwd')
+    expect(derivedRiskOf({ toolName: 'bash', args: { command: 'rm -rf /tmp/x' }, cwd: '/ws' })).toContain('rail recursive-delete')
+  })
+
+  it('batches identical concurrent Full-access asks into one judgement', async () => {
+    let calls = 0
+    const f = fakeDeps({
+      mode: 'full-access',
+      recommendation: () => {
+        calls += 1
+        return new Promise(resolve => setTimeout(() => resolve({ text: 'one judgement', suggestion: 'allow-once' }), 5))
+      },
+    })
+    const input = { agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') }
+    const [a, b] = await Promise.all([f.forwarder.forward(input), f.forwarder.forward(input)])
+    expect(a.kind).toBe('allow')
+    expect(b.kind).toBe('allow')
+    expect(f.asks).toHaveLength(0)
+    expect(calls).toBe(1)
+  })
+
+  it('caps parent judgements per root turn and resets the budget on a new turn', async () => {
+    let turn = 'turn-1'
+    let calls = 0
+    const f = fakeDeps({
+      mode: 'full-access',
+      turnOf: () => turn,
+      recommendation: () => {
+        calls += 1
+        return Promise.resolve({ text: 'safe once', suggestion: 'allow-once' })
+      },
+    })
+    const ask = (n: number) => f.forwarder.forward({
+      agent: childAgent(), toolName: 'str_replace_editor', args: { file_path: `/ws/a${n}.txt` }, decision: editorAsk(),
+    })
+    for (let i = 0; i < PARENT_JUDGEMENT_BUDGET_PER_TURN; i += 1) {
+      expect((await ask(i)).kind).toBe('allow')
+    }
+    const exhausted = await ask(PARENT_JUDGEMENT_BUDGET_PER_TURN)
+    expect(exhausted.kind).toBe('deny')
+    expect(exhausted.kind === 'deny' && exhausted.reason).toContain('parent judgement budget exhausted this turn')
+    expect(calls).toBe(PARENT_JUDGEMENT_BUDGET_PER_TURN)
+    expect(f.reports.some(line => line.includes('budget exhausted this turn') && line.includes('— Full access'))).toBe(true)
+    turn = 'turn-2'
+    expect((await ask(PARENT_JUDGEMENT_BUDGET_PER_TURN)).kind).toBe('allow')
+    expect(calls).toBe(PARENT_JUDGEMENT_BUDGET_PER_TURN + 1)
   })
 
   it('unattended approval-never without full access fails closed with a notification', async () => {
@@ -303,20 +413,26 @@ describe('forwarded-approval finality', () => {
     expect(f.forwarder.resolvesFinalCall('child-1', 'call-9', 'write')).toBe(false)
   })
 
-  it('records the Full access standing decision and a rejection records nothing', async () => {
-    const consent = fakeDeps({ mode: 'full-access' })
-    await consent.forwarder.forward({
+  it('records the Full access parent-approved decision; a rejection records nothing', async () => {
+    const approved = fakeDeps({
+      mode: 'full-access',
+      recommendation: () => Promise.resolve({ text: 'Safe once.', suggestion: 'allow-once' }),
+    })
+    await approved.forwarder.forward({
       agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain'), callId: 'call-a',
     })
-    expect(consent.asks).toHaveLength(0)
-    expect(consent.forwarder.resolvesFinalCall('child-1', 'call-a', 'bash')).toBe(true)
+    expect(approved.asks).toHaveLength(0)
+    expect(approved.forwarder.resolvesFinalCall('child-1', 'call-a', 'bash')).toBe(true)
 
-    const denied = fakeDeps({ outcomes: ['rejected'] })
-    const result = await denied.forwarder.forward({
+    const refused = fakeDeps({
+      mode: 'full-access',
+      recommendation: () => Promise.resolve({ text: 'Too risky.', suggestion: 'reject' }),
+    })
+    const result = await refused.forwarder.forward({
       agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain'), callId: 'call-b',
     })
     expect(result.kind).toBe('deny')
-    expect(denied.forwarder.resolvesFinalCall('child-1', 'call-b', 'bash')).toBe(false)
+    expect(refused.forwarder.resolvesFinalCall('child-1', 'call-b', 'bash')).toBe(false)
   })
 
   it('a second forward of an already-final call resolves allow without another card', async () => {
@@ -457,17 +573,6 @@ describe('root-side recommendation (advisory only)', () => {
     await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: {}, decision: bashAsk('rm plain') })
     expect(f.recQueries).toHaveLength(0)
     expect(f.asks[0].recommendation).toEqual({ text: 'no filesystem path named', source: 'derived' })
-  })
-
-  it('Full access stays mode-only: no card and no model call (YOLO rule unchanged)', async () => {
-    const f = fakeDeps({
-      mode: 'full-access',
-      recommendation: () => Promise.resolve({ text: 'never used', suggestion: 'reject' }),
-    })
-    const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })
-    expect(result.kind).toBe('allow')
-    expect(f.asks).toHaveLength(0)
-    expect(f.recQueries).toHaveLength(0)
   })
 
   it('batches identical concurrent asks into one model call and one card', async () => {
