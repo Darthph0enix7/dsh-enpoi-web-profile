@@ -23,6 +23,7 @@
  */
 
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -176,13 +177,55 @@ interface ModelsDevProvider {
 type ModelsDevDatabase = Record<string, ModelsDevProvider>
 
 let modelsDevCache: ModelsDevDatabase | undefined
-const LOCAL_MODELS_CACHE_PATH = '/home/adam/.cache/opencode/models.json'
+
+/** First non-empty string; `undefined` when every candidate is absent or empty. */
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (value !== undefined && value.length > 0) return value
+  }
+  return undefined
+}
+
+/**
+ * The OS user-cache directory: `$XDG_CACHE_HOME` when set, else `~/.cache` on
+ * Linux, `~/Library/Caches` on macOS, and `%LOCALAPPDATA%` on Windows.
+ * `undefined` when no home or cache root can be resolved — callers then skip
+ * the on-disk cache instead of guessing a user path.
+ * @param env - environment to read (tests inject one).
+ * @param platform - OS key to branch on (tests inject one).
+ * @returns the cache root, or undefined when unresolvable.
+ */
+export function osCacheDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  const xdg = firstNonEmpty(env.XDG_CACHE_HOME)
+  if (xdg !== undefined) return xdg
+  if (platform === 'win32') return firstNonEmpty(env.LOCALAPPDATA)
+  const home = firstNonEmpty(env.HOME, homedir())
+  if (home === undefined) return undefined
+  return platform === 'darwin' ? join(home, 'Library', 'Caches') : join(home, '.cache')
+}
+
+/**
+ * OpenCode's shared models.dev cache, keeping the `opencode/models.json`
+ * layout inside {@link osCacheDir} (`%LOCALAPPDATA%\opencode\models.json` on
+ * Windows, `~/Library/Caches/opencode/models.json` on macOS,
+ * `$XDG_CACHE_HOME/opencode/models.json` or `~/.cache/opencode/models.json` on
+ * Linux). `undefined` when no cache dir resolves: the online refresh and the
+ * in-memory copy then serve alone, and no guessed path is ever written.
+ * @param env - environment to read (tests inject one).
+ * @param platform - OS key to branch on (tests inject one).
+ * @returns the cache file path, or undefined when unresolvable.
+ */
+export function modelsDevCachePath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  const base = osCacheDir(env, platform)
+  return base === undefined ? undefined : join(base, 'opencode', 'models.json')
+}
 
 function loadModelsDev(): ModelsDevDatabase {
   if (modelsDevCache !== undefined) return modelsDevCache
+  const path = modelsDevCachePath()
   try {
-    if (existsSync(LOCAL_MODELS_CACHE_PATH)) {
-      const raw = readFileSync(LOCAL_MODELS_CACHE_PATH, 'utf8')
+    if (path !== undefined && existsSync(path)) {
+      const raw = readFileSync(path, 'utf8')
       modelsDevCache = JSON.parse(raw) as ModelsDevDatabase
       return modelsDevCache
     }
@@ -192,24 +235,44 @@ function loadModelsDev(): ModelsDevDatabase {
   return {}
 }
 
-async function refreshModelsDevOnline(): Promise<void> {
+/** Coded-diagnostics sink; the plugin wires it to the `diagnostics` service. */
+export type SyncDiagnosticSink = (kind: string, message: string) => void
+
+/**
+ * Refresh the models.dev catalogue from the network. Fail-open by contract —
+ * the local cache and the in-memory copy keep serving — but every failure is
+ * reported through the sink with a coded message and a plain sentence, so a
+ * stale or missing cache is visible instead of swallowed.
+ * @param report - optional diagnostics sink.
+ */
+export async function refreshModelsDevOnline(report?: SyncDiagnosticSink): Promise<void> {
   try {
     const res = await fetch('https://models.dev/api.json', { signal: AbortSignal.timeout(10_000) })
-    if (res.ok) {
-      const data = (await res.json()) as ModelsDevDatabase
-      if (data && typeof data === 'object' && Object.keys(data).length > 50) {
-        modelsDevCache = data
-        // Persist the fresh catalog to the shared cache so OpenCode and every
-        // restart read current metadata even when OpenCode itself is idle.
-        try {
-          writeFileSync(LOCAL_MODELS_CACHE_PATH, JSON.stringify(data), 'utf8')
-        } catch {
-          // cache write failure is non-fatal; the in-memory copy still serves
-        }
-      }
+    if (!res.ok) {
+      report?.('provider-sync/models-dev-fetch', `models.dev refresh failed — GET https://models.dev/api.json -> HTTP ${String(res.status)}; local cache kept`)
+      return
     }
-  } catch {
-    // background refresh failure is non-fatal; local cache is used
+    const data = (await res.json()) as ModelsDevDatabase
+    if (!data || typeof data !== 'object' || Object.keys(data).length <= 50) {
+      report?.('provider-sync/models-dev-fetch', 'models.dev refresh ignored — response did not look like the catalogue (>50 providers); local cache kept')
+      return
+    }
+    modelsDevCache = data
+    // Persist the fresh catalog to the shared cache so OpenCode and every
+    // restart read current metadata even when OpenCode itself is idle.
+    const path = modelsDevCachePath()
+    try {
+      if (path === undefined) {
+        report?.('provider-sync/models-dev-cache', 'models.dev catalogue refreshed in memory, but no OS cache dir resolved — not persisted')
+        return
+      }
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, JSON.stringify(data), 'utf8')
+    } catch (error) {
+      report?.('provider-sync/models-dev-cache', `models.dev catalogue refreshed in memory, but the cache write failed — ${error instanceof Error ? error.message : String(error)}`)
+    }
+  } catch (error) {
+    report?.('provider-sync/models-dev-fetch', `models.dev refresh failed — ${error instanceof Error ? error.message : String(error)}; local cache kept`)
   }
 }
 
@@ -529,15 +592,30 @@ interface DiscoveredFile {
 /** Cache format version; must match `dsh-llm-pi-ai`'s reader. */
 const DISCOVERED_CACHE_VERSION = 1
 
+/**
+ * Resolve the DSH home directory: an explicit `DSH_HOME`, else the real user
+ * home (`HOME`, or `USERPROFILE` on Windows) with `.dsh` appended. The OS
+ * account home is the last resort; a literal user path is never assumed.
+ * @param env - environment to read (tests inject one).
+ * @param platform - OS key to branch on (tests inject one).
+ * @returns the DSH home directory.
+ * @throws when no home directory can be resolved at all.
+ */
+export function resolveDshHome(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const explicit = firstNonEmpty(env.DSH_HOME)
+  if (explicit !== undefined) return explicit
+  const home = firstNonEmpty(env.HOME, platform === 'win32' ? env.USERPROFILE : undefined, homedir())
+  if (home === undefined) {
+    throw new Error('dsh-enpoi-provider-sync: no home directory resolved (set HOME, USERPROFILE, or DSH_HOME) — cannot locate the discovered-models cache')
+  }
+  return join(home, '.dsh')
+}
+
 /** The shared discovered-model cache path, overridable for tests. */
 export function discoveredCachePath(): string {
   const override = process.env.DSH_DISCOVERED_MODELS
   if (override !== undefined && override.length > 0) return override
-  const dshHome = process.env.DSH_HOME
-  const base = dshHome !== undefined && dshHome.length > 0
-    ? dshHome
-    : join(process.env.HOME ?? '/home/adam', '.dsh')
-  return join(base, 'cache', 'discovered-models.json')
+  return join(resolveDshHome(), 'cache', 'discovered-models.json')
 }
 
 /** Read the cache tolerantly: a corrupt file is replaced, never fatal to a sync pass. */
@@ -1021,15 +1099,32 @@ export function apply(ctx: Context, config: Config): void {
   const endpoints = value(config.endpoints) ?? {}
   const capacities = (value(config.capacityDefaults) ?? {}) as Record<string, RouteCapacity>
 
+  /**
+   * Record one coded incident (kind `provider-sync/...`) and log it. The
+   * diagnostics service is optional: when absent the log line still fires.
+   */
+  function reportSyncDiagnostic(kind: string, message: string): void {
+    let code: string | undefined
+    try {
+      const diagnostics = ctx.get('diagnostics') as
+        | { report?: (request: { kind: string; message: string }) => { code?: string } }
+        | undefined
+      code = diagnostics?.report?.({ kind, message })?.code
+    } catch {
+      // The incident channel is observability only; the log line below still fires.
+    }
+    logger.warn(code === undefined ? message : `${message} (diagnostics ${code})`)
+  }
+
   // Load models.dev database on startup and refresh online in background
   loadModelsDev()
-  void refreshModelsDevOnline()
+  void refreshModelsDevOnline(reportSyncDiagnostic)
 
   async function syncOnce(): Promise<void> {
     // Refresh models.dev metadata on every pass (not just startup) so new
     // models and corrected limits appear within one interval, matching
     // OpenCode's hourly cadence.
-    await refreshModelsDevOnline()
+    await refreshModelsDevOnline(reportSyncDiagnostic)
     const settings = ctx.get('settings') as SettingsSeam | undefined
     if (settings === undefined) {
       logger.warn('settings seam absent — skipping sync pass')

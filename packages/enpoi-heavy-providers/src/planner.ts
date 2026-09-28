@@ -69,9 +69,19 @@ export interface HeavyRouteProfile {
   models: Array<{ id: string; name?: string }>
 }
 
-/** Substitute the runner placeholders in one declared string. */
-export function substitute(value: string, home: string): string {
-  return value.replaceAll('{home}', home).replaceAll('{config}', join(home, '.config'))
+/**
+ * Substitute the runner placeholders in one declared string.
+ * @param value - the declared command or cwd.
+ * @param home - the user home (`{home}`; `{config}` is its `.config`).
+ * @param dshHome - the DSH home (`{dshHome}`); defaults to the standard
+ *   `<home>/.dsh` when omitted.
+ * @returns the string with every placeholder expanded.
+ */
+export function substitute(value: string, home: string, dshHome?: string): string {
+  return value
+    .replaceAll('{home}', home)
+    .replaceAll('{config}', join(home, '.config'))
+    .replaceAll('{dshHome}', dshHome ?? join(home, '.dsh'))
 }
 
 /** The base URL a mode points the route at. */

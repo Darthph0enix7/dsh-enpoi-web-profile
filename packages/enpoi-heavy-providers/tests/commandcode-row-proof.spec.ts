@@ -31,7 +31,7 @@ it('prints the served commandcode row and its settings readiness', () => {
     reuseNote: manifest.reuse.note,
     localBaseURL: manifest.local.baseURL,
     installSteps: manifest.local.install.default.steps.length,
-    removalStep: manifest.removal.steps[0]?.command.split('/').at(-1),
+    removalStep: manifest.removal.steps[0]?.command.replaceAll('"', '').split('/').at(-1),
     auth: manifest.auth,
     unsupported: manifest.unsupported,
     problems: manifestProblems(),

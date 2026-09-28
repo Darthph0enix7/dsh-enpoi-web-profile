@@ -3,7 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   describeSyncFailure,
   discoveredCachePath,
@@ -12,7 +12,11 @@ import {
   mergeConfiguredModels,
   mergeDiscoveredModels,
   mergeDiscoveredRoute,
+  modelsDevCachePath,
   normalizeListingEntry,
+  osCacheDir,
+  refreshModelsDevOnline,
+  resolveDshHome,
   writeDiscoveredRoute,
 } from '../src/index.ts'
 
@@ -20,6 +24,7 @@ const servers: Server[] = []
 const directories: string[] = []
 
 afterEach(async () => {
+  vi.unstubAllGlobals()
   Reflect.deleteProperty(process.env, 'DSH_DISCOVERED_MODELS')
   await Promise.all(servers.splice(0).map(server => new Promise(resolve => server.close(resolve))))
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
@@ -187,5 +192,42 @@ describe('honest fallbacks', () => {
   it('knows which routes the installed catalog already describes', () => {
     expect(isCatalogRoute('deepseek')).toBe(true)
     expect(isCatalogRoute('kilo')).toBe(false)
+  })
+})
+
+describe('portable paths and refresh diagnostics', () => {
+  it('derives the OpenCode models cache from the OS cache dir, never a literal home', () => {
+    expect(osCacheDir({ XDG_CACHE_HOME: '/xdg/cache', HOME: '/users/jo' }, 'linux')).toBe('/xdg/cache')
+    expect(modelsDevCachePath({ XDG_CACHE_HOME: '/xdg/cache', HOME: '/users/jo' }, 'linux')).toBe(join('/xdg/cache', 'opencode', 'models.json'))
+    expect(modelsDevCachePath({ HOME: '/users/jo' }, 'linux')).toBe(join('/users/jo', '.cache', 'opencode', 'models.json'))
+    expect(modelsDevCachePath({ HOME: '/Users/jo' }, 'darwin')).toBe(join('/Users/jo', 'Library', 'Caches', 'opencode', 'models.json'))
+    expect(modelsDevCachePath({ LOCALAPPDATA: 'C:\\Users\\jo\\AppData\\Local' }, 'win32')).toBe(join('C:\\Users\\jo\\AppData\\Local', 'opencode', 'models.json'))
+    expect(JSON.stringify(modelsDevCachePath({ HOME: '/users/jo' }, 'linux'))).not.toContain('/home/')
+  })
+
+  it('resolves DSH home from DSH_HOME, then the real home, without assuming a user name', () => {
+    expect(resolveDshHome({ DSH_HOME: '/srv/dsh', HOME: '/users/jo' }, 'linux')).toBe('/srv/dsh')
+    expect(resolveDshHome({ HOME: '/users/jo' }, 'linux')).toBe(join('/users/jo', '.dsh'))
+    expect(resolveDshHome({ USERPROFILE: 'C:\\Users\\jo' }, 'win32')).toBe(join('C:\\Users\\jo', '.dsh'))
+    expect(discoveredCachePath()).toBe(join(resolveDshHome(), 'cache', 'discovered-models.json'))
+  })
+
+  it('reports a coded incident and keeps serving when the online refresh fails', async () => {
+    const calls: Array<{ kind: string; message: string }> = []
+    vi.stubGlobal('fetch', async () => { throw new Error('network down') })
+    await refreshModelsDevOnline((kind, message) => { calls.push({ kind, message }) })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.kind).toBe('provider-sync/models-dev-fetch')
+    expect(calls[0]?.message).toContain('network down')
+    expect(calls[0]?.message).toContain('local cache kept')
+  })
+
+  it('reports a non-OK status instead of swallowing it', async () => {
+    const calls: Array<{ kind: string; message: string }> = []
+    vi.stubGlobal('fetch', async () => ({ ok: false, status: 503, json: async () => ({}) }))
+    await refreshModelsDevOnline((kind, message) => { calls.push({ kind, message }) })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.kind).toBe('provider-sync/models-dev-fetch')
+    expect(calls[0]?.message).toContain('HTTP 503')
   })
 })

@@ -35,15 +35,16 @@ export const inject: string[] = []
  * declared command verbatim; the runner itself carries no per-provider logic.
  * @param ctx - plugin context holding the subprocess service.
  * @param step - the manifest step.
- * @param home - placeholder base.
+ * @param home - `{home}`/`{config}` placeholder base.
+ * @param dshHome - `{dshHome}` placeholder base (the real `$DSH_HOME`).
  * @returns the exit code and bounded output tail.
  */
-async function runStep(ctx: Context, step: HeavyStep, home: string): Promise<StepOutcome> {
+async function runStep(ctx: Context, step: HeavyStep, home: string, dshHome: string): Promise<StepOutcome> {
   const subprocess = ctx.get('subprocess') as SubprocessRuntime | undefined
   if (subprocess === undefined) throw new Error('subprocess seam absent — cannot run install steps')
   const handle = subprocess.spawn({
-    argv: ['/bin/bash', '-lc', substitute(step.command, home)],
-    cwd: step.cwd === undefined ? home : substitute(step.cwd, home),
+    argv: ['/bin/bash', '-lc', substitute(step.command, home, dshHome)],
+    cwd: step.cwd === undefined ? home : substitute(step.cwd, home, dshHome),
     stdio: {
       stdin: 'ignore',
       stdout: { maxBytes: 65_536 },
@@ -74,7 +75,7 @@ export function apply(ctx: Context): void {
   }
   const jobs = new HeavyJobManager({
     dir: join(dshHome, 'cache', 'heavy-jobs'),
-    run: step => runStep(ctx, step, home),
+    run: step => runStep(ctx, step, home, dshHome),
   })
   new HeavyProvidersService(ctx, {
     deps: () => ({
@@ -83,7 +84,7 @@ export function apply(ctx: Context): void {
       settings: ctx.get('settings') as SettingsSeam | undefined,
       credentials: ctx.get('credentials') as CredentialsSeam | undefined,
       fetchImpl: globalThis.fetch as unknown as FetchLike,
-      runStep: step => runStep(ctx, step, home),
+      runStep: step => runStep(ctx, step, home, dshHome),
     }),
     jobs,
     log: line => logger.info(`[enpoi-heavy-providers] ${line}`),

@@ -5,6 +5,7 @@
  */
 import { expect, it } from 'vitest'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall } from '../src/manifests.js'
+import { substitute } from '../src/planner.js'
 
 it('declares the three heavy providers with no structural problems', () => {
   expect(manifestProblems()).toEqual([])
@@ -119,4 +120,42 @@ it('freellmapi installs are platform-keyed and fall back to the Docker path', ()
   const unknown = resolveHeavyInstall(local, 'freebsd')
   expect(unknown.label).toBe(local.label)
   expect(unknown.steps[0]!.command).toContain('git clone')
+})
+
+it('exposes {dshHome} substitution, never a literal ~/.dsh path', () => {
+  expect(substitute('node {dshHome}/profiles/web/x.mjs {config}/y', '/users/jo', '/srv/dsh'))
+    .toBe('node /srv/dsh/profiles/web/x.mjs /users/jo/.config/y')
+  // Without an explicit DSH home the standard <home>/.dsh layout is used.
+  expect(substitute('{dshHome}/cache', '/users/jo')).toBe('/users/jo/.dsh/cache')
+  const commands = manifestById('commandcode')!.local.install.default.steps.map(step => step.command).join('\n')
+  expect(commands).not.toContain('{home}/.dsh')
+  expect(commands).toContain('{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs')
+  const removal = manifestById('commandcode')!.removal.steps.map(step => step.command).join('\n')
+  expect(removal).not.toContain('{home}/.dsh')
+  expect(removal).toContain('{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs')
+})
+
+it('never hard-requires the dotfiles repo: the keypool proxy step is optional and self-skipping', () => {
+  const proxy = manifestById('commandcode')!.local.install.default.steps
+    .find(step => step.command.includes('keypool/proxy.js'))
+  expect(proxy?.optional).toBe(true)
+  expect(proxy?.command).toContain('exit 0')
+  expect(proxy?.command).toContain('skipping')
+})
+
+it('flags an install variant whose declared runtime contradicts its steps', () => {
+  const antigravity = manifestById('antigravity')!
+  const dockerDeclared = {
+    ...antigravity,
+    local: { ...antigravity.local, runtime: 'docker' as const },
+  }
+  expect(manifestProblems([dockerDeclared]).join('\n')).toContain('declares runtime "docker" but its steps invoke node tooling instead')
+  const freellmapi = manifestById('freellmapi')!
+  const nodeDeclared = {
+    ...freellmapi,
+    local: { ...freellmapi.local, runtime: 'node' as const },
+  }
+  expect(manifestProblems([nodeDeclared]).join('\n')).toContain('declares runtime "node" but its steps invoke docker tooling instead')
+  // ...and the shipped table stays clean.
+  expect(manifestProblems()).toEqual([])
 })

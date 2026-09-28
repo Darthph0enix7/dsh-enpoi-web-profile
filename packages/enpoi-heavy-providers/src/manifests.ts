@@ -23,8 +23,10 @@ export interface HeavyStep {
   /** Human stage label shown in the progress UI. */
   label: string
   /**
-   * Shell command executed with `bash -lc`. `{home}` and `{config}` are
-   * substituted by the runner (`{config}` = `$HOME/.config`).
+   * Shell command executed with `bash -lc`. `{home}`, `{config}` (=
+   * `$HOME/.config`), and `{dshHome}` (the real `$DSH_HOME`) are substituted
+   * by the runner. Paths under the DSH home must use `{dshHome}`, never a
+   * literal `~/.dsh` layout.
    */
   command: string
   /** Working directory override (placeholders allowed); defaults to `$HOME`. */
@@ -180,6 +182,18 @@ export interface HeavyProviderManifest {
  * an unparseable profile into the llm-pi-ai section.
  */
 const LLM_PI_AI_PROTOCOLS: readonly string[] = ['openai-completions', 'openai-responses', 'anthropic-messages']
+
+/**
+ * The shell tooling each local runtime's steps are expected to invoke. A
+ * variant whose declared runtime names one of these but whose steps never
+ * call it — while calling another runtime's tooling — is mislabeled.
+ * `vendor-app` installers (curl/hdiutil/open/cmd) have no single signature.
+ */
+const RUNTIME_TOOL_RE: Readonly<Partial<Record<HeavyLocalRuntime, RegExp>>> = {
+  docker: /\bdocker(?:-compose|\s+compose)?\b/,
+  podman: /\bpodman\b/,
+  node: /\b(?:node|npm|npx|pnpm|yarn)\b/,
+}
 
 /** The three heavy providers v1 ships. */
 export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
@@ -433,9 +447,16 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       install: {
         default: {
           steps: [
-            { label: 'Build and link the DSH provider package', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs {home}/.dsh/profiles/web', weight: 3 },
-            { label: 'Seed the commandcode pool in pools.json', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs' },
-            { label: 'Deploy the keypool proxy from dotfiles', command: 'test -f {home}/dotfiles/opencode-dotfiles/keypool/proxy.js || { echo "keypool proxy.js not found — sync dotfiles (opencode-dotfiles/keypool) first"; exit 1; }; install -Dm644 {home}/dotfiles/opencode-dotfiles/keypool/proxy.js {config}/opencode/keypool/proxy.js' },
+            { label: 'Build and link the DSH provider package', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
+            { label: 'Seed the commandcode pool in pools.json', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
+            {
+              label: 'Deploy the keypool proxy from dotfiles (optional)',
+              // A dotfiles checkout is not required: the step looks in the
+              // DSH-home and home dotfiles layouts, and skips with guidance
+              // instead of failing the install when neither exists.
+              optional: true,
+              command: 'src=""; for candidate in "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js" "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"; do if test -f "$candidate"; then src="$candidate"; break; fi; done; if test -z "$src"; then echo "keypool proxy.js not found (searched the dotfiles layouts under DSH_HOME and HOME) — skipping; place proxy.js at {config}/opencode/keypool/proxy.js or install opencode-dotfiles, then re-run this step"; exit 0; fi; install -Dm644 "$src" {config}/opencode/keypool/proxy.js',
+            },
             {
               label: 'Write the keypool systemd user unit',
               command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<\'EOF\'\n[Unit]\nDescription=OpenCode KeyPool — multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc \'exec node %h/.config/opencode/keypool/proxy.js\'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF',
@@ -455,7 +476,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
         // Drops only the commandcode pool entry; the keypool rereads pools.json
         // per request, so the shared service (and the `go` pool) is never
         // stopped, restarted, or otherwise touched.
-        { label: 'Drop only pools.commandcode (keypool and other pools stay)', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs', optional: true },
+        { label: 'Drop only pools.commandcode (keypool and other pools stay)', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs"', optional: true },
       ],
       warnings: [
         'Removal drops only DSH state and the commandcode pool keys — it never stops or removes the shared keypool service (other tools may need it)',
@@ -503,6 +524,19 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
       if (variant === undefined) continue
       if (variant.steps.length === 0 && manifest.unsupported === undefined) {
         problems.push(`${where}: platform install variant ${String(index)} has no steps`)
+      }
+      // The declared runtime must match the tooling the steps invoke: a
+      // docker-runtime variant whose steps are npm installs (or vice versa)
+      // installs under the wrong dependency banner, so it is rejected.
+      const runtime = variant.runtime ?? manifest.local.runtime
+      const declared = runtime === undefined ? undefined : RUNTIME_TOOL_RE[runtime]
+      if (declared === undefined || variant.steps.length === 0) continue
+      const commands = variant.steps.map(step => step.command).join('\n')
+      if (declared.test(commands)) continue
+      const conflicting = (Object.keys(RUNTIME_TOOL_RE) as HeavyLocalRuntime[])
+        .filter(other => other !== runtime && RUNTIME_TOOL_RE[other]?.test(commands) === true)
+      if (conflicting.length > 0) {
+        problems.push(`${where}: platform install variant ${String(index)} declares runtime "${String(runtime)}" but its steps invoke ${conflicting.join('/')} tooling instead`)
       }
     }
     if (manifest.settingsNs !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(manifest.settingsNs)) {
