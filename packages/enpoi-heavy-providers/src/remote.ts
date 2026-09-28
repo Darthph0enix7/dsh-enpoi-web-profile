@@ -23,15 +23,18 @@ import {
   healthForBase,
   modeBaseURL,
   overlayManifest,
+  pendingRestartForManifest,
   probeHealth,
   readServerOverlay,
   removeProvider,
   routeSettingsNs,
+  settingsNamespaceReady,
   storeCredential,
   useDetectedInstance,
   writeRoute,
   type HeavyDeps,
   type LocalPathChoice,
+  type PendingRestart,
   type RemovalSummary,
   type ReuseOutcome,
   type RuntimeProbe,
@@ -64,11 +67,17 @@ export interface ManifestsValue {
 /** `enpoiHeavy.status` result. */
 export interface StatusValue {
   id: string
+  /** The effective host manifest (overlay applied) the client renders this row from. */
+  manifest: HeavyProviderManifest
   configured: boolean
   mode?: 'reuse' | 'local'
   health: { ok: boolean; status?: number; error?: string; checkedAt: number }
   /** The host platform install steps execute on (`process.platform`). */
   platform: string
+  /** Settings namespace the route profile is written to (`llm-pi-ai` by default). */
+  settingsNs: string
+  /** Whether that namespace is mounted in the running profile; absent when unknown. */
+  settingsReady?: boolean
   /** Loopback port an already-running instance answered on, when one did. */
   detectedPort?: number
   /** Address the detection found; the UI's "running at — use it" offer. */
@@ -85,6 +94,8 @@ export interface StatusValue {
 export interface ReuseValue extends Partial<ReuseOutcome> {
   ok: boolean
   blocked?: { reason: string; plannedWith: string }
+  /** Route namespace absent from the running profile: the write waits for a restart. */
+  pendingRestart?: PendingRestart
 }
 
 /** `enpoiHeavy.install` result. */
@@ -180,7 +191,8 @@ export class HeavyProvidersService extends TypertRemoteService {
   async status(request: { id?: unknown }): Promise<StatusValue> {
     const manifest = this.effectiveManifest(requireManifest(request?.id))
     const deps = this.options.deps()
-    const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest))
+    const settingsNs = routeSettingsNs(manifest)
+    const profile = configuredProfile(deps, manifest.id, settingsNs)
     const configured = profile !== undefined
     const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
     const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
@@ -190,9 +202,13 @@ export class HeavyProvidersService extends TypertRemoteService {
     const health = configuredBase === undefined
       ? detection.health
       : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
+    const settingsReady = settingsNamespaceReady(deps, settingsNs)
     const job = this.options.jobs.snapshot(manifest.id)
     return {
       id: manifest.id,
+      manifest,
+      settingsNs,
+      ...settingsReady === undefined ? {} : { settingsReady },
       configured,
       ...mode === undefined ? {} : { mode },
       health,
@@ -219,7 +235,16 @@ export class HeavyProvidersService extends TypertRemoteService {
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
-    const outcome = await useDetectedInstance(this.options.deps(), manifest, key)
+    const deps = this.options.deps()
+    // The route namespace of a custom-protocol provider (commandcode) only
+    // exists once its adapter plugin is part of the built profile: surface the
+    // ordering fact before attempting a write that would fail at mutate.
+    const pendingRestart = pendingRestartForManifest(deps, manifest)
+    if (pendingRestart !== undefined) {
+      this.options.log?.(`reuse ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
+      return { ok: false, pendingRestart }
+    }
+    const outcome = await useDetectedInstance(deps, manifest, key)
     this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? 'ok' : 'down'} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`)
     return { ok: true, ...outcome }
   }

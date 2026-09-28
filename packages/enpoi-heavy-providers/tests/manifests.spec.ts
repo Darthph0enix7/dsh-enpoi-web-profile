@@ -80,6 +80,15 @@ it('commandcode removal drops only the commandcode pool, never the shared keypoo
   expect(text).toContain('usage.jsonl')
 })
 
+it('commandcode descriptions keep the keypool, package, removal, and quota facts', () => {
+  const quirks = manifestById('commandcode')?.quirks.join('\n') ?? ''
+  expect(quirks).toContain('Proxy use detected')
+  expect(quirks).toContain('dsh-enpoi-commandcode-provider')
+  expect(quirks).toContain('never stop or remove the shared keypool service')
+  expect(quirks).toContain('QUOTA failure')
+  expect(manifestById('commandcode')?.reuse.note).toContain('provider package')
+})
+
 it('freellmapi installs are platform-keyed and fall back to the Docker path', () => {
   const local = manifestById('freellmapi')!.local
   const linux = resolveHeavyInstall(local, 'linux')

@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790593815706
+        checkedAt: 1790595558091
     personas:
       oracle: null
       fixer: null
@@ -5569,7 +5569,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.128
+              input: 0.22592
               output: 1.9584
             reasoningEfforts:
               low: low
@@ -12714,15 +12714,11 @@
             input:
               - text
               - image
-            compat:
-              chatTemplateKwargs: {}
-              chatTemplateArgs: {}
             reasoning: false
             tools: true
             cost:
               input: 0.05
               output: 0.1
-            source: configured
           - id: deepseek-ai/DeepSeek-V4-Flash
             name: DeepSeek V4 Flash
             contextWindow: 1048576
@@ -18086,7 +18082,7 @@
             reasoning: true
             tools: true
             cost:
-              input: 0.128
+              input: 0.22592
               output: 1.9584
             reasoningEfforts:
               low: low

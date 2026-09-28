@@ -449,6 +449,49 @@ export function routeSettingsNs(manifest: HeavyProviderManifest): string {
   return manifest.settingsNs ?? LLM_NS
 }
 
+/** A route namespace the running profile has not mounted yet. */
+export interface PendingRestart {
+  /** The settings namespace the route profile needs. */
+  ns: string
+  /** Operator-facing ordering message; the client renders it verbatim. */
+  message: string
+}
+
+/**
+ * The clear ordering message for a route namespace that only exists after the
+ * profile is built and the service restarted.
+ * @param ns - the settings namespace the route must be written to.
+ * @returns the operator-facing message.
+ */
+export function pendingRestartMessage(ns: string): string {
+  return `Available after the next restart — the "${ns}" settings namespace is not registered in the running profile yet (build the profile, then restart the service).`
+}
+
+/**
+ * Whether one settings namespace is mounted in the running profile.
+ * @param deps - host seams.
+ * @param ns - settings namespace to look up.
+ * @returns the settings describe verdict, or undefined when the seam cannot say.
+ */
+export function settingsNamespaceReady(deps: HeavyDeps, ns: string): boolean | undefined {
+  const settings = deps.settings
+  if (settings === undefined || settings.describe === undefined) return undefined
+  return settings.describe().some(entry => entry.ns === ns)
+}
+
+/**
+ * The pending-restart guard for one manifest: present only when the settings
+ * describe proves the route namespace is absent, so the route write would
+ * fail at `settings.mutate` with an error the operator cannot act on.
+ * @param deps - host seams.
+ * @param manifest - heavy manifest.
+ * @returns the guard, or undefined when the write may proceed.
+ */
+export function pendingRestartForManifest(deps: HeavyDeps, manifest: HeavyProviderManifest): PendingRestart | undefined {
+  const ns = routeSettingsNs(manifest)
+  return settingsNamespaceReady(deps, ns) === false ? { ns, message: pendingRestartMessage(ns) } : undefined
+}
+
 /** The route profile already configured for one id, when any. */
 export function configuredProfile(
   deps: HeavyDeps,

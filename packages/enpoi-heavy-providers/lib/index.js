@@ -458,7 +458,8 @@ var HEAVY_MANIFESTS = [
       "DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it",
       "The keypool may be shared with other tools \u2014 never stop or remove the shared keypool service when removing this provider",
       "The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI",
-      "The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer \u2014 clients must not duplicate it"
+      "The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer \u2014 clients must not duplicate it",
+      'Quota is per key and real: the keypool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled key is spent \u2014 a normal state, not a routing defect'
     ],
     reuse: {
       label: "Use a detected instance",
@@ -763,6 +764,18 @@ function readNamespace(settings, ns) {
 function routeSettingsNs(manifest) {
   return manifest.settingsNs ?? LLM_NS;
 }
+function pendingRestartMessage(ns) {
+  return `Available after the next restart \u2014 the "${ns}" settings namespace is not registered in the running profile yet (build the profile, then restart the service).`;
+}
+function settingsNamespaceReady(deps, ns) {
+  const settings = deps.settings;
+  if (settings === void 0 || settings.describe === void 0) return void 0;
+  return settings.describe().some((entry) => entry.ns === ns);
+}
+function pendingRestartForManifest(deps, manifest) {
+  const ns = routeSettingsNs(manifest);
+  return settingsNamespaceReady(deps, ns) === false ? { ns, message: pendingRestartMessage(ns) } : void 0;
+}
 function configuredProfile(deps, id, settingsNs = LLM_NS) {
   const section = readNamespace(deps.settings, settingsNs);
   const providers = section?.providers;
@@ -988,7 +1001,8 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
   async status(request) {
     const manifest = this.effectiveManifest(requireManifest(request?.id));
     const deps = this.options.deps();
-    const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest));
+    const settingsNs = routeSettingsNs(manifest);
+    const profile = configuredProfile(deps, manifest.id, settingsNs);
     const configured = profile !== void 0;
     const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
     const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";
@@ -996,9 +1010,13 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     const runtime = await this.runtime();
     const preflight = chooseLocalPath(manifest, process.platform, runtime, detection.ok ? detection.port : void 0);
     const health = configuredBase === void 0 ? detection.health : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl);
+    const settingsReady = settingsNamespaceReady(deps, settingsNs);
     const job = this.options.jobs.snapshot(manifest.id);
     return {
       id: manifest.id,
+      manifest,
+      settingsNs,
+      ...settingsReady === void 0 ? {} : { settingsReady },
       configured,
       ...mode === void 0 ? {} : { mode },
       health,
@@ -1017,7 +1035,13 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
     }
-    const outcome = await useDetectedInstance(this.options.deps(), manifest, key);
+    const deps = this.options.deps();
+    const pendingRestart = pendingRestartForManifest(deps, manifest);
+    if (pendingRestart !== void 0) {
+      this.options.log?.(`reuse ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`);
+      return { ok: false, pendingRestart };
+    }
+    const outcome = await useDetectedInstance(deps, manifest, key);
     this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? "ok" : "down"} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`);
     return { ok: true, ...outcome };
   }

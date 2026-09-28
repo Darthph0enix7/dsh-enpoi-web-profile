@@ -409,6 +409,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       'The keypool may be shared with other tools — never stop or remove the shared keypool service when removing this provider',
       'The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI',
       'The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer — clients must not duplicate it',
+      'Quota is per key and real: the keypool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled key is spent — a normal state, not a routing defect',
     ],
     reuse: {
       label: 'Use a detected instance',
