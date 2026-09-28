@@ -236,6 +236,38 @@ function sortGroupIds(ids: Iterable<string>): string[] {
 }
 
 /**
+ * Council seat label prefixes that do not follow the `<seat> seat:` shape.
+ * The spawning engine authors every one of these server-side (never model
+ * input), so the mapping is the honest seat identity of the child.
+ */
+const COUNCIL_LABEL_SEATS: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
+  [/^council chair:/i, 'chair'],
+  [/^council referee:/i, 'referee'],
+  [/^council broker:/i, 'broker'],
+])
+
+/**
+ * The seat id a delegated child's `subagent/descriptor` label carries, when it
+ * names one. `roundtable seat: pragmatist` → `pragmatist`; the council's
+ * chair/referee/broker labels map to their seat ids. An unrecognized label
+ * (generic delegation) answers undefined so the caller keeps the mount seat.
+ * @param label - the descriptor label authored by the spawning tool.
+ * @returns the lowercase seat id, or undefined when the label names none.
+ */
+export function seatOfDescriptorLabel(label: string | undefined): string | undefined {
+  if (typeof label !== 'string') return undefined
+  const trimmed = label.trim()
+  if (trimmed === '') return undefined
+  // The spawning engine labels debater seats `<council id> seat: <seat id>`.
+  const seat = /^[a-z0-9][a-z0-9-]*\s+seat:\s*([a-z0-9][a-z0-9-]*)$/i.exec(trimmed)
+  if (seat !== null && seat[1] !== undefined) return seat[1].toLowerCase()
+  for (const [pattern, seatId] of COUNCIL_LABEL_SEATS) {
+    if (pattern.test(trimmed)) return seatId
+  }
+  return undefined
+}
+
+/**
  * Tool names the presentation transport owns. `tools.restrict()` refuses a
  * filter that names one, and the transport is inserted outside capability
  * filtering, so a group definition can never remove it.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, SHIPPED_TOOL_GROUPS,
+  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS,
 } from '../src/catalog.js'
 import { applyToolGroupsProjection, toolGroupsProjection } from '../src/projection.js'
 import { apply, TOOL_GROUPS_TOOL } from '../src/index.js'
@@ -50,7 +50,7 @@ function fakeSettings(document: unknown) {
 }
 
 /** Minimal fake agent with a recording session log; `onAppend` mirrors the projection drive. */
-function fakeAgent(id = 'session-1', onAppend?: (type: string, data: any) => void) {
+function fakeAgent(id = 'session-1', onAppend?: (type: string, data: any) => void, descriptorLabel?: string) {
   const appended: Array<{ type: string; data: any; opts: any }> = []
   return {
     id,
@@ -61,6 +61,11 @@ function fakeAgent(id = 'session-1', onAppend?: (type: string, data: any) => voi
         appended.push({ type, data, opts })
         onAppend?.(type, data)
       },
+      ...(descriptorLabel === undefined
+        ? {}
+        : {
+          ownEvents: () => [{ type: 'subagent/descriptor', data: { label: descriptorLabel, persona: 'fake' } }],
+        }),
     },
   }
 }
@@ -91,6 +96,17 @@ function fakeCtx(gets: Record<string, unknown> = {}, options: { toolVisible?: bo
     systemPrompt: { section: (section: any) => { sections.push(section); return () => {} } },
     fire(name: string, ...args: any[]) {
       for (const handler of handlers.get(name) ?? []) handler(...args)
+    },
+    /** Run the real waterfall chain for one event: each listener's `next` is the rest. */
+    async gate(name: string, exec: any) {
+      const list = handlers.get(name) ?? []
+      let index = 0
+      const step = async (): Promise<any> => {
+        const handler = list[index]
+        index += 1
+        return handler === undefined ? { kind: 'allow' } : await handler(exec, step)
+      }
+      return await step()
     },
   }
 }
@@ -460,7 +476,8 @@ describe('tool_groups plugin', () => {
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
     const handlers = ctx.handlers.get('tools/pre-execute') ?? []
-    expect(handlers).toHaveLength(1)
+    // [group hint, per-action meta-tool policy] — the hint is registered first.
+    expect(handlers).toHaveLength(2)
     const run = (name: string) => handlers[0]({ agent, name }, () => Promise.resolve({ kind: 'allow' }))
 
     // Never attached: point at the attach action.
@@ -493,5 +510,82 @@ describe('tool_groups plugin', () => {
     const decision = await handler({ agent, name: 'peer_ask' }, () => Promise.resolve({ kind: 'allow' }))
     expect(decision.kind).toBe('deny')
     expect(decision.reason).toContain('disabled by the operator')
+  })
+})
+
+describe('descriptor seat resolution', () => {
+  it('maps council seat labels to their seat ids and leaves generic labels unnamed', () => {
+    expect(seatOfDescriptorLabel('roundtable seat: pragmatist')).toBe('pragmatist')
+    expect(seatOfDescriptorLabel('chorus seat: Visionary')).toBe('visionary')
+    expect(seatOfDescriptorLabel('council chair: roundtable')).toBe('chair')
+    expect(seatOfDescriptorLabel('council referee: epoch 2')).toBe('referee')
+    expect(seatOfDescriptorLabel('council broker: 4 questions (epoch 2)')).toBe('broker')
+    expect(seatOfDescriptorLabel('fixer: patch the retry loop')).toBeUndefined()
+    expect(seatOfDescriptorLabel(undefined)).toBeUndefined()
+    expect(seatOfDescriptorLabel('')).toBeUndefined()
+  })
+})
+
+describe('tool_groups per-action policy', () => {
+  /** The downstream capability ask the policy layer must (or must not) reach. */
+  function downstream(ctx: ReturnType<typeof mount>['ctx']) {
+    const state = { asked: 0 }
+    ctx.on('tools/pre-execute', () => {
+      state.asked += 1
+      return Promise.resolve({ kind: 'ask', reason: 'unconfigured tool tool_groups requires approval (default)' })
+    })
+    return state
+  }
+
+  it('allows list without reaching the downstream ask — root and child', async () => {
+    const { ctx } = mount()
+    const asked = downstream(ctx)
+    const root = fakeAgent('root-1')
+    const child = fakeAgent('child-1', undefined, 'roundtable seat: pragmatist')
+    for (const agent of [root, child]) {
+      const decision = await ctx.gate('tools/pre-execute', { name: 'tool_groups', arguments: { action: 'list' }, agent })
+      expect(decision).toEqual({ kind: 'allow' })
+    }
+    expect(asked.asked).toBe(0)
+  })
+
+  it('defers attach of a non-declared group to the downstream ask (forwarded normally)', async () => {
+    const { ctx } = mount({ document: { toolGroups: { seats: { pragmatist: { preAttach: [] } } } } })
+    const asked = downstream(ctx)
+    const child = fakeAgent('child-1', undefined, 'roundtable seat: pragmatist')
+    const decision = await ctx.gate('tools/pre-execute', {
+      name: 'tool_groups', arguments: { action: 'attach', group: 'debug' }, agent: child,
+    })
+    expect(asked.asked).toBe(1)
+    expect(decision.kind).toBe('ask')
+    expect(decision.reason).toContain('unconfigured tool tool_groups requires approval')
+  })
+
+  it('allows attach/detach of a declared group without reaching the downstream ask', async () => {
+    const { ctx } = mount({ document: { toolGroups: { seats: { broker: { preAttach: ['debug'] } } } } })
+    const asked = downstream(ctx)
+    const broker = fakeAgent('child-2', undefined, 'council broker: 2 questions (epoch 1)')
+    for (const action of ['attach', 'detach'] as const) {
+      const decision = await ctx.gate('tools/pre-execute', {
+        name: 'tool_groups', arguments: { action, group: 'debug' }, agent: broker,
+      })
+      expect(decision).toEqual({ kind: 'allow' })
+    }
+    expect(asked.asked).toBe(0)
+  })
+
+  it('starts a declared seat with its group attached and the rest denied', () => {
+    const { ctx, installer } = mount({ document: { toolGroups: { seats: { broker: { preAttach: ['debug'] } } } } })
+    const broker = fakeAgent('child-3', undefined, 'council broker: 1 question (epoch 1)')
+    ctx.fire('agent/created', { agent: broker, source: 'fresh' })
+    expect(installer.live()?.sort()).toEqual([...PEER].sort())
+    expect(installer.live()).not.toContain('session_search')
+  })
+
+  it('keeps the other seats on the base on-demand surface', () => {
+    const { ctx, installer } = mount({ document: { toolGroups: { seats: { broker: { preAttach: ['debug'] } } } } })
+    const debater = fakeAgent('child-4', undefined, 'roundtable seat: skeptic')
+    ctx.fire('agent/created', { agent: debater, source: 'fresh' })
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
   })
 })

@@ -830,6 +830,38 @@ function evaluateToolCall(toolName, args, state, mcpCatalog) {
 init_policy();
 init_mcp_tools();
 
+// src/prompt-honesty.ts
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function mentionsTool(text, name2) {
+  if (name2.length === 0) return false;
+  const escaped = escapeRegExp(name2);
+  if (name2.includes("_")) return new RegExp(`(?<![\\w])${escaped}(?![\\w])`).test(text);
+  return new RegExp(
+    `\`${escaped}\`|\\btools?\\s+${escaped}\\b|\\b${escaped}\\s+(?:tools?|calls?)\\b|\\b(?:use|uses|using|call|calls|calling|invoke|invokes|with)\\s+\`?${escaped}\`?\\b`
+  ).test(text);
+}
+function stripUnavailableToolGuidance(sections, advertised, vocabulary) {
+  const unavailable = [...vocabulary].filter((name2) => name2.length > 0 && !advertised.has(name2));
+  if (unavailable.length === 0) return [...sections];
+  const keptSections = [];
+  for (const section of sections) {
+    const own = section.name.startsWith("tool:") ? section.name.slice("tool:".length) : void 0;
+    if (own !== void 0 && vocabulary.has(own) && !advertised.has(own)) continue;
+    const paragraphs = section.text.split(/\n\s*\n/);
+    const keptParagraphs = paragraphs.filter((paragraph) => !unavailable.some((name2) => mentionsTool(paragraph, name2)));
+    if (keptParagraphs.length === paragraphs.length) {
+      keptSections.push(section);
+      continue;
+    }
+    const text = keptParagraphs.join("\n\n");
+    if (text.trim() === "") continue;
+    keptSections.push({ ...section, text });
+  }
+  return keptSections;
+}
+
 // src/search-nudge.ts
 var SEARCH_LEADING = /^\s*(?:sudo\s+)?(?:rg|grep|find|fd|ls)\b/u;
 var SEARCH_NUDGE_TEXT = "Search hint: this turn has not used the grep or glob tool. For the next search, prefer grep/glob \u2014 they return structured, cheaper results than a shell search; keep bash for pipelines and anything the dedicated tools cannot express.";
@@ -1676,7 +1708,7 @@ function apply(ctx, config = {}) {
   ctx.effect(() => disposeGuard, "enpoi-capabilities: tool guard");
   const disposeAssemble = ctx.on("system-prompt/assemble", (async (_assembly, context, next) => {
     const assembled = await next();
-    if (!Array.isArray(assembled.tools) || assembled.tools.length === 0) return assembled;
+    if (!Array.isArray(assembled.tools)) return assembled;
     const state = initialCapabilitiesState(getGlobalDefaults());
     const disabled = new Set(
       Object.entries(state.tools).filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id)).map(([id]) => id)
@@ -1693,8 +1725,13 @@ function apply(ctx, config = {}) {
       }));
       kept = kept.filter((tool) => advertise.has(tool.name));
     }
-    if (kept === assembled.tools) return assembled;
-    return { ...assembled, tools: kept };
+    const vocabulary = new Set(ctx.tools.schemas().map((tool) => tool.name));
+    const advertised = new Set(kept.map((tool) => tool.name));
+    const sections = Array.isArray(assembled.sections) ? stripUnavailableToolGuidance(assembled.sections, advertised, vocabulary) : assembled.sections;
+    const toolsChanged = kept !== assembled.tools;
+    const sectionsChanged = sections !== void 0 && sections !== assembled.sections;
+    if (!toolsChanged && !sectionsChanged) return assembled;
+    return { ...assembled, tools: kept, sections };
   }));
   ctx.effect(() => disposeAssemble, "enpoi-capabilities: tool schema strip");
   import("@deepseek-ai/dsh-mcp-client").then(async (mcpClient) => {

@@ -129,3 +129,56 @@ describe('real composition: scope filter + plugin', () => {
     }
   })
 })
+
+describe('real composition: per-action meta-tool policy ordering', () => {
+  it('list short-circuits a pre-registered ask layer; an undeclared attach reaches it', async () => {
+    const ctx = await setup()
+    try {
+      // Simulates the capability policy layer, registered BEFORE the plugin
+      // mounts (the production order). `prepend` must put the plugin's allow
+      // ahead of it or the ask would win for every action.
+      let asked = 0
+      ctx.on('tools/pre-execute', (_exec: unknown, _next: unknown) => {
+        asked += 1
+        return Promise.resolve({ kind: 'ask', reason: 'unconfigured tool tool_groups requires approval (default)' })
+      })
+      const projections = { stateOf: () => ({ attached: null }) }
+      const settings = {
+        get: (ns: string) => (ns === 'enpoi-orchestration'
+          ? { toolGroups: { seats: { broker: { preAttach: ['debug'] } } } }
+          : undefined),
+      }
+      await ctx.plugin({
+        name: 'tool-groups-policy-probe',
+        inject: ['tools', 'systemPrompt'],
+        apply(probeCtx: any) { apply(probeCtx, { seat: 'orchestrator' }, { projections, settings, log: () => {} }) },
+      } as never)
+      const agent = {
+        id: 'agent-policy',
+        session: {
+          id: 'session-policy',
+          append: () => {},
+          ownEvents: () => [{ type: 'subagent/descriptor', data: { label: 'roundtable seat: pragmatist' } }],
+        },
+      }
+      const call = (callId: string, args: Record<string, unknown>) => ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: callId as never,
+        name: 'tool_groups',
+        arguments: args,
+        agent: agent as never,
+      })
+
+      const listed = await call('c-list', { action: 'list' })
+      expect(listed.isError).toBe(false)
+      expect(asked).toBe(0)
+
+      const attached = await call('c-attach', { action: 'attach', group: 'peer' })
+      expect(asked).toBe(1)
+      expect(attached.isError).toBe(true)
+      expect(JSON.stringify(attached.content)).toContain('unconfigured tool tool_groups requires approval')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})

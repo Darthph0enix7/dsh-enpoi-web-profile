@@ -29,7 +29,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
-  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups,
+  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel,
   type ResolvedToolGroups,
 } from './catalog.js'
 import { toolGroupsProjection, type ToolGroupsProjectionState } from './projection.js'
@@ -277,12 +277,36 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   /** Resolve the catalog hot: operator edits apply to the next ensure. */
   const catalog = (): ResolvedToolGroups => resolveToolGroups(readOrchestrationDocument(settings))
 
+  /**
+   * The seat identity that governs one agent. A delegated child inherits the
+   * PARENT's preset, so the mount config's seat only describes the standing
+   * scope; the child's own `subagent/descriptor` label (authored server-side by
+   * the spawning tool) names its real seat (`roundtable seat: pragmatist`,
+   * `council broker: …`). An unrecognized label falls back to the mount seat.
+   */
+  const seatOfAgent = (agent: Agent): string => {
+    try {
+      const events = (agent.session as {
+        ownEvents?: () => readonly { type?: string; data?: { label?: unknown } }[]
+      }).ownEvents?.() ?? []
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]
+        if (event?.type !== 'subagent/descriptor') continue
+        const label = typeof event.data?.label === 'string' ? event.data.label : undefined
+        return seatOfDescriptorLabel(label) ?? seat
+      }
+    } catch {
+      // An unreadable log is no evidence; the mount seat stays the honest default.
+    }
+    return seat
+  }
+
   /** The durable attached set (projection), or the seat default before any change. */
   const plannedAttached = (agent: Agent, groups: ResolvedToolGroups): readonly string[] | null => {
     if (projections === null) return null
     try {
       const state = projections.stateOf(agent.session, 'toolGroups')
-      return state?.attached ?? preAttachFor(groups, seat)
+      return state?.attached ?? preAttachFor(groups, seatOfAgent(agent))
     } catch {
       return null
     }
@@ -468,6 +492,37 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   })
 
   /**
+   * Per-action policy for the meta-tool: `list` is read-only and never asks;
+   * `attach`/`detach` are state changes that defer to the normal policy (an ask
+   * forwards to the nearest live root) UNLESS the target group is inside the
+   * caller seat's declared pre-attach set — attaching what the seat already
+   * declares is the seat's own behaviour, not new authority. Registered
+   * `prepend` so the allow short-circuits the capability policy's unknown-tool
+   * ask; the operator's capability disable still wins (defer to downstream).
+   */
+  const metaDisabled = (): boolean => {
+    try {
+      const document = readOrchestrationDocument(settings)
+      const capabilities = document?.['capabilities'] as { tools?: Record<string, unknown> } | undefined
+      return capabilities?.tools?.[TOOL_GROUPS_TOOL] === false
+    } catch {
+      return false
+    }
+  }
+
+  const actionPolicy = (exec: ToolExecution): PreToolDecision | undefined => {
+    if (exec.name !== TOOL_GROUPS_TOOL || metaDisabled()) return undefined
+    const parsed = parseAction(exec.arguments)
+    if ('error' in parsed) return undefined
+    if (parsed.action === 'list') return { kind: 'allow' }
+    const agent = exec.agent
+    const groupId = parsed.group
+    if (agent === undefined || groupId === undefined || groupId.length === 0) return undefined
+    const declared = preAttachFor(catalog(), seatOfAgent(agent))
+    return declared.includes(groupId) ? { kind: 'allow' } : undefined
+  }
+
+  /**
    * The hint a call to a not-currently-callable group tool carries instead of a
    * bare `UNKNOWN_TOOL`: pending (attached this turn), never attached, or
    * operator-disabled. Ungrouped, static, and callable names return undefined
@@ -505,6 +560,14 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
     return hint === undefined ? next() : Promise.resolve({ kind: 'deny' as const, reason: hint })
   })
 
+  // Per-action meta-tool policy: registered `prepend` so an allow here runs
+  // BEFORE the capability policy's ask layer (a later listener never runs once
+  // a closer one short-circuits without calling `next`).
+  ctx.on('tools/pre-execute', (exec: ToolExecution, next: () => Promise<PreToolDecision>) => {
+    const decision = actionPolicy(exec)
+    return decision === undefined ? next() : Promise.resolve(decision)
+  }, { prepend: true })
+
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type === 'turn/end') {
       const state = states.get(session.id)
@@ -519,6 +582,6 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   })
 }
 
-export { resolveToolGroups, denyNames, planGroupAction, preAttachFor, renderMenuText, SHIPPED_TOOL_GROUPS } from './catalog.js'
+export { resolveToolGroups, denyNames, planGroupAction, preAttachFor, renderMenuText, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS } from './catalog.js'
 export { toolGroupsProjection, applyToolGroupsProjection } from './projection.js'
 export type { ResolvedToolGroups, ToolGroupDefinition, ToolGroupMode } from './catalog.js'

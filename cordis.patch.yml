@@ -53,7 +53,7 @@
       plane-mcp:
         state: online
         mounted: false
-        checkedAt: 1790580157250
+        checkedAt: 1790583383443
     personas:
       oracle: null
       fixer: null
@@ -1506,6 +1506,21 @@
                 pinnedAt: 1790495558572
                 version: 1
             updatedAt: 1790495558572
+    toolGroups:
+      seats:
+        skeptic:
+          preAttach: []
+        architect:
+          preAttach: []
+        pragmatist:
+          preAttach: []
+        referee:
+          preAttach: []
+        chair:
+          preAttach: []
+        broker:
+          preAttach:
+            - debug
 
 # ── agent presets (merged registry: declarations, not directories) ──────────
 # Our three presets, visible; the shipped standard/ptc/minimal/cordis rows are

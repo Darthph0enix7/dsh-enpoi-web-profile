@@ -29,6 +29,7 @@ import {
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
+import { stripUnavailableToolGuidance } from './prompt-honesty'
 import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
 import {
@@ -264,9 +265,15 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // every call would auto-deny on an unanswerable ask — a granted tool resolves
   // allow and stays visible. The B1 guard stays as the execution-time backstop
   // for in-flight turns.
+  // 1d. Same surface, prompt honesty: the wire list and the prompt TEXT stay in
+  // lockstep — a section may only name a tool the final surface advertises
+  // (the stale `job_output` guidance that burned a council debater four calls).
   const disposeAssemble = ctx.on('system-prompt/assemble', (async (_assembly: unknown, context: unknown, next: () => Promise<unknown>) => {
-    const assembled = (await next()) as { tools?: Array<{ name: string }> }
-    if (!Array.isArray(assembled.tools) || assembled.tools.length === 0) return assembled
+    const assembled = (await next()) as {
+      tools?: Array<{ name: string }>
+      sections?: Array<{ name: string; order: number; text: string; interpolate?: boolean }>
+    }
+    if (!Array.isArray(assembled.tools)) return assembled
     const state = initialCapabilitiesState(getGlobalDefaults())
     const disabled = new Set(
       Object.entries(state.tools)
@@ -285,8 +292,18 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       }))
       kept = kept.filter(tool => advertise.has(tool.name))
     }
-    if (kept === assembled.tools) return assembled
-    return { ...assembled, tools: kept }
+    // The mention dictionary is the whole registry, not the surviving list: a
+    // section naming a REMOVED tool must be pruned too, and the removed name
+    // only exists in the registry view.
+    const vocabulary = new Set(ctx.tools.schemas().map(tool => tool.name))
+    const advertised = new Set(kept.map(tool => tool.name))
+    const sections = Array.isArray(assembled.sections)
+      ? stripUnavailableToolGuidance(assembled.sections, advertised, vocabulary)
+      : assembled.sections
+    const toolsChanged = kept !== assembled.tools
+    const sectionsChanged = sections !== undefined && sections !== assembled.sections
+    if (!toolsChanged && !sectionsChanged) return assembled
+    return { ...assembled, tools: kept, sections }
   }) as (...args: unknown[]) => unknown)
   ctx.effect(() => disposeAssemble, 'enpoi-capabilities: tool schema strip')
 

@@ -182,6 +182,22 @@ function sortGroupIds(ids) {
     return left.localeCompare(right);
   });
 }
+var COUNCIL_LABEL_SEATS = Object.freeze([
+  [/^council chair:/i, "chair"],
+  [/^council referee:/i, "referee"],
+  [/^council broker:/i, "broker"]
+]);
+function seatOfDescriptorLabel(label) {
+  if (typeof label !== "string") return void 0;
+  const trimmed = label.trim();
+  if (trimmed === "") return void 0;
+  const seat = /^[a-z0-9][a-z0-9-]*\s+seat:\s*([a-z0-9][a-z0-9-]*)$/i.exec(trimmed);
+  if (seat !== null && seat[1] !== void 0) return seat[1].toLowerCase();
+  for (const [pattern, seatId] of COUNCIL_LABEL_SEATS) {
+    if (pattern.test(trimmed)) return seatId;
+  }
+  return void 0;
+}
 var RESERVED_PRESENTATION_NAMES = /* @__PURE__ */ new Set(["run_code"]);
 function denyNames(catalog, attached) {
   const denied = [];
@@ -20035,11 +20051,24 @@ function mount(ctx, config2, seams) {
   const states = /* @__PURE__ */ new Map();
   const reportedInert = /* @__PURE__ */ new Set();
   const catalog = () => resolveToolGroups(readOrchestrationDocument(settings));
+  const seatOfAgent = (agent) => {
+    try {
+      const events = agent.session.ownEvents?.() ?? [];
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event?.type !== "subagent/descriptor") continue;
+        const label = typeof event.data?.label === "string" ? event.data.label : void 0;
+        return seatOfDescriptorLabel(label) ?? seat;
+      }
+    } catch {
+    }
+    return seat;
+  };
   const plannedAttached = (agent, groups) => {
     if (projections === null) return null;
     try {
       const state = projections.stateOf(agent.session, "toolGroups");
-      return state?.attached ?? preAttachFor(groups, seat);
+      return state?.attached ?? preAttachFor(groups, seatOfAgent(agent));
     } catch {
       return null;
     }
@@ -20193,6 +20222,26 @@ function mount(ctx, config2, seams) {
     installer.release(agent);
     states.delete(agent.session.id);
   });
+  const metaDisabled = () => {
+    try {
+      const document = readOrchestrationDocument(settings);
+      const capabilities = document?.["capabilities"];
+      return capabilities?.tools?.[TOOL_GROUPS_TOOL] === false;
+    } catch {
+      return false;
+    }
+  };
+  const actionPolicy = (exec) => {
+    if (exec.name !== TOOL_GROUPS_TOOL || metaDisabled()) return void 0;
+    const parsed = parseAction(exec.arguments);
+    if ("error" in parsed) return void 0;
+    if (parsed.action === "list") return { kind: "allow" };
+    const agent = exec.agent;
+    const groupId = parsed.group;
+    if (agent === void 0 || groupId === void 0 || groupId.length === 0) return void 0;
+    const declared = preAttachFor(catalog(), seatOfAgent(agent));
+    return declared.includes(groupId) ? { kind: "allow" } : void 0;
+  };
   const groupCallHint = (exec) => {
     const agent = exec.agent;
     if (agent === void 0) return void 0;
@@ -20220,6 +20269,10 @@ function mount(ctx, config2, seams) {
     const hint = groupCallHint(exec);
     return hint === void 0 ? next() : Promise.resolve({ kind: "deny", reason: hint });
   });
+  ctx.on("tools/pre-execute", (exec, next) => {
+    const decision = actionPolicy(exec);
+    return decision === void 0 ? next() : Promise.resolve(decision);
+  }, { prepend: true });
   ctx.on("session/event", (session, event) => {
     if (event.type === "turn/end") {
       const state = states.get(session.id);
@@ -20246,5 +20299,6 @@ export {
   preAttachFor,
   renderMenuText,
   resolveToolGroups,
+  seatOfDescriptorLabel,
   toolGroupsProjection
 };
