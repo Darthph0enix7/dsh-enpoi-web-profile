@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { HeavyJobManager } from '../src/jobs.js'
 import { manifestById, resolveHeavyInstall } from '../src/manifests.js'
-import { writeRoute, type HeavyDeps, type SettingsSeam } from '../src/planner.js'
+import { pendingRestartMessage, writeRoute, type HeavyDeps, type SettingsSeam } from '../src/planner.js'
 
 const scratch: string[] = []
 afterEach(() => {
@@ -87,6 +87,31 @@ it('a successful install writes the local route and reports progress', async () 
   const value = (mutations[0]!.ops[0] as { value: Record<string, unknown> }).value
   expect(value.baseURL).toBe('http://127.0.0.1:8082')
   expect(value.models).toEqual([{ id: 'gemini-2.5-flash' }])
+})
+
+it('a local install finalizer on an unmounted namespace fails with the pendingRestart message, not a raw job error', async () => {
+  const mutations: string[] = []
+  const settings: SettingsSeam = {
+    // The profile is running without the commandcode-provider entry.
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: {} } }],
+    mutate: async (ns) => { mutations.push(ns) },
+  }
+  const deps: HeavyDeps = {
+    home: scratchDir(),
+    dshHome: join(scratchDir(), '.dsh'),
+    settings,
+    runStep: async () => ({ exitCode: 0, output: 'ok' }),
+  }
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const manifest = manifestById('commandcode')!
+  manager.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, '').steps, async () => {
+    await writeRoute(deps, manifest, 'local', [])
+  })
+  const job = await settled(manager, manifest.id)
+  expect(job.state).toBe('failed')
+  expect(job.error).toBe(pendingRestartMessage('commandcode-provider'))
+  expect(mutations).toEqual([])
+  console.info(`[heavy-install-guard] job error: ${job.error}`)
 })
 
 it('a failing finalizer marks the job failed instead of a partial success', async () => {

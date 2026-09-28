@@ -509,6 +509,8 @@ export function configuredProfile(
 /**
  * Write the route profile. Only ever called after a successful probe/install;
  * a failure rejects the caller and leaves no route behind.
+ * @throws when the route namespace is not mounted in the running profile (the
+ *   same pending-restart message reuse returns) or when no settings seam exists.
  */
 export async function writeRoute(
   deps: HeavyDeps,
@@ -519,6 +521,8 @@ export async function writeRoute(
 ): Promise<HeavyRouteProfile> {
   const settings = deps.settings
   if (settings === undefined) throw new Error('settings seam absent — cannot write the route')
+  const pending = pendingRestartForManifest(deps, manifest)
+  if (pending !== undefined) throw new Error(pending.message)
   const profile = routeProfile(manifest, mode, models, overrides)
   const settingsNs = routeSettingsNs(manifest)
   await settings.mutate(settingsNs, [{ op: 'set', path: ['providers', manifest.id], value: profile }], revisionOf(settings, settingsNs))

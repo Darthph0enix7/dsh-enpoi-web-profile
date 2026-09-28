@@ -39,11 +39,26 @@ it('freellmapi removal drops the volume, the image, and the clone directory', ()
   expect(steps).toContain('rm -rf {home}/freellmapi')
 })
 
-it('freellmapi surface quirks name the unified key and ENCRYPTION_KEY', () => {
+it('freellmapi surface quirks name the unified key, ENCRYPTION_KEY, and the local dependency statement', () => {
   const quirks = manifestById('freellmapi')?.quirks.join('\n') ?? ''
   expect(quirks).toContain('Unified key')
   expect(quirks).toContain('ENCRYPTION_KEY')
-  expect(manifestById('freellmapi')?.requiresBrowser.length).toBeGreaterThan(0)
+  expect(quirks).toContain('native installers for Linux/macOS/Windows; Docker required only for the fallback path')
+})
+
+it('browser badges belong only to the browser-bound account flow (antigravity OAuth)', () => {
+  expect(manifestById('freellmapi')?.requiresBrowser).toEqual([])
+  expect(manifestById('commandcode')?.requiresBrowser).toEqual([])
+  expect(manifestById('antigravity')?.requiresBrowser.length).toBeGreaterThan(0)
+  expect(manifestById('antigravity')?.requiresBrowser.join('\n')).toContain('OAuth')
+})
+
+it('every heavy provider states its local install dependencies (Docker never required except the fallback path)', () => {
+  for (const manifest of HEAVY_MANIFESTS) {
+    expect(manifest.quirks.join('\n'), manifest.id).toContain('Local install dependencies:')
+  }
+  expect(manifestById('antigravity')?.quirks.join('\n')).toContain('Docker is never required')
+  expect(manifestById('commandcode')?.quirks.join('\n')).toContain('Docker is never required')
 })
 
 it('commandcode is a served custom-protocol route on its own settings namespace', () => {

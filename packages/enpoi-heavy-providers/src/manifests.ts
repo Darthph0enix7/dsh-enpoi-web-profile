@@ -192,11 +192,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     dashboardUrl: 'http://127.0.0.1:3002',
     docsUrl: 'https://freellmapi.co',
     defaultPort: 3002,
-    requiresBrowser: [
-      'First-run setup code and password-reset code appear only in `docker compose logs` — a browser flow, not automatable',
-      'Upstream provider keys are added on the web dashboard',
-    ],
+    // Browser badges belong only to account flows that cannot complete without
+    // a browser (antigravity's Google OAuth); FreeLLMAPI's dashboard steps are
+    // ordinary quirks, not an operator-blocking browser requirement.
+    requiresBrowser: [],
     quirks: [
+      'Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path',
+      'First-run setup code and password-reset code appear only in `docker compose logs`; upstream provider keys are added on the web dashboard',
       'Unified key is the only client auth — never expose this port beyond the local machine',
       'Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable',
       'The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves',
@@ -332,6 +334,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       'Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback — on a headless host the printed URL must be opened from a machine that can reach the callback (e.g. over an SSH port-forward); it cannot be automated',
     ],
     quirks: [
+      'Local install dependencies: native npm package for Linux/macOS/Windows (Node.js >= 18); Docker is never required',
       'The proxy runs its own sticky account pool with cooldowns — DSH key pooling MUST stay off for this route',
       'The console at :8082 has no auth (webuiPassword empty) — trusted networks only',
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED … resets after 46h" is normal',
@@ -400,10 +403,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     // llm-pi-ai: the CLI-shaped protocol has no llm-pi-ai entry, so the route
     // profile must never be written into the llm-pi-ai schema.
     settingsNs: 'commandcode-provider',
-    requiresBrowser: [
-      'Vendor account and quota dashboard live at commandcode.ai (browser)',
-    ],
+    // Browser badges belong only to account flows that cannot complete without
+    // a browser (antigravity's Google OAuth); the vendor dashboard is an
+    // ordinary quirk here, not an operator-blocking browser requirement.
+    requiresBrowser: [],
     quirks: [
+      'Local install dependencies: native provider package + keypool for Linux/macOS/Windows (Node.js 22); Docker is never required',
+      'The vendor account and quota dashboard live at commandcode.ai (browser)',
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — traffic must go through the keypool with CLI headers',
       'DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it',
       'The keypool may be shared with other tools — never stop or remove the shared keypool service when removing this provider',

@@ -103,6 +103,8 @@ export interface InstallValue {
   ok: boolean
   job?: HeavyJobView
   blocked?: { reason: string; plannedWith: string }
+  /** Route namespace absent from the running profile: the install waits for a restart. */
+  pendingRestart?: PendingRestart
 }
 
 /** `enpoiHeavy.job` result. */
@@ -251,9 +253,11 @@ export class HeavyProvidersService extends TypertRemoteService {
 
   /**
    * Add by local install: start the polled job; the route is written only when
-   * every required step succeeds.
+   * every required step succeeds. A route namespace the running profile has
+   * not mounted yet is reported as the same pending-restart result reuse
+   * returns — the install never starts a job whose finalizer would fail.
    * @param request - `{ id, key? }`.
-   * @returns the initial job snapshot, or the unsupported blocker.
+   * @returns the initial job snapshot, the unsupported blocker, or the ordering result.
    */
   @Remote
   install(request: { id?: unknown; key?: unknown }): InstallValue {
@@ -262,11 +266,21 @@ export class HeavyProvidersService extends TypertRemoteService {
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
+    const deps = this.options.deps()
+    const pendingRestart = pendingRestartForManifest(deps, manifest)
+    if (pendingRestart !== undefined) {
+      this.options.log?.(`install ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
+      return { ok: false, pendingRestart }
+    }
     const job = this.options.jobs.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, process.platform).steps, async () => {
-      const deps = this.options.deps()
-      const models = await discoverModels(modeBaseURL(manifest, 'local'), key, deps.fetchImpl)
-      await writeRoute(deps, manifest, 'local', models)
-      await storeCredential(deps, manifest, key)
+      const current = this.options.deps()
+      // Re-check at the commit point: the namespace may have gone away (or the
+      // install may have been started through another surface) since the guard.
+      const late = pendingRestartForManifest(current, manifest)
+      if (late !== undefined) throw new Error(late.message)
+      const models = await discoverModels(modeBaseURL(manifest, 'local'), key, current.fetchImpl)
+      await writeRoute(current, manifest, 'local', models)
+      await storeCredential(current, manifest, key)
     })
     return { ok: true, job }
   }

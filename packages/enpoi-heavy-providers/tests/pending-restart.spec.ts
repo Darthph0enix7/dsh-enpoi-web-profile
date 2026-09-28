@@ -4,21 +4,22 @@
  * must return the clear "available after the next restart" result instead of
  * letting settings.mutate reject with a raw error.
  */
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { manifestById } from '../src/manifests.js'
 import {
   pendingRestartForManifest,
   pendingRestartMessage,
   settingsNamespaceReady,
+  writeRoute,
   type HeavyDeps,
   type SettingsSeam,
 } from '../src/planner.js'
 
 /** Deps whose settings describe lists exactly the given namespaces. */
-function depsListing(namespaces: string[], withDescribe = true): HeavyDeps {
+function depsListing(namespaces: string[], withDescribe = true, mutations: string[] = []): HeavyDeps {
   const settings: SettingsSeam = {
     ...withDescribe ? { describe: () => namespaces.map(ns => ({ ns, revision: 1 })) } : {},
-    mutate: async () => {},
+    mutate: async (ns) => { mutations.push(ns) },
   }
   return {
     home: '/tmp',
@@ -52,4 +53,22 @@ it('the message is the exact operator-facing ordering text', () => {
   expect(pendingRestartMessage('commandcode-provider')).toBe(
     'Available after the next restart — the "commandcode-provider" settings namespace is not registered in the running profile yet (build the profile, then restart the service).',
   )
+})
+
+it('the local-install finalizer rejects with the pendingRestart message, never a raw mutate error', async () => {
+  const mutations: string[] = []
+  const deps = depsListing(['llm-pi-ai'], true, mutations)
+  const manifest = manifestById('commandcode')!
+  const failure = await writeRoute(deps, manifest, 'local', []).catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(Error)
+  expect((failure as Error).message).toBe(pendingRestartMessage('commandcode-provider'))
+  expect(mutations).toEqual([])
+})
+
+it('a mounted namespace lets the local route write proceed', async () => {
+  const mutations: string[] = []
+  const deps = depsListing(['llm-pi-ai', 'commandcode-provider'], true, mutations)
+  const route = await writeRoute(deps, manifestById('commandcode')!, 'local', [{ id: 'deepseek/deepseek-v4.1-flash' }])
+  expect(route.baseURL).toBe('http://127.0.0.1:8899/commandcode')
+  expect(mutations).toEqual(['commandcode-provider'])
 })
