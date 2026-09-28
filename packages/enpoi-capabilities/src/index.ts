@@ -26,7 +26,7 @@ import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
 import {
   resolvePolicy, grantProposalFor, grantProposalForOutcome, standingGrantRecord, agentRoleOf, reviewerSeatOf, mcpServerNameOf, mcpPolicyRemovalOps,
-  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames, REVIEW_RUN_TOOL,
+  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames, isFullAccessMode, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL,
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
@@ -263,11 +263,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // system-prompt/assemble waterfall carries the assembled tool list; we
   // filter out every disabled tool (minus the I15 protected set) so the model
   // never sees the schema, never attempts the call, and never wastes tokens.
-  // 1c. Same surface, approval honesty: an agent whose policy makes approval
-  // impossible (delegated children pin 'never') is not advertised tools whose
-  // every call would auto-deny on an unanswerable ask — a granted tool resolves
-  // allow and stays visible. The B1 guard stays as the execution-time backstop
-  // for in-flight turns.
+  // 1c. Same surface, approval honesty: a tool whose effective policy resolves
+  // `deny` can never run in ANY mode (denies terminate in resolvePolicy and are
+  // never cardable), so it is absent from the advertised surface — never shown
+  // and then refused. An `ask` stays visible: it is answerable by the human
+  // card, by the parent for a forwarded child ask, or by the session's own
+  // Full-access mode. The B1 guard stays as the execution-time backstop for
+  // in-flight turns.
   // 1d. Same surface, prompt honesty: the wire list and the prompt TEXT stay in
   // lockstep — a section may only name a tool the final surface advertises
   // (the stale `job_output` guidance that burned a council debater four calls).
@@ -285,16 +287,20 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     )
     let kept = disabled.size === 0 ? assembled.tools : assembled.tools.filter(tool => !disabled.has(tool.name))
     const scope = (context as { scope?: AgentLike & { session?: { id?: string } } } | undefined)?.scope
-    const approvalPolicy = readApprovalPolicy(scope)
-    if (approvalPolicy?.policy === 'never') {
-      const advertise = new Set(advertisedToolNames(kept.map(tool => tool.name), approvalPolicy.policy, {
-        agent: askingAgentOf({ agent: scope }),
-        config: readPermissionConfig(),
-        sandboxMode: readSandboxMode(scope),
-        mcpServerNames: readMcpServerNames() ?? [],
-      }))
-      kept = kept.filter(tool => advertise.has(tool.name))
-    }
+    // 1e. Approval-mode honesty, both directions (Adam's corrected model,
+    // 2026-09-28): a tool whose effective policy resolves `deny` can never run
+    // — the executor hard-denies every call — so it is absent from every
+    // advertised surface (hide, never show-then-refuse). An `ask` stays
+    // visible because it is answerable: the human card, the forwarded child
+    // path, or the session's own Full-access mode. The B1 guard stays as the
+    // execution-time backstop for in-flight turns.
+    const advertise = new Set(advertisedToolNames(kept.map(tool => tool.name), readApprovalPolicy(scope)?.policy, {
+      agent: askingAgentOf({ agent: scope }),
+      config: readPermissionConfig(),
+      sandboxMode: readSandboxMode(scope),
+      mcpServerNames: readMcpServerNames() ?? [],
+    }))
+    if (advertise.size < kept.length) kept = kept.filter(tool => advertise.has(tool.name))
     // The mention dictionary is the whole registry, not the surviving list: a
     // section naming a REMOVED tool must be pruned too, and the removed name
     // only exists in the registry view.
@@ -621,13 +627,17 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     return agentRoleOf(exec.agent, currentPresetOf)
   }
 
-  function readSandboxMode(agent: { session?: { id?: string } } | undefined): string | undefined {
+  function readSandboxMode(agent: { session?: unknown } | undefined): string | undefined {
     try {
-      const session = agent?.session
+      const session = agent?.session as {
+        seq?: number
+        eventAt?: (seq: number) => { type?: string; data?: Record<string, unknown> } | undefined
+      } | undefined
       if (session === undefined || typeof session.eventAt !== 'function') return undefined
-      for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
-        const event = session.eventAt(seq)
-        if (event?.type === 'sandbox/mode') return String((event.data as { mode?: string }).mode ?? '')
+      const seq = typeof session.seq === 'number' ? session.seq : 0
+      for (let index = seq - 1; index >= 0; index -= 1) {
+        const event = session.eventAt(index)
+        if (event?.type === 'sandbox/mode') return String((event.data as { mode?: string } | undefined)?.mode ?? '')
       }
       const shell = ctx.get('shell') as { sandboxMode?: string } | undefined
       return shell?.sandboxMode
@@ -870,7 +880,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // work for every other call.
       reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
       config,
-      sandboxMode: readSandboxMode(exec.agent as { session?: unknown } | undefined),
+      sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? [],
     })
     if (decision.kind === 'allow') return await next()
@@ -913,6 +923,25 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           return { kind: 'deny', reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` }
         }
         return downstream
+      }
+      // Full access (Adam's corrected model, 2026-09-28): a MAIN/root
+      // session's mode — approval prompts disabled + the danger-full-access
+      // sandbox — IS the operator's standing consent. Every ask-policy call
+      // resolves allow with the mode named and an audit line: no card, no
+      // denial, rails included (rails are a child-forwarding concern; a root
+      // call is the operator's own). A delegated child never reaches this
+      // branch (checked above), so the parent-judgement path is untouched.
+      if (isFullAccessMode(approvalPolicy.policy, readSandboxMode(exec.agent))) {
+        process.stderr.write(
+          `[enpoi-capabilities] audit: allowed ${exec.name} for the main session in Full access mode `
+          + `(ask source: ${decision.source}) — the mode is the operator's standing consent\n`,
+        )
+        // Downstream pre-execute layers still run; an explicit downstream deny
+        // (e.g. a tool the operator disabled) stands, but no layer may card
+        // here — Full access never asks.
+        const downstream = await next()
+        if (downstream.kind === 'deny') return downstream
+        return { kind: 'allow', reason: FULL_ACCESS_ASK_REASON }
       }
       return {
         kind: 'deny',

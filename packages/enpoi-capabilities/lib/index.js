@@ -96,6 +96,9 @@ var __callDispose = (stack, error, hasError) => {
 };
 
 // src/policy.ts
+function isFullAccessMode(approvalPolicy, sandboxMode) {
+  return approvalPolicy === "never" && sandboxMode === "danger-full-access";
+}
 function splitCompoundCommand(command) {
   const parts = [];
   let current = "";
@@ -415,7 +418,7 @@ function resolvePolicy(input) {
   return { kind: "allow", source: "defaults" };
 }
 function advertisedToolNames(toolNames, approvalPolicy, input) {
-  if (approvalPolicy !== "never") return [...toolNames];
+  void approvalPolicy;
   return toolNames.filter((toolName) => !neverRunsTool(toolName, input));
 }
 function neverRunsTool(toolName, input) {
@@ -459,11 +462,12 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERBS, DANGER_VERB_SET, OPAQUE_EXECUTORS, INLINE_INTERPRETERS;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERBS, DANGER_VERB_SET, OPAQUE_EXECUTORS, INLINE_INTERPRETERS;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
     MUTATION_TOOLS = /* @__PURE__ */ new Set(["bash", "edit", "write", "str_replace_editor"]);
+    FULL_ACCESS_ASK_REASON = "approved by the session's Full access mode";
     REVIEW_RUN_TOOL = "review_run";
     REVIEW_ROLES = /* @__PURE__ */ new Set([
       "oracle",
@@ -2066,16 +2070,13 @@ function apply(ctx, config = {}) {
     );
     let kept = disabled.size === 0 ? assembled.tools : assembled.tools.filter((tool) => !disabled.has(tool.name));
     const scope = context?.scope;
-    const approvalPolicy = readApprovalPolicy(scope);
-    if (approvalPolicy?.policy === "never") {
-      const advertise = new Set(advertisedToolNames(kept.map((tool) => tool.name), approvalPolicy.policy, {
-        agent: askingAgentOf({ agent: scope }),
-        config: readPermissionConfig(),
-        sandboxMode: readSandboxMode(scope),
-        mcpServerNames: readMcpServerNames() ?? []
-      }));
-      kept = kept.filter((tool) => advertise.has(tool.name));
-    }
+    const advertise = new Set(advertisedToolNames(kept.map((tool) => tool.name), readApprovalPolicy(scope)?.policy, {
+      agent: askingAgentOf({ agent: scope }),
+      config: readPermissionConfig(),
+      sandboxMode: readSandboxMode(scope),
+      mcpServerNames: readMcpServerNames() ?? []
+    }));
+    if (advertise.size < kept.length) kept = kept.filter((tool) => advertise.has(tool.name));
     const vocabulary = new Set(ctx.tools.schemas().map((tool) => tool.name));
     const advertised = new Set(kept.map((tool) => tool.name));
     const sections = Array.isArray(assembled.sections) ? stripUnavailableToolGuidance(assembled.sections, advertised, vocabulary) : assembled.sections;
@@ -2303,9 +2304,10 @@ function apply(ctx, config = {}) {
     try {
       const session = agent?.session;
       if (session === void 0 || typeof session.eventAt !== "function") return void 0;
-      for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
-        const event = session.eventAt(seq);
-        if (event?.type === "sandbox/mode") return String(event.data.mode ?? "");
+      const seq = typeof session.seq === "number" ? session.seq : 0;
+      for (let index = seq - 1; index >= 0; index -= 1) {
+        const event = session.eventAt(index);
+        if (event?.type === "sandbox/mode") return String(event.data?.mode ?? "");
       }
       const shell = ctx.get("shell");
       return shell?.sandboxMode;
@@ -2496,6 +2498,15 @@ function apply(ctx, config = {}) {
           return { kind: "deny", reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` };
         }
         return downstream;
+      }
+      if (isFullAccessMode(approvalPolicy.policy, readSandboxMode(exec.agent))) {
+        process.stderr.write(
+          `[enpoi-capabilities] audit: allowed ${exec.name} for the main session in Full access mode (ask source: ${decision.source}) \u2014 the mode is the operator's standing consent
+`
+        );
+        const downstream = await next();
+        if (downstream.kind === "deny") return downstream;
+        return { kind: "allow", reason: FULL_ACCESS_ASK_REASON };
       }
       return {
         kind: "deny",

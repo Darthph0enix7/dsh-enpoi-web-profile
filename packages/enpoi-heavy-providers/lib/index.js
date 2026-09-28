@@ -232,6 +232,11 @@ function resolveHeavyInstall(local, platform) {
   };
 }
 var LLM_PI_AI_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
+var RUNTIME_TOOL_RE = {
+  docker: /\bdocker(?:-compose|\s+compose)?\b/,
+  podman: /\bpodman\b/,
+  node: /\b(?:node|npm|npx|pnpm|yarn)\b/
+};
 var HEAVY_MANIFESTS = [
   {
     id: "freellmapi",
@@ -483,9 +488,16 @@ var HEAVY_MANIFESTS = [
       install: {
         default: {
           steps: [
-            { label: "Build and link the DSH provider package", command: "node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs {home}/.dsh/profiles/web", weight: 3 },
-            { label: "Seed the commandcode pool in pools.json", command: "node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs" },
-            { label: "Deploy the keypool proxy from dotfiles", command: 'test -f {home}/dotfiles/opencode-dotfiles/keypool/proxy.js || { echo "keypool proxy.js not found \u2014 sync dotfiles (opencode-dotfiles/keypool) first"; exit 1; }; install -Dm644 {home}/dotfiles/opencode-dotfiles/keypool/proxy.js {config}/opencode/keypool/proxy.js' },
+            { label: "Build and link the DSH provider package", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
+            { label: "Seed the commandcode pool in pools.json", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
+            {
+              label: "Deploy the keypool proxy from dotfiles (optional)",
+              // A dotfiles checkout is not required: the step looks in the
+              // DSH-home and home dotfiles layouts, and skips with guidance
+              // instead of failing the install when neither exists.
+              optional: true,
+              command: 'src=""; for candidate in "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js" "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"; do if test -f "$candidate"; then src="$candidate"; break; fi; done; if test -z "$src"; then echo "keypool proxy.js not found (searched the dotfiles layouts under DSH_HOME and HOME) \u2014 skipping; place proxy.js at {config}/opencode/keypool/proxy.js or install opencode-dotfiles, then re-run this step"; exit 0; fi; install -Dm644 "$src" {config}/opencode/keypool/proxy.js'
+            },
             {
               label: "Write the keypool systemd user unit",
               command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<'EOF'\n[Unit]\nDescription=OpenCode KeyPool \u2014 multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc 'exec node %h/.config/opencode/keypool/proxy.js'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF"
@@ -505,7 +517,7 @@ var HEAVY_MANIFESTS = [
         // Drops only the commandcode pool entry; the keypool rereads pools.json
         // per request, so the shared service (and the `go` pool) is never
         // stopped, restarted, or otherwise touched.
-        { label: "Drop only pools.commandcode (keypool and other pools stay)", command: "node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs", optional: true }
+        { label: "Drop only pools.commandcode (keypool and other pools stay)", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs"', optional: true }
       ],
       warnings: [
         "Removal drops only DSH state and the commandcode pool keys \u2014 it never stops or removes the shared keypool service (other tools may need it)",
@@ -546,6 +558,15 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
       if (variant.steps.length === 0 && manifest.unsupported === void 0) {
         problems.push(`${where}: platform install variant ${String(index)} has no steps`);
       }
+      const runtime = variant.runtime ?? manifest.local.runtime;
+      const declared = runtime === void 0 ? void 0 : RUNTIME_TOOL_RE[runtime];
+      if (declared === void 0 || variant.steps.length === 0) continue;
+      const commands = variant.steps.map((step) => step.command).join("\n");
+      if (declared.test(commands)) continue;
+      const conflicting = Object.keys(RUNTIME_TOOL_RE).filter((other) => other !== runtime && RUNTIME_TOOL_RE[other]?.test(commands) === true);
+      if (conflicting.length > 0) {
+        problems.push(`${where}: platform install variant ${String(index)} declares runtime "${String(runtime)}" but its steps invoke ${conflicting.join("/")} tooling instead`);
+      }
     }
     if (manifest.settingsNs !== void 0 && !/^[a-z0-9][a-z0-9-]*$/.test(manifest.settingsNs)) {
       problems.push(`${where}: settingsNs must be a lowercase plugin entry id`);
@@ -575,8 +596,8 @@ import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, ren
 import { dirname, join as join2 } from "node:path";
 var LLM_NS = "llm-pi-ai";
 var ORCHESTRATION_NS = "enpoi-orchestration";
-function substitute(value, home) {
-  return value.replaceAll("{home}", home).replaceAll("{config}", join2(home, ".config"));
+function substitute(value, home, dshHome) {
+  return value.replaceAll("{home}", home).replaceAll("{config}", join2(home, ".config")).replaceAll("{dshHome}", dshHome ?? join2(home, ".dsh"));
 }
 function modeBaseURL(manifest, mode) {
   return mode === "reuse" ? manifest.reuse.baseURL : manifest.local.baseURL;
@@ -1104,12 +1125,12 @@ __publicField(HeavyProvidersService, "inject", []);
 // src/index.ts
 var name = "enpoi-heavy-providers";
 var inject = [];
-async function runStep(ctx, step, home) {
+async function runStep(ctx, step, home, dshHome) {
   const subprocess = ctx.get("subprocess");
   if (subprocess === void 0) throw new Error("subprocess seam absent \u2014 cannot run install steps");
   const handle = subprocess.spawn({
-    argv: ["/bin/bash", "-lc", substitute(step.command, home)],
-    cwd: step.cwd === void 0 ? home : substitute(step.cwd, home),
+    argv: ["/bin/bash", "-lc", substitute(step.command, home, dshHome)],
+    cwd: step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome),
     stdio: {
       stdin: "ignore",
       stdout: { maxBytes: 65536 },
@@ -1132,7 +1153,7 @@ function apply(ctx) {
   }
   const jobs = new HeavyJobManager({
     dir: join3(dshHome, "cache", "heavy-jobs"),
-    run: (step) => runStep(ctx, step, home)
+    run: (step) => runStep(ctx, step, home, dshHome)
   });
   new HeavyProvidersService(ctx, {
     deps: () => ({
@@ -1141,7 +1162,7 @@ function apply(ctx) {
       settings: ctx.get("settings"),
       credentials: ctx.get("credentials"),
       fetchImpl: globalThis.fetch,
-      runStep: (step) => runStep(ctx, step, home)
+      runStep: (step) => runStep(ctx, step, home, dshHome)
     }),
     jobs,
     log: (line) => logger.info(`[enpoi-heavy-providers] ${line}`)

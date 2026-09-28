@@ -76148,6 +76148,7 @@ var init_pi_messages = __esm({
 
 // src/index.ts
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname as dirname2, join as join2 } from "node:path";
 import Schema from "@deepseek-ai/schemastery";
 import { readSettingsDocument } from "dsh-enpoi-contracts";
@@ -77647,12 +77648,30 @@ function sectionOf(settings) {
   return section;
 }
 var modelsDevCache;
-var LOCAL_MODELS_CACHE_PATH = "/home/adam/.cache/opencode/models.json";
+function firstNonEmpty(...values) {
+  for (const value2 of values) {
+    if (value2 !== void 0 && value2.length > 0) return value2;
+  }
+  return void 0;
+}
+function osCacheDir(env2 = process.env, platform = process.platform) {
+  const xdg = firstNonEmpty(env2.XDG_CACHE_HOME);
+  if (xdg !== void 0) return xdg;
+  if (platform === "win32") return firstNonEmpty(env2.LOCALAPPDATA);
+  const home = firstNonEmpty(env2.HOME, homedir());
+  if (home === void 0) return void 0;
+  return platform === "darwin" ? join2(home, "Library", "Caches") : join2(home, ".cache");
+}
+function modelsDevCachePath(env2 = process.env, platform = process.platform) {
+  const base = osCacheDir(env2, platform);
+  return base === void 0 ? void 0 : join2(base, "opencode", "models.json");
+}
 function loadModelsDev() {
   if (modelsDevCache !== void 0) return modelsDevCache;
+  const path6 = modelsDevCachePath();
   try {
-    if (existsSync(LOCAL_MODELS_CACHE_PATH)) {
-      const raw = readFileSync(LOCAL_MODELS_CACHE_PATH, "utf8");
+    if (path6 !== void 0 && existsSync(path6)) {
+      const raw = readFileSync(path6, "utf8");
       modelsDevCache = JSON.parse(raw);
       return modelsDevCache;
     }
@@ -77660,20 +77679,32 @@ function loadModelsDev() {
   }
   return {};
 }
-async function refreshModelsDevOnline() {
+async function refreshModelsDevOnline(report) {
   try {
     const res = await fetch("https://models.dev/api.json", { signal: AbortSignal.timeout(1e4) });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data === "object" && Object.keys(data).length > 50) {
-        modelsDevCache = data;
-        try {
-          writeFileSync(LOCAL_MODELS_CACHE_PATH, JSON.stringify(data), "utf8");
-        } catch {
-        }
-      }
+    if (!res.ok) {
+      report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 GET https://models.dev/api.json -> HTTP ${String(res.status)}; local cache kept`);
+      return;
     }
-  } catch {
+    const data = await res.json();
+    if (!data || typeof data !== "object" || Object.keys(data).length <= 50) {
+      report?.("provider-sync/models-dev-fetch", "models.dev refresh ignored \u2014 response did not look like the catalogue (>50 providers); local cache kept");
+      return;
+    }
+    modelsDevCache = data;
+    const path6 = modelsDevCachePath();
+    try {
+      if (path6 === void 0) {
+        report?.("provider-sync/models-dev-cache", "models.dev catalogue refreshed in memory, but no OS cache dir resolved \u2014 not persisted");
+        return;
+      }
+      mkdirSync(dirname2(path6), { recursive: true });
+      writeFileSync(path6, JSON.stringify(data), "utf8");
+    } catch (error) {
+      report?.("provider-sync/models-dev-cache", `models.dev catalogue refreshed in memory, but the cache write failed \u2014 ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } catch (error) {
+    report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 ${error instanceof Error ? error.message : String(error)}; local cache kept`);
   }
 }
 var ROUTE_PROVIDER_MAP = {
@@ -77859,12 +77890,19 @@ async function fetchModels(baseURL, key) {
   return models;
 }
 var DISCOVERED_CACHE_VERSION = 1;
+function resolveDshHome(env2 = process.env, platform = process.platform) {
+  const explicit = firstNonEmpty(env2.DSH_HOME);
+  if (explicit !== void 0) return explicit;
+  const home = firstNonEmpty(env2.HOME, platform === "win32" ? env2.USERPROFILE : void 0, homedir());
+  if (home === void 0) {
+    throw new Error("dsh-enpoi-provider-sync: no home directory resolved (set HOME, USERPROFILE, or DSH_HOME) \u2014 cannot locate the discovered-models cache");
+  }
+  return join2(home, ".dsh");
+}
 function discoveredCachePath() {
   const override = process.env.DSH_DISCOVERED_MODELS;
   if (override !== void 0 && override.length > 0) return override;
-  const dshHome = process.env.DSH_HOME;
-  const base = dshHome !== void 0 && dshHome.length > 0 ? dshHome : join2(process.env.HOME ?? "/home/adam", ".dsh");
-  return join2(base, "cache", "discovered-models.json");
+  return join2(resolveDshHome(), "cache", "discovered-models.json");
 }
 function readDiscoveredFile(path6) {
   try {
@@ -78108,10 +78146,19 @@ function apply(ctx, config) {
   const logger = ctx.logger("enpoi-provider-sync");
   const endpoints = value(config.endpoints) ?? {};
   const capacities = value(config.capacityDefaults) ?? {};
+  function reportSyncDiagnostic(kind, message) {
+    let code;
+    try {
+      const diagnostics = ctx.get("diagnostics");
+      code = diagnostics?.report?.({ kind, message })?.code;
+    } catch {
+    }
+    logger.warn(code === void 0 ? message : `${message} (diagnostics ${code})`);
+  }
   loadModelsDev();
-  void refreshModelsDevOnline();
+  void refreshModelsDevOnline(reportSyncDiagnostic);
   async function syncOnce() {
-    await refreshModelsDevOnline();
+    await refreshModelsDevOnline(reportSyncDiagnostic);
     const settings = ctx.get("settings");
     if (settings === void 0) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
@@ -78231,8 +78278,12 @@ export {
   mergeConfiguredModels,
   mergeDiscoveredModels,
   mergeDiscoveredRoute,
+  modelsDevCachePath,
   name,
   normalizeListingEntry,
+  osCacheDir,
+  refreshModelsDevOnline,
+  resolveDshHome,
   writeDiscoveredRoute
 };
 /*! Bundled license information:

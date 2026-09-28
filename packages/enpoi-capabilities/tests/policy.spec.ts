@@ -3,6 +3,7 @@ import {
   resolvePolicy, splitCompoundCommand, stripEnvPrefixes, matchBashPattern,
   mcpLadder, mcpServerNameOf, agentRoleOf, reviewerSeatOf, grantProposalFor, grantProposalForOutcome, standingGrantRecord,
   dangerVerbOfPattern, SHIPPED_TOOL_DEFAULTS, advertisedToolNames,
+  isFullAccessMode, FULL_ACCESS_ASK_REASON,
   REVIEW_RUN_TOOL, REVIEW_ROLES, type PermissionPolicyConfig,
 } from '../src/policy'
 import { buildReviewRunCommand, reviewRunTimeoutMs, shellQuote, validateReviewTarget } from '../src/review-run'
@@ -460,8 +461,34 @@ describe('never-policy tool surface (forwarding makes asks usable)', () => {
     expect(kept).toContain('run_code')
   })
 
-  it('an answerable policy leaves the root surface untouched', () => {
+  it('an answerable policy keeps every answerable tool (only denies drop out)', () => {
     expect(advertisedToolNames(TOOLS, 'ask', { agent: 'orchestrator', config: {} })).toEqual(TOOLS)
     expect(advertisedToolNames(TOOLS, undefined, { agent: 'orchestrator', config: {} })).toEqual(TOOLS)
+  })
+
+  it('drops an explicitly denied tool from an answerable root surface too (hide, never show-then-refuse)', () => {
+    const config: PermissionPolicyConfig = {
+      tools: { run_code: 'deny' },
+      agents: { orchestrator: { tools: { present: 'deny' } } },
+    }
+    const kept = advertisedToolNames([...TOOLS, 'present'], 'ask', { agent: 'orchestrator', config })
+    expect(kept).not.toContain('run_code')
+    expect(kept).not.toContain('present')
+    // An ask stays visible: it is answerable by the card, the parent, or Full access.
+    expect(kept).toContain('str_replace_editor')
+    expect(kept).toContain('bash')
+  })
+})
+
+describe('Full access standing consent (Adam’s corrected model, 2026-09-28)', () => {
+  it('recognizes only approval-disabled + danger-full-access as Full access', () => {
+    expect(isFullAccessMode('never', 'danger-full-access')).toBe(true)
+    expect(isFullAccessMode('never', 'workspace-write')).toBe(false)
+    expect(isFullAccessMode('ask', 'danger-full-access')).toBe(false)
+    expect(isFullAccessMode(undefined, undefined)).toBe(false)
+  })
+
+  it('names the mode as the consent in the allow reason', () => {
+    expect(FULL_ACCESS_ASK_REASON).toBe("approved by the session's Full access mode")
   })
 })

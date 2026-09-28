@@ -72,6 +72,23 @@ export type PolicyDecision =
 /** Tools treated as mutations for the read-only session veto. */
 const MUTATION_TOOLS = new Set(['bash', 'edit', 'write', 'str_replace_editor'])
 
+/**
+ * Whether an asking session runs in Full access: approval prompts disabled AND
+ * the danger-full-access sandbox. That pair is the operator's standing consent
+ * (Adam's corrected model, 2026-09-28): a MAIN/root session in this mode
+ * resolves every ask-policy call as allowed without a card, rails included. A
+ * delegated child never uses this helper — its ask is forwarded to the parent.
+ * @param approvalPolicy - the session's effective approval policy.
+ * @param sandboxMode - the session's current sandbox mode.
+ * @returns `true` only for the Full-access pair.
+ */
+export function isFullAccessMode(approvalPolicy: string | undefined, sandboxMode: string | undefined): boolean {
+  return approvalPolicy === 'never' && sandboxMode === 'danger-full-access'
+}
+
+/** The allow reason a Full-access ask resolves with: the mode IS the consent. */
+export const FULL_ACCESS_ASK_REASON = "approved by the session's Full access mode"
+
 /** The dedicated reviewer-exec tool: fixed read-only test runs, reviewer seats only. */
 export const REVIEW_RUN_TOOL = 'review_run'
 
@@ -693,17 +710,20 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
 }
 
 /**
- * The tool names an agent's model-facing surface keeps under its approval
- * policy. An answerable policy (`ask`, or no logged policy) returns every name
- * unchanged. Under an impossible one (`never`, e.g. a delegated child) only a
- * tool that can never run is dropped: a `deny` resolution is final — no user can
- * answer it and the executor hard-denies every call. An `ask` stays visible
- * because a delegated child's ask is forwarded to the nearest live root (the
- * doc-55 forwarding path) and resolves there. A grant resolves the tool to
- * `allow` in {@link resolvePolicy} and keeps it visible; `allow` tools are out
- * of scope here.
+ * The tool names an agent's model-facing surface keeps under its permission
+ * policy. Only a tool that can never run is dropped: a `deny` resolution is
+ * final — no user can answer it and the executor hard-denies every call — so
+ * an explicitly denied tool is absent from the advertised surface rather than
+ * shown and refused (Adam's corrected model, 2026-09-28). An `ask` stays
+ * visible because it is answerable: by the human card, by the parent (the
+ * doc-55 forwarding path for a delegated child), or by the session's own
+ * Full-access mode (the operator's standing consent). A grant resolves the
+ * tool to `allow` in {@link resolvePolicy} and keeps it visible; `allow` tools
+ * are out of scope here.
  * @param toolNames - the assembled wire tool names.
- * @param approvalPolicy - the agent's effective approval policy.
+ * @param approvalPolicy - the agent's effective approval policy. Retained for
+ * call-site clarity and future mode-specific rules; the deny filter above
+ * applies under every mode (a deny is never answerable).
  * @param input - resolution context (agent role, permission config, sandbox, MCP catalog).
  * @returns the names to advertise, in input order.
  */
@@ -717,21 +737,20 @@ export function advertisedToolNames(
     mcpServerNames?: readonly string[]
   },
 ): string[] {
-  if (approvalPolicy !== 'never') return [...toolNames]
+  void approvalPolicy
   return toolNames.filter(toolName => !neverRunsTool(toolName, input))
 }
 
 /**
- * Whether one tool can never run for an agent whose approval policy is
- * `never`. Only a decision that stays `deny` is impossible — a tool-level deny
- * row, the unknown-tools deny default, or a role-gated deny — because an `ask`
- * is forwarded to the nearest live root (the doc-55 forwarding path) and
- * resolves there. bash is judged by its tool-level row: its command-less
- * resolution is the empty-command guard, not a policy on bash itself, and its
- * per-command asks are forwarded like any other ask.
+ * Whether one tool can never run for an agent: only a decision that stays
+ * `deny` is impossible — a tool-level deny row, the unknown-tools deny
+ * default, the read-only session veto, or a role-gated deny — because an `ask`
+ * is answerable (human card, forwarded parent ask, or the session's own
+ * Full-access mode). bash is judged by its tool-level row: its command-less
+ * resolution is the empty-command guard, not a policy on bash itself.
  * @param toolName - the assembled wire tool name.
  * @param input - resolution context (agent role, permission config, sandbox, MCP catalog).
- * @returns whether the tool has no runnable path for that child.
+ * @returns whether the tool has no runnable path for that agent.
  */
 function neverRunsTool(
   toolName: string,
