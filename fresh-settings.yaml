@@ -1,6 +1,5 @@
 ui-settings-general:
   welcomeNoticeVersion: 2026-08-13.1
-  onboardingCompleted: 2026-09-28.1
 ui-settings-models:
   credentialOnboarding: false
 agent-presets:
