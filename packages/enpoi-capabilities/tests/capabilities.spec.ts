@@ -18,7 +18,7 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
     expect(state.mcp['custom-mcp']).toBeUndefined()
 
     // Skills must be default ON
-    expect(state.skills['project-management']).toBe(true)
+    expect(state.skills['tier2-workflow']).toBe(true)
     expect(state.skills['tier1-workflow']).toBe(true)
 
     // Subagents & core tools must be default ON

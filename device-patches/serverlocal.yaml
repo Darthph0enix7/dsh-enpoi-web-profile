@@ -11,7 +11,6 @@ merge:
     mcp:
       plane-mcp: false
     skills:
-      project-management: false
       tier1-workflow: false
       test-alpha: true
       tier3-workflow: false
