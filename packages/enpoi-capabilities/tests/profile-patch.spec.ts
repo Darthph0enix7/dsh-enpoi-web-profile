@@ -2,76 +2,43 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 /**
- * Profile-patch advertisement guard for the 2026-09-26 error-audit defects and
- * the 2026-09-27 OpenCode free-tier rejection.
+ * Profile-patch guard for the fresh-install template.
  *
- * The composed `cordis.patch.yml` is the deployment's route table and tool
- * presentation; two of its rows produced every unexplained error of the
- * baseline and neither is covered by a package unit test (they are profile
- * configuration, not plugin code). This spec reads the patch as text and
- * asserts the facts the fixes pinned:
+ * `cordis.patch.yml` is what every fresh install and sandbox clones, while the
+ * settings service rewrites the same document on the machine where the
+ * operator edits it: provider routes, the default-model seat, UI settings,
+ * seats, permissions, grants, the MCP catalog, chains, favorites, whiteboard.
+ * This spec pins the split so live state can never be committed back:
  *
- * 1. `run_code` is not advertised: every `tool-presentation` row presents
- *    `native`, because PTC execution is not enabled (no `run_code` policy
- *    grant; mounting it needs Adam's word).
- * 2. The `free` chain (all links are `opencode` free-tier models that answer
- *    `403 FreeTierError` to harness calls) stays retired via `disabled: true`,
- *    and no default seat or enabled chain may route back into it. OpenCode
- *    gates the free tier server-side to its own clients — "You cannot use the
- *    free tier in other harnesses" (anomalyco/opencode#49621) — so a
- *    settings rewrite that resurrects the links must fail here. The
- *    `scripts/disable-free-tier.mjs` repair is idempotent on the same text.
- *
- * 3. Every enabled chain is checked link-by-link for `opencode/*-free` at any
- *    indentation, and every `chain:` reference anywhere in the patch must name
- *    a declared, enabled group — a seat naming a disabled chain fails.
+ * 1. Tool presentation stays native (`run_code` is not advertised).
+ * 2. No settings/state row ships: no `llm-pi-ai` provider routes, no
+ *    `agent-default-model`, no UI settings rows, no onboarding marker.
+ * 3. The `enpoi-orchestration` row carries the template parameters only, never
+ *    the operator-owned sections (capabilities, MCP catalog/status, personas,
+ *    roles, councils, chains, catalog rules, UI preferences, permissions,
+ *    whiteboard, tool groups).
+ * 4. Exactly the three agent presets ship, with the upstream preset rows
+ *    disabled, and nothing ever links the gated opencode free tier.
  */
 
 const PATCH = readFileSync(new URL('../../../cordis.patch.yml', import.meta.url), 'utf8')
 
-/** The indented block that follows one `key:` line inside a parent mapping. */
-function blockAfter(source: string, key: string): string {
-  const start = source.indexOf(`\n      ${key}:\n`)
-  if (start === -1) throw new Error(`profile patch has no "${key}" entry`)
-  const rest = source.slice(start + 1)
-  const end = rest.search(/\n {4}[a-z]/)
-  return end === -1 ? rest : rest.slice(0, end + 1)
-}
+/** Settings rows the config editor creates on a configured machine. */
+const STATE_ROWS = [
+  'agent-default-model',
+  'llm-pi-ai',
+  'ui-settings-general',
+  'ui-settings-models',
+  'ui-theme',
+]
 
-/** The block of one top-level `- id: <id>` row. */
-function rowAfter(source: string, id: string): string {
-  const start = source.indexOf(`\n- id: ${id}\n`)
-  if (start === -1) throw new Error(`profile patch has no top-level row "${id}"`)
-  const rest = source.slice(start + 1)
-  const end = rest.search(/\n- id:/)
-  return end === -1 ? rest : rest.slice(0, end + 1)
-}
+/** Operator-owned sections of the `enpoi-orchestration` document. */
+const STATE_SECTIONS = [
+  'capabilities', 'mcpServers', 'mcpStatus', 'personas', 'roles', 'councils',
+  'chains', 'catalogRules', 'uiPreferences', 'permissions', 'whiteboard', 'toolGroups',
+]
 
-/** Every `      <id>:` chain entry inside the `enpoi-orchestration.chains` map. */
-function chainBlocks(source: string): Array<{ id: string; body: string }> {
-  const map = source.indexOf('\n    chains:\n')
-  if (map === -1) throw new Error('profile patch has no enpoi-orchestration chains map')
-  const rest = source.slice(map + 1)
-  const stop = rest.search(/\n {4}[A-Za-z0-9_@./-]+:/)
-  const scope = stop === -1 ? rest : rest.slice(0, stop)
-  return [...scope.matchAll(/\n {6}([A-Za-z0-9_@./-]+):\n/g)].map(match => ({
-    id: match[1]!,
-    body: blockAfter(source, match[1]!),
-  }))
-}
-
-/** Whether one chain block declares itself retired. */
-function chainDisabled(body: string): boolean {
-  return /^[ \t]*disabled:[ \t]*true[ \t]*$/m.test(body)
-}
-
-/** Every `- provider:` / `model:` link pair in one chain block, at any indentation. */
-function chainLinks(body: string): Array<{ provider: string; model: string }> {
-  return [...body.matchAll(/^[ \t]*- provider: (\S+)\n[ \t]*model: (\S+)/gm)]
-    .map(match => ({ provider: match[1]!, model: match[2]! }))
-}
-
-describe('web profile patch advertisement guard', () => {
+describe('web profile patch template guard', () => {
   it('presents every tool-presentation row as native (run_code is not advertised)', () => {
     const rows = PATCH.split('- id: tool-presentation').slice(1)
     expect(rows.length).toBeGreaterThan(0)
@@ -83,45 +50,38 @@ describe('web profile patch advertisement guard', () => {
     }
   })
 
-  it('keeps the dead opencode free-tier chain retired', () => {
-    const free = blockAfter(PATCH, 'free')
-    expect(free).toContain('label: Free')
-    expect(free).toContain('disabled: true')
-    expect(free).not.toContain('disabled: false')
-    // The dead links stay visible for the operator to repair.
-    expect(free).toContain('model: ling-3.0-flash-fin-free')
+  it('ships no settings/state rows', () => {
+    for (const id of STATE_ROWS) {
+      expect(PATCH.includes(`\n- id: ${id}\n`), `state row ${id} must not ship`).toBe(false)
+    }
+    expect(PATCH).not.toMatch(/^\s*onboardingCompleted:/m)
+    expect(PATCH).not.toMatch(/^\s*providers:/m)
   })
 
-  it('keeps every default seat and enabled chain off the gated opencode free tier', () => {
-    const chains = chainBlocks(PATCH)
-    const declared = new Map(chains.map(chain => [chain.id, chain]))
-
-    // The default seat: paid route only, no chain fallback into free links.
-    const seat = rowAfter(PATCH, 'agent-default-model')
-    expect(seat).not.toMatch(/^\s+chain:/m)
-    expect(seat).not.toMatch(/model: .*-free/)
-
-    // No enabled group may link a gated model, at any indentation; disabled
-    // groups may keep their dead links visible (the `free` chain is the only one).
-    for (const { id, body } of chains) {
-      if (chainDisabled(body)) continue
-      for (const { provider, model } of chainLinks(body)) {
-        expect(
-          provider !== 'opencode' || !model.endsWith('-free'),
-          `enabled chain "${id}" must not link gated free model ${provider}/${model}`,
-        ).toBe(true)
-      }
+  it('ships no operator-owned orchestration sections', () => {
+    const start = PATCH.indexOf('\n- id: enpoi-orchestration\n')
+    expect(start).toBeGreaterThan(-1)
+    const row = PATCH.slice(start + 1)
+    const body = row.slice(0, row.indexOf('\n- '))
+    for (const section of STATE_SECTIONS) {
+      expect(body.includes(`\n    ${section}:\n`), `section ${section} must not ship`).toBe(false)
     }
+    expect(body).toContain('parameters:')
+  })
 
-    // Every `chain:` reference (any seat, any depth) must name a declared,
-    // enabled group; a disabled or missing target cannot route.
-    for (const match of PATCH.matchAll(/^[ \t]*chain:[ \t]*(\S+?)[ \t]*(?:#.*)?$/gm)) {
-      const id = match[1]!.replace(/^["']|["']$/g, '')
-      const target = declared.get(id)
-      expect(
-        target !== undefined && !chainDisabled(target.body),
-        `chain reference "${id}" must name a declared, enabled group`,
-      ).toBe(true)
+  it('ships exactly the three presets and keeps the upstream rows disabled', () => {
+    expect(PATCH.match(/\n {4}- id: preset-/g)).toHaveLength(3)
+    for (const id of ['orchestrator', 'sysadmin', 'creator']) {
+      expect(PATCH).toContain(`\n    - id: preset-${id}\n`)
     }
+    for (const id of ['standard', 'ptc', 'minimal', 'cordis']) {
+      expect(PATCH).toContain(`- id: preset-${id}\n  disabled: true`)
+    }
+    expect(PATCH).toContain('- id: agent-preset-registry\n  config:\n    default: orchestrator')
+  })
+
+  it('never routes into the gated opencode free tier', () => {
+    expect(PATCH).not.toMatch(/^\s*-? ?provider: opencode\s*$/m)
+    expect(PATCH).not.toMatch(/model: \S*-free\s*$/m)
   })
 })
