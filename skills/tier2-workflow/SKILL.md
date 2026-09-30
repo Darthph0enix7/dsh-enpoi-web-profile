@@ -7,28 +7,30 @@ description: Sophisticated ideation and planning. Mandatory roundtable tool usag
 
 Tier 2 is a high-value, high-performance workflow designed for vision expansion, feature ideation, and resolving highly ambiguous technical directions BEFORE implementation begins.
 
-## Core Contract
-- **State Management:** Create and maintain `.slim/tier_state/<short-task-slug>.md`. Ensure git ignore rules are set. Keep OpenCode todos synced.
-- **MANDATORY Roundtable Ideation:** The user has provided a vision or basic idea. You MUST FIRST invoke the \`roundtable\` tool (`roundtable({ query: "...", maxRounds: 5 })`) to ideate, get creative feature suggestions, and refine the perfected version of the user's vision.
-- **Technical Translation:** Once the roundtable outputs its Council Report, translate its findings into a concrete technical implementation plan in your state file.
-- **Mandatory Plan Review:** Call `@oracle` to review your technical translation of the roundtable's plan.
-- **Implementation & Final Review:** Proceed with implementation. Call `@oracle` for a final code review at the end.
+**Scope:** This workflow governs the current request only. A new request starts from the default behavior unless the operator invokes a tier again; invoking another tier for the same task replaces this workflow.
 
-## Documentation Structure
-Your `.slim/tier_state/<short-task-slug>.md` file MUST follow this standard structure:
+## Core Contract
+- **State Management:** Author the tier state on the whiteboard with `whiteboard_write` (kinds: path, rule, fact, task; stable ids so `replace` can update them) and pin the brief with `whiteboard_pin` or `pinned: true` — pinned context is injected for the session and visible to the fleet. Keep the `todo_write` list synced with the current phase.
+- **MANDATORY Roundtable Ideation:** The user has provided a vision or basic idea. You MUST FIRST invoke the \`roundtable\` tool (`roundtable({ query: "...", maxRounds: 5 })`) to ideate, get creative feature suggestions, and refine the perfected version of the user's vision.
+- **Technical Translation:** Once the roundtable outputs its Council Report, translate its findings into a concrete technical implementation plan on the whiteboard.
+- **Mandatory Plan Review:** Consult the Oracle through `oracle_review` to review your technical translation of the roundtable's plan — provide a reading list (file paths, line numbers), never pasted code.
+- **Implementation & Final Review:** Proceed with implementation, dispatching bounded parallel work to `fixer`-role workers with the `subagent` tool (every dispatch is a fresh session; include the whiteboard brief). Consult the Oracle with `oracle_review` for a final code review at the end and fix actionable issues before concluding.
+
+## Whiteboard Layout
+The pinned board entries for the task MUST follow this standard structure:
 
 ### 1. Initial Vision
-The raw goal or idea provided by the user.
+The raw goal or idea provided by the user (id `vision`).
 
 ### 2. Roundtable Council Report
-Record the synthesized results from the `roundtable` debate (Decision, Dissent, Open Questions).
+Record the synthesized results from the `roundtable` debate (Decision, Dissent, Open Questions) (id `council`).
 
 ### 3. Technical Translation & Oracle Review
-- The concrete technical plan derived from the roundtable report.
-- **Oracle Review Notes:** `@oracle`'s critique of the technical plan.
+- The concrete technical plan derived from the roundtable report (id `plan`).
+- **Oracle Review Notes:** the `oracle_review` critique of the technical plan.
 
 ### 4. Execution Log
-Phases, task IDs, and parallel workers used.
+Phases and parallel workers used (each a fresh `subagent` dispatch).
 
 ### 5. Final Oracle Review & Validation
-Record the final sign-off from `@oracle` and validation results.
+Record the final verdict from `oracle_review` and validation results.
