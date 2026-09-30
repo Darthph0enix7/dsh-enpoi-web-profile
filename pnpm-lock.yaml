@@ -80,6 +80,9 @@ importers:
       dsh-enpoi-peer-bridge:
         specifier: workspace:*
         version: link:packages/enpoi-peer-bridge
+      dsh-enpoi-preset-authoring:
+        specifier: workspace:*
+        version: link:packages/enpoi-preset-authoring
       dsh-enpoi-provider-sync:
         specifier: workspace:*
         version: link:packages/enpoi-provider-sync
@@ -205,6 +208,8 @@ importers:
         version: link:../enpoi-contracts
 
   packages/enpoi-peer-bridge: {}
+
+  packages/enpoi-preset-authoring: {}
 
   packages/enpoi-provider-sync:
     dependencies:
