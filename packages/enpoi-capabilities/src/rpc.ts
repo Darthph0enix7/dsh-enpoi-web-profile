@@ -73,6 +73,57 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   }
 
   /**
+   * One session's capability overrides (skills/tools), read from the
+   * session-scoped override service. Failure posture is fail-open: an
+   * unavailable service answers an empty record.
+   * @param sessionId - the session whose overrides are read.
+   * @returns the override record.
+   */
+  @Remote
+  async capabilityOverrides(sessionId: string): Promise<{ overrides: { skills: Record<string, boolean>; tools: Record<string, boolean>; mcp: Record<string, boolean> } }> {
+    try {
+      const sessions = this.ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
+      const session = sessions?.get?.(sessionId)
+      const service = this.ctx.get('capabilityOverrides') as
+        | { read?: (session: unknown) => { skills: Record<string, boolean>; tools: Record<string, boolean>; mcp: Record<string, boolean> } }
+        | undefined
+      if (session === undefined || service?.read === undefined) return { overrides: { skills: {}, tools: {}, mcp: {} } }
+      return { overrides: service.read(session) }
+    } catch {
+      return { overrides: { skills: {}, tools: {}, mcp: {} } }
+    }
+  }
+
+  /**
+   * Write one session capability override (or reset it with a null value).
+   * The change is durable in the session log and hot-applied to that session's
+   * surface; the profile default is untouched.
+   * @param sessionId - the session to override.
+   * @param kind - `skills` or `tools`.
+   * @param id - the capability id.
+   * @param value - the override value, or null to reset to the default.
+   * @returns whether the write succeeded, with the reason on failure.
+   */
+  @Remote
+  async setCapabilityOverride(sessionId: string, kind: string, id: string, value: boolean | null): Promise<{ ok: boolean; reason: string }> {
+    try {
+      if (kind !== 'skills' && kind !== 'tools' && kind !== 'mcp') return { ok: false, reason: `unknown capability kind "${kind}"` }
+      if (id === '') return { ok: false, reason: 'missing capability id' }
+      const sessions = this.ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
+      const session = sessions?.get?.(sessionId)
+      if (session === undefined) return { ok: false, reason: `session "${sessionId}" is not live` }
+      const service = this.ctx.get('capabilityOverrides') as
+        | { set?: (session: unknown, kind: 'skills' | 'tools' | 'mcp', id: string, value: boolean | null) => unknown }
+        | undefined
+      if (service?.set === undefined) return { ok: false, reason: 'the override service is unavailable' }
+      service.set(session, kind, id, value)
+      return { ok: true, reason: '' }
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
    * The servers one session has mounted (always-on servers included), read
    * from the session-scoped mount service. Failure posture is fail-open: an
    * unavailable service answers an empty list.
@@ -89,6 +140,27 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
       return { mounts: rows.filter(row => row.state === 'mounted').map(row => ({ id: row.id, serverName: row.serverName, toolCount: row.toolCount })) }
     } catch {
       return { mounts: [] }
+    }
+  }
+
+  /**
+   * Mount one server for one session (the operator's enable control on the
+   * session surface). On-demand servers connect on first use; always-on
+   * servers are already connected.
+   * @param sessionId - the session to mount for.
+   * @param server - the catalog server id.
+   * @returns whether the mount succeeded, with the reason on failure.
+   */
+  @Remote
+  async mcpMount(sessionId: string, server: string): Promise<{ ok: boolean; reason: string }> {
+    try {
+      const service = this.ctx.get('mcpMounts') as
+        | { mount?: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }> }
+        | undefined
+      if (service?.mount === undefined) return { ok: false, reason: 'the mount service is unavailable' }
+      return await service.mount({ id: sessionId }, server)
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
   }
 

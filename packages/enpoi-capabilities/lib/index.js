@@ -841,12 +841,12 @@ import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 function mountCapabilitiesRemote(ctx) {
   ctx.plugin(EnpoiCapabilitiesService);
 }
-var _removeMcpServer_dec, _mcpUnmount_dec, _mcpMounts_dec, _registeredTools_dec, _mcpTools_dec, _a3, _init, EnpoiCapabilitiesService;
+var _removeMcpServer_dec, _mcpUnmount_dec, _mcpMount_dec, _mcpMounts_dec, _setCapabilityOverride_dec, _capabilityOverrides_dec, _registeredTools_dec, _mcpTools_dec, _a3, _init, EnpoiCapabilitiesService;
 var init_rpc = __esm({
   "src/rpc.ts"() {
     "use strict";
     init_mcp_tools();
-    EnpoiCapabilitiesService = class extends (_a3 = TypertRemoteService, _mcpTools_dec = [Remote], _registeredTools_dec = [Remote], _mcpMounts_dec = [Remote], _mcpUnmount_dec = [Remote], _removeMcpServer_dec = [Remote], _a3) {
+    EnpoiCapabilitiesService = class extends (_a3 = TypertRemoteService, _mcpTools_dec = [Remote], _registeredTools_dec = [Remote], _capabilityOverrides_dec = [Remote], _setCapabilityOverride_dec = [Remote], _mcpMounts_dec = [Remote], _mcpMount_dec = [Remote], _mcpUnmount_dec = [Remote], _removeMcpServer_dec = [Remote], _a3) {
       /**
        * @param ctx - owning Host Context (the Typert binding is installed by the base).
        */
@@ -872,6 +872,32 @@ var init_rpc = __esm({
           return { tools: [] };
         }
       }
+      async capabilityOverrides(sessionId) {
+        try {
+          const sessions = this.ctx.get("sessions");
+          const session = sessions?.get?.(sessionId);
+          const service = this.ctx.get("capabilityOverrides");
+          if (session === void 0 || service?.read === void 0) return { overrides: { skills: {}, tools: {}, mcp: {} } };
+          return { overrides: service.read(session) };
+        } catch {
+          return { overrides: { skills: {}, tools: {}, mcp: {} } };
+        }
+      }
+      async setCapabilityOverride(sessionId, kind, id, value) {
+        try {
+          if (kind !== "skills" && kind !== "tools" && kind !== "mcp") return { ok: false, reason: `unknown capability kind "${kind}"` };
+          if (id === "") return { ok: false, reason: "missing capability id" };
+          const sessions = this.ctx.get("sessions");
+          const session = sessions?.get?.(sessionId);
+          if (session === void 0) return { ok: false, reason: `session "${sessionId}" is not live` };
+          const service = this.ctx.get("capabilityOverrides");
+          if (service?.set === void 0) return { ok: false, reason: "the override service is unavailable" };
+          service.set(session, kind, id, value);
+          return { ok: true, reason: "" };
+        } catch (error62) {
+          return { ok: false, reason: error62 instanceof Error ? error62.message : String(error62) };
+        }
+      }
       async mcpMounts(sessionId) {
         try {
           const service = this.ctx.get("mcpMounts");
@@ -879,6 +905,15 @@ var init_rpc = __esm({
           return { mounts: rows.filter((row) => row.state === "mounted").map((row) => ({ id: row.id, serverName: row.serverName, toolCount: row.toolCount })) };
         } catch {
           return { mounts: [] };
+        }
+      }
+      async mcpMount(sessionId, server) {
+        try {
+          const service = this.ctx.get("mcpMounts");
+          if (service?.mount === void 0) return { ok: false, reason: "the mount service is unavailable" };
+          return await service.mount({ id: sessionId }, server);
+        } catch (error62) {
+          return { ok: false, reason: error62 instanceof Error ? error62.message : String(error62) };
         }
       }
       async mcpUnmount(sessionId, server) {
@@ -898,7 +933,10 @@ var init_rpc = __esm({
     _init = __decoratorStart(_a3);
     __decorateElement(_init, 1, "mcpTools", _mcpTools_dec, EnpoiCapabilitiesService);
     __decorateElement(_init, 1, "registeredTools", _registeredTools_dec, EnpoiCapabilitiesService);
+    __decorateElement(_init, 1, "capabilityOverrides", _capabilityOverrides_dec, EnpoiCapabilitiesService);
+    __decorateElement(_init, 1, "setCapabilityOverride", _setCapabilityOverride_dec, EnpoiCapabilitiesService);
     __decorateElement(_init, 1, "mcpMounts", _mcpMounts_dec, EnpoiCapabilitiesService);
+    __decorateElement(_init, 1, "mcpMount", _mcpMount_dec, EnpoiCapabilitiesService);
     __decorateElement(_init, 1, "mcpUnmount", _mcpUnmount_dec, EnpoiCapabilitiesService);
     __decorateElement(_init, 1, "removeMcpServer", _removeMcpServer_dec, EnpoiCapabilitiesService);
     __decoratorMetadata(_init, EnpoiCapabilitiesService);
@@ -20796,6 +20834,47 @@ function buildMountRows(catalog, allowed, mounted, errors, toolNames) {
   }).sort((left, right) => left.id.localeCompare(right.id));
 }
 
+// src/capability-overrides.ts
+var EMPTY_CAPABILITY_OVERRIDES = { skills: {}, tools: {}, mcp: {} };
+var capabilityOverridesSchema = external_exports.object({
+  skills: external_exports.record(external_exports.string(), external_exports.boolean()),
+  tools: external_exports.record(external_exports.string(), external_exports.boolean()),
+  mcp: external_exports.record(external_exports.string(), external_exports.boolean())
+});
+function applyCapabilityOverridesProjection(state, event) {
+  if (event.type !== "capabilities/overrides") return state;
+  return { skills: { ...event.data.skills }, tools: { ...event.data.tools }, mcp: { ...event.data.mcp } };
+}
+var capabilityOverridesProjection = {
+  key: "capabilityOverrides",
+  // The profile's zod instance differs from the harness's; the projection
+  // registry validates with its own copy, so the schema crosses as-is.
+  stateSchema: capabilityOverridesSchema,
+  init: () => EMPTY_CAPABILITY_OVERRIDES,
+  apply: applyCapabilityOverridesProjection,
+  // Client-visible: the Capabilities center renders the override markers.
+  wire: { viewSchema: capabilityOverridesSchema, view: (state) => state },
+  stateVersion: 1
+};
+var CAPABILITY_OVERRIDES_EVENT = "capabilities/overrides";
+function withCapabilityOverride(record2, kind, id, value) {
+  const family = { ...record2[kind] };
+  if (value === null) delete family[id];
+  else family[id] = value;
+  return {
+    skills: kind === "skills" ? family : { ...record2.skills },
+    tools: kind === "tools" ? family : { ...record2.tools },
+    mcp: kind === "mcp" ? family : { ...record2.mcp }
+  };
+}
+function effectiveCapabilitiesState(defaults, overrides) {
+  return {
+    tools: { ...defaults.tools, ...overrides.tools },
+    skills: { ...defaults.skills, ...overrides.skills },
+    mcp: { ...defaults.mcp, ...overrides.mcp }
+  };
+}
+
 // src/prompt-honesty.ts
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -21987,10 +22066,53 @@ function apply(ctx, config2 = {}) {
   });
   ctx.effect(() => disposeGuard, "enpoi-capabilities: tool guard");
   let sessionMountsAccess;
+  const overrideMemory = /* @__PURE__ */ new Map();
+  function readOverrides(session) {
+    try {
+      const projections = ctx.get("sessionProjections");
+      const state = projections?.stateOf?.(session, "capabilityOverrides");
+      if (state !== void 0) return state;
+    } catch {
+    }
+    return overrideMemory.get(session.id) ?? EMPTY_CAPABILITY_OVERRIDES;
+  }
+  function setOverrides(session, next) {
+    overrideMemory.set(session.id, next);
+    try {
+      session.append(CAPABILITY_OVERRIDES_EVENT, next, { ignorable: true });
+    } catch (error62) {
+      process.stderr.write(`[enpoi-capabilities] capability overrides append failed: ${error62 instanceof Error ? error62.message : String(error62)}
+`);
+    }
+  }
+  const capabilityOverridesService = {
+    read: (session) => readOverrides(session),
+    set: (session, kind, id, value) => {
+      const next = withCapabilityOverride(readOverrides(session), kind, id, value);
+      setOverrides(session, next);
+      process.stderr.write(`[enpoi-capabilities] capability override: session ${session.id} ${kind}.${id}=${value === null ? "default" : String(value)}
+`);
+      return next;
+    }
+  };
+  ctx.provide("capabilityOverrides", capabilityOverridesService);
+  try {
+    ;
+    ctx.get("sessionProjections")?.register?.(capabilityOverridesProjection);
+  } catch (error62) {
+    process.stderr.write(`[enpoi-capabilities] capability overrides projection registration failed: ${error62 instanceof Error ? error62.message : String(error62)}
+`);
+  }
+  function effectiveStateFor(session) {
+    const defaults = initialCapabilitiesState(getGlobalDefaults());
+    if (session === void 0 || typeof session.id !== "string") return defaults;
+    return effectiveCapabilitiesState(defaults, readOverrides(session));
+  }
   const disposeAssemble = ctx.on("system-prompt/assemble", (async (_assembly, context, next) => {
     const assembled = await next();
     if (!Array.isArray(assembled.tools)) return assembled;
-    const state = initialCapabilitiesState(getGlobalDefaults());
+    const scopeForCaps = context?.scope;
+    const state = effectiveStateFor(scopeForCaps?.session);
     const disabled = new Set(
       Object.entries(state.tools).filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id)).map(([id]) => id)
     );
@@ -22459,7 +22581,7 @@ ${rows.map(renderMountRow).join("\n")}`;
     if (decision.kind !== "enter") return decision;
     const messages = decision.messages;
     if (!Array.isArray(messages)) return decision;
-    const state = initialCapabilitiesState(getGlobalDefaults());
+    const state = effectiveStateFor(params?.agent?.session);
     const disabledSkillIds = new Set(
       Object.entries(state.skills).filter(([, enabled]) => enabled === false).map(([id]) => id)
     );
@@ -22656,7 +22778,7 @@ ${rows.map(renderMountRow).join("\n")}`;
   });
   ctx.provide("forwardedApprovals", forwardedApprovalsSeam(approvalForwarding));
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
-    const state = initialCapabilitiesState(getGlobalDefaults());
+    const state = effectiveStateFor(exec.agent?.session);
     const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs());
     if (!capabilityDecision.allowed) {
       return { kind: "deny", reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` };

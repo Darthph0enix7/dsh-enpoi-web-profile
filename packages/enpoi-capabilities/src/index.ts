@@ -43,6 +43,11 @@ import {
   serverModeOf, serverNameOf,
   type McpMountRow, type McpServerRecord,
 } from './mcp-mounts'
+import {
+  capabilityOverridesProjection, effectiveCapabilitiesState, withCapabilityOverride,
+  CAPABILITY_OVERRIDES_EVENT, EMPTY_CAPABILITY_OVERRIDES,
+  type CapabilityOverrideKind, type CapabilityOverrideRecord,
+} from './capability-overrides'
 import { stripUnavailableToolGuidance } from './prompt-honesty'
 import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
@@ -300,6 +305,63 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     unmount: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }>
   } | undefined
 
+  /** One session as the override service reads it. */
+  interface OverrideSessionLike {
+    id: string
+    append: (type: string, data: unknown, options?: { ignorable?: boolean }) => void
+  }
+
+  /** In-memory fallback for sessions whose projection registry is absent. */
+  const overrideMemory = new Map<string, CapabilityOverrideRecord>()
+
+  /** The session's override record: the durable projection first, memory otherwise. */
+  function readOverrides(session: OverrideSessionLike): CapabilityOverrideRecord {
+    try {
+      const projections = ctx.get('sessionProjections') as
+        | { stateOf?: (session: unknown, key: string) => CapabilityOverrideRecord | undefined }
+        | undefined
+      const state = projections?.stateOf?.(session, 'capabilityOverrides')
+      if (state !== undefined) return state
+    } catch {
+      // Fall through to the in-memory record.
+    }
+    return overrideMemory.get(session.id) ?? EMPTY_CAPABILITY_OVERRIDES
+  }
+
+  /** Persist the session's override record (durable event + memory mirror). */
+  function setOverrides(session: OverrideSessionLike, next: CapabilityOverrideRecord): void {
+    overrideMemory.set(session.id, next)
+    try {
+      session.append(CAPABILITY_OVERRIDES_EVENT, next, { ignorable: true })
+    } catch (error) {
+      process.stderr.write(`[enpoi-capabilities] capability overrides append failed: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+  }
+
+  /** The session-scoped override service consumed by the RPC and the filters. */
+  const capabilityOverridesService = {
+    read: (session: OverrideSessionLike): CapabilityOverrideRecord => readOverrides(session),
+    set: (session: OverrideSessionLike, kind: CapabilityOverrideKind, id: string, value: boolean | null): CapabilityOverrideRecord => {
+      const next = withCapabilityOverride(readOverrides(session), kind, id, value)
+      setOverrides(session, next)
+      process.stderr.write(`[enpoi-capabilities] capability override: session ${session.id} ${kind}.${id}=${value === null ? 'default' : String(value)}\n`)
+      return next
+    },
+  }
+  ctx.provide('capabilityOverrides', capabilityOverridesService)
+  try {
+    ;(ctx.get('sessionProjections') as { register?: (unit: unknown) => void } | undefined)?.register?.(capabilityOverridesProjection)
+  } catch (error) {
+    process.stderr.write(`[enpoi-capabilities] capability overrides projection registration failed: ${error instanceof Error ? error.message : String(error)}\n`)
+  }
+
+  /** The effective capabilities state for one session (defaults ⊕ overrides). */
+  function effectiveStateFor(session: { id?: string } | undefined): ReturnType<typeof initialCapabilitiesState> {
+    const defaults = initialCapabilitiesState(getGlobalDefaults())
+    if (session === undefined || typeof session.id !== 'string') return defaults
+    return effectiveCapabilitiesState(defaults, readOverrides(session as OverrideSessionLike))
+  }
+
   // 1b. Invariant B1b: Disabled tools are STRIPPED from the model-facing tool
   // schema entirely (zero token cost, no instruction-following risk). The
   // system-prompt/assemble waterfall carries the assembled tool list; we
@@ -321,7 +383,8 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       sections?: Array<{ name: string; order: number; text: string; interpolate?: boolean }>
     }
     if (!Array.isArray(assembled.tools)) return assembled
-    const state = initialCapabilitiesState(getGlobalDefaults())
+    const scopeForCaps = (context as { scope?: { session?: { id?: string } } } | undefined)?.scope
+    const state = effectiveStateFor(scopeForCaps?.session)
     const disabled = new Set(
       Object.entries(state.tools)
         .filter(([id, enabled]) => !enabled && !PROTECTED_CAPABILITIES.has(id))
@@ -947,9 +1010,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     const messages = decision.messages
     if (!Array.isArray(messages)) return decision
 
-    const state = initialCapabilitiesState(getGlobalDefaults())
-    // Key-driven: ANY skill disabled in settings is stripped — including skills
-    // created on disk after this plugin was written (OpenCode-parity dynamics).
+    const state = effectiveStateFor(params?.agent?.session)
+    // Key-driven: ANY skill disabled in settings (or overridden off in this
+    // session) is stripped — including skills created on disk after this
+    // plugin was written (OpenCode-parity dynamics).
     const disabledSkillIds = new Set(
       Object.entries(state.skills).filter(([, enabled]) => enabled === false).map(([id]) => id),
     )
@@ -1259,7 +1323,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
     // before guardReason, so a disabled tool with an ask policy would otherwise
     // prompt and then deny after the user clicks allow.
-    const state = initialCapabilitiesState(getGlobalDefaults())
+    const state = effectiveStateFor((exec.agent as { session?: { id?: string } } | undefined)?.session)
     const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs())
     if (!capabilityDecision.allowed) {
       return { kind: 'deny', reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` }
