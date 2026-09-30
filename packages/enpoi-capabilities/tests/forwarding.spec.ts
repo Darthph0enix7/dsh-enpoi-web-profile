@@ -213,6 +213,12 @@ describe('Full access = applied parent judgement (doc 82 item 8)', () => {
     expect(derivedRiskOf({ toolName: 'write', args: { file_path: '/ws/a.txt' }, cwd: '/ws' })).toContain('filesystem path')
     expect(derivedRiskOf({ toolName: 'write', args: { file_path: '/etc/passwd' }, cwd: '/ws' })).toContain('/etc/passwd')
     expect(derivedRiskOf({ toolName: 'bash', args: { command: 'rm -rf /tmp/x' }, cwd: '/ws' })).toContain('rail recursive-delete')
+    // The adjacency scan is the policy guard's token scan: a flag fragment is
+    // not a verb, so a read-only probe (`uname -rm` inside a wrapper) is clean.
+    expect(derivedRiskOf({ toolName: 'bash', args: { command: 'uname -rm' }, cwd: '/ws' })).toBeUndefined()
+    expect(derivedRiskOf({ toolName: 'bash', args: { command: 'echo -rm' }, cwd: '/ws' })).toBeUndefined()
+    // A plain danger-list verb is still the rail-adjacent signal.
+    expect(derivedRiskOf({ toolName: 'bash', args: { command: 'rm plain' }, cwd: '/ws' })).toContain('adjacent')
   })
 
   it('batches identical concurrent Full-access asks into one judgement', async () => {

@@ -206,6 +206,17 @@ function grantsShortCircuit(toolName, agent, grants, tier, pattern) {
   }
   return false;
 }
+function dangerVerbInText(text) {
+  for (const token of text.split(/\s+/)) {
+    const cleaned = token.replace(/^[^A-Za-z0-9_/.-]+/, "").replace(/[^A-Za-z0-9_.-]+$/, "");
+    if (cleaned === "" || cleaned.startsWith("-")) continue;
+    const base = cleaned.slice(cleaned.lastIndexOf("/") + 1);
+    if (base === "") continue;
+    const normalized = base.includes(".") ? base.slice(0, base.indexOf(".")) : base;
+    if (DANGER_VERB_SET.has(normalized)) return base;
+  }
+  return void 0;
+}
 function dangerVerbOfPattern(pattern) {
   const trimmed = pattern.trim();
   if (trimmed === "" || trimmed === "*") return void 0;
@@ -253,6 +264,172 @@ function decideSubCommand(sub, config, agent) {
   if (globalTool === "deny") return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
   if (globalTool === "ask") return { kind: "ask", reason: "operator policy asks for bash", source: "matrix:global", grantTier: "tool" };
   return { kind: "allow", source: "matrix:global" };
+}
+function baseName(word) {
+  return word.slice(word.lastIndexOf("/") + 1);
+}
+function shellWords(sub) {
+  const words = [];
+  let current = "";
+  let quote = null;
+  let i = 0;
+  while (i < sub.length) {
+    const ch = sub[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+      i += 1;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+        i += 1;
+        continue;
+      }
+      if (ch === "\\" && (sub[i + 1] === '"' || sub[i + 1] === "\\")) {
+        current += sub[i + 1];
+        i += 2;
+        continue;
+      }
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < sub.length) {
+      current += sub[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === " " || ch === "	" || ch === "\n") {
+      if (current !== "") {
+        words.push(current);
+        current = "";
+      }
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  if (current !== "") words.push(current);
+  return words;
+}
+function wrapperPrefixEnd(words) {
+  let i = 0;
+  while (i < words.length) {
+    const argv0 = baseName(words[i] ?? "");
+    if (argv0 === "timeout") {
+      i += 1;
+      while (i < words.length && (words[i] ?? "").startsWith("-")) {
+        const flag = words[i] ?? "";
+        i += 1;
+        if (flag === "-k" || flag === "--kill-after" || flag === "-s" || flag === "--signal") i += 1;
+      }
+      if (i < words.length) i += 1;
+      continue;
+    }
+    if (argv0 === "env") {
+      i += 1;
+      while (i < words.length) {
+        const word = words[i] ?? "";
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+          i += 1;
+          continue;
+        }
+        if (word.startsWith("-")) {
+          i += 1;
+          if (word === "-u" || word === "--unset" || word === "-C" || word === "--chdir" || word === "-S" || word === "--split-string") i += 1;
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+function isExpansionWord(word) {
+  return word !== void 0 && /^[$`]/.test(word);
+}
+function versionHelpOnly(words, commandIndex) {
+  const args = words.slice(commandIndex + 1);
+  return args.length > 0 && args.every((arg) => VERSION_HELP_FLAGS.has(arg));
+}
+function hasInlineFlag(words, commandIndex) {
+  return words.slice(commandIndex + 1).some((word) => word === "-c" || word === "-e" || word === "--eval");
+}
+function opaqueAsk(verb, ctx) {
+  return {
+    kind: "ask",
+    reason: `command runs ${verb}, which can execute arbitrary code \u2014 approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead`,
+    source: "scan:opaque-executor",
+    grantTier: "pattern",
+    pattern: ctx.rawCommand
+  };
+}
+function opaqueExpansionAsk(ctx) {
+  return {
+    kind: "ask",
+    reason: "command word is a shell expansion, so the command it runs is opaque \u2014 approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead",
+    source: "scan:opaque-expansion",
+    grantTier: "pattern",
+    pattern: ctx.rawCommand
+  };
+}
+function hiddenDangerAsk(ctx) {
+  return {
+    kind: "ask",
+    reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly; to read file contents use the read tool (or grep/glob to search) instead",
+    source: "scan:hidden-danger",
+    grantTier: "pattern",
+    pattern: ctx.rawCommand
+  };
+}
+function evaluateSubCommand(sub, depth, ctx) {
+  const rules = decideSubCommand(sub, ctx.config, ctx.agent);
+  if (rules.kind !== "allow") return rules;
+  const words = shellWords(sub);
+  const commandIndex = wrapperPrefixEnd(words);
+  const argv0 = baseName(words[commandIndex] ?? "");
+  if (isExpansionWord(words[commandIndex])) return opaqueExpansionAsk(ctx);
+  if (SHELL_INTERPRETERS.has(argv0)) {
+    const inlineIndex = words.findIndex((word, index) => index > commandIndex && word === "-c");
+    if (inlineIndex !== -1) {
+      const inner = words[inlineIndex + 1];
+      if (inner === void 0 || isExpansionWord(inner) || depth >= MAX_WRAPPER_DEPTH) return opaqueAsk(argv0, ctx);
+      return evaluateCompound(inner, depth + 1, ctx);
+    }
+  }
+  if ((SHELL_INTERPRETERS.has(argv0) || INLINE_INTERPRETERS.test(argv0) || SOURCE_BUILTINS.has(argv0)) && versionHelpOnly(words, commandIndex)) {
+    return { kind: "allow", source: "scan:interpreter-version" };
+  }
+  if (SOURCE_BUILTINS.has(argv0)) {
+    const target = words[commandIndex + 1];
+    return target !== void 0 && /^\/etc\/[^/]*release[^/]*$/.test(target) ? { kind: "allow", source: "scan:source-release" } : opaqueAsk(argv0, ctx);
+  }
+  if (OPAQUE_EXECUTORS.has(argv0)) return opaqueAsk(argv0, ctx);
+  if (INLINE_INTERPRETERS.test(argv0) && hasInlineFlag(words, commandIndex)) return opaqueAsk(argv0, ctx);
+  if (HIDDEN_SURFACE.test(sub) && dangerVerbInText(sub) !== void 0) return hiddenDangerAsk(ctx);
+  return rules;
+}
+function evaluateCompound(command, depth, ctx) {
+  let sawAsk = null;
+  let firstAllow = null;
+  for (const raw of splitCompoundCommand(command)) {
+    const decision = evaluateSubCommand(stripEnvPrefixes(raw), depth, ctx);
+    if (decision.kind === "deny") return decision;
+    if (decision.kind === "ask" && sawAsk === null) sawAsk = decision;
+    if (decision.kind === "allow" && firstAllow === null) firstAllow = decision;
+  }
+  if (sawAsk !== null) return sawAsk;
+  return firstAllow ?? { kind: "allow", source: "policy:all-subcommands-allowed" };
 }
 function mcpPolicyRemovalOps(server, config) {
   const prefix = `mcp__${server}__`;
@@ -319,11 +496,12 @@ function resolvePolicy(input) {
     }
     const subs = splitCompoundCommand(command);
     if (subs.length === 0) return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
+    const evalCtx = { config: input.config, agent: input.agent, rawCommand: command };
     let sawAsk = null;
     let firstAllow = null;
     for (const raw of subs) {
       const sub = stripEnvPrefixes(raw);
-      const subDecision = decideSubCommand(sub, input.config, agent);
+      const subDecision = evaluateSubCommand(sub, 0, evalCtx);
       if (subDecision.kind === "deny") {
         const suffix = subs.length > 1 ? " (part of compound command)" : "";
         return { kind: "deny", reason: `${subDecision.reason}${suffix}`, source: subDecision.source };
@@ -345,35 +523,6 @@ function resolvePolicy(input) {
         return { kind: "allow", source: "grant:tool" };
       }
       return sawAsk;
-    }
-    const opaque = subs.map(stripEnvPrefixes).find((sub) => {
-      const argv0 = sub.split(/\s+/)[0] ?? "";
-      if (OPAQUE_EXECUTORS.has(argv0)) return true;
-      return INLINE_INTERPRETERS.test(argv0) && /(?:^|\s)(?:-c|-e|--eval)\b/.test(sub);
-    });
-    if (opaque !== void 0) {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
-        return { kind: "allow", source: "grant:command" };
-      }
-      return {
-        kind: "ask",
-        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code \u2014 approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead`,
-        source: "scan:opaque-executor",
-        grantTier: "pattern",
-        pattern: command
-      };
-    }
-    if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, "pattern", command)) {
-        return { kind: "allow", source: "grant:command" };
-      }
-      return {
-        kind: "ask",
-        reason: "command embeds a shell expansion or wrapper containing a destructive verb \u2014 approve explicitly; to read file contents use the read tool (or grep/glob to search) instead",
-        source: "scan:hidden-danger",
-        grantTier: "pattern",
-        pattern: command
-      };
     }
     return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
   }
@@ -462,7 +611,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERBS, DANGER_VERB_SET, OPAQUE_EXECUTORS, INLINE_INTERPRETERS;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -571,7 +720,6 @@ var init_policy = __esm({
       { pattern: "*", policy: "allow" }
     ];
     HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</;
-    DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/;
     DANGER_VERB_SET = /* @__PURE__ */ new Set([
       "rm",
       "rmdir",
@@ -596,8 +744,12 @@ var init_policy = __esm({
       "killall",
       "truncate"
     ]);
-    OPAQUE_EXECUTORS = /* @__PURE__ */ new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "source", "."]);
+    SHELL_INTERPRETERS = /* @__PURE__ */ new Set(["bash", "sh", "zsh", "dash", "ksh", "fish"]);
     INLINE_INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/;
+    SOURCE_BUILTINS = /* @__PURE__ */ new Set(["source", "."]);
+    OPAQUE_EXECUTORS = /* @__PURE__ */ new Set([...SHELL_INTERPRETERS, "eval", "source", "."]);
+    VERSION_HELP_FLAGS = /* @__PURE__ */ new Set(["--version", "-V", "--help", "-h"]);
+    MAX_WRAPPER_DEPTH = 3;
   }
 });
 
@@ -1269,7 +1421,6 @@ var PATH_ARG_KEYS = [
 var CREDENTIAL_PATH = /(?:^|[\s/'"=@])\.env(?:\.|$|\s)|(?:^|[\s/'"=])\.ssh(?:\/|[\s'"]|$)|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b|(?:^|[\s/'"=])\.netrc\b|(?:^|[\s/'"=])\.aws(?:\/|[\s'"]|$)|(?:^|[\s/'"=])\.git-credentials\b|(?:^|[\s/'"=])known_hosts\b|(?:^|[\s/'"=])credentials(?:\.json)?(?:\s|$)|\/\.config\/gcloud\/|\/\.kube\/config\b|\/\.docker\/config\.json\b|\/\.npmrc\b/i;
 var PRIVILEGE_ESCALATORS = /* @__PURE__ */ new Set(["sudo", "su", "doas", "pkexec"]);
 var EXFILTRATORS = /* @__PURE__ */ new Set(["scp", "sftp", "ftp", "lftp", "nc", "ncat", "socat", "telnet", "sshpass"]);
-var RAIL_ADJACENT_BASH = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/;
 var FS_PATH_TOOLS = /* @__PURE__ */ new Set([
   "read",
   "read_image",
@@ -1399,8 +1550,8 @@ function derivedRiskOf(input) {
   if (rail !== void 0) return `rail ${rail.rail} (${rail.evidence})`;
   if (input.toolName === "bash") {
     const command = typeof input.args?.command === "string" ? input.args.command : "";
-    const adjacent = RAIL_ADJACENT_BASH.exec(command);
-    if (adjacent !== null) return `bash command is adjacent to a never-approvable class (${adjacent[0]})`;
+    const adjacent = dangerVerbInText(command);
+    if (adjacent !== void 0) return `bash command is adjacent to a never-approvable class (${adjacent})`;
     for (const token of command.split(/\s+/)) {
       if (!token.startsWith("/") || token.startsWith("//")) continue;
       if (isOutsideWorkspace(token, input.cwd)) return `path ${token} outside the child workspace`;

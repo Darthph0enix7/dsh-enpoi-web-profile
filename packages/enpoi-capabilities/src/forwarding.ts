@@ -65,6 +65,7 @@
 
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import {
+  dangerVerbInText,
   grantProposalFor,
   grantProposalForOutcome,
   splitCompoundCommand,
@@ -293,13 +294,6 @@ const EXFILTRATORS: ReadonlySet<string> = new Set(['scp', 'sftp', 'ftp', 'lftp',
 /** Interpreters that turn a pipe or process substitution into code execution. */
 const PIPE_INTERPRETER = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/
 
-/**
- * Destructive verbs the rails already classify by class. When one appears
- * WITHOUT a full rail match (a plain `rm file`, not `rm -rf`), the derived
- * Full-access fallback treats the command as rail-adjacent and denies.
- */
-const RAIL_ADJACENT_BASH = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/
-
 /** Read-only filesystem capability that still touches a path argument. */
 const FS_PATH_TOOLS: ReadonlySet<string> = new Set([
   'read', 'read_image', 'read_image_file', 'write', 'edit', 'str_replace_editor', 'list_dir', 'delete', 'move', 'copy',
@@ -500,8 +494,8 @@ export function derivedRiskOf(input: {
   if (rail !== undefined) return `rail ${rail.rail} (${rail.evidence})`
   if (input.toolName === 'bash') {
     const command = typeof input.args?.command === 'string' ? input.args.command : ''
-    const adjacent = RAIL_ADJACENT_BASH.exec(command)
-    if (adjacent !== null) return `bash command is adjacent to a never-approvable class (${adjacent[0]})`
+    const adjacent = dangerVerbInText(command)
+    if (adjacent !== undefined) return `bash command is adjacent to a never-approvable class (${adjacent})`
     for (const token of command.split(/\s+/)) {
       if (!token.startsWith('/') || token.startsWith('//')) continue
       if (isOutsideWorkspace(token, input.cwd)) return `path ${token} outside the child workspace`

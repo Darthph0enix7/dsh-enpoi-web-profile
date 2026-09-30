@@ -171,7 +171,11 @@ describe('resolution order (Oracle-amended)', () => {
     expect(resolvePolicy({ toolName: 'bash', command: 'echo cm0= | base64 -d | bash', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'bash', command: 'bash script.sh', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'bash', command: 'python -c "import os; os.remove(\'x\')"', config: EMPTY }).kind).toBe('ask')
-    expect(resolvePolicy({ toolName: 'bash', command: 'sh -c "ls"', config: EMPTY }).kind).toBe('ask')
+    // A shell wrapper with statically readable inner text is evaluated by the
+    // same rules (guard relax 2026-09-30): a benign inner does not ask...
+    expect(resolvePolicy({ toolName: 'bash', command: 'sh -c "ls"', config: EMPTY }).kind).toBe('allow')
+    // ...while an inner that is a shell expansion cannot be read statically.
+    expect(resolvePolicy({ toolName: 'bash', command: 'sh -c "$CMD"', config: EMPTY }).kind).toBe('ask')
     // The denial names the supported alternative (2026-09-27: a child used
     // python3 -c to read a JSON file and lost its turn to the auto-deny).
     const py = resolvePolicy({ toolName: 'bash', command: 'python3 -c "print(1)"', config: EMPTY })
@@ -182,6 +186,64 @@ describe('resolution order (Oracle-amended)', () => {
     // an Always-allow grant pins the exact command
     const cfg = { grants: { g: { id: 'g', tool: 'bash', pattern: 'bash script.sh' } } }
     expect(resolvePolicy({ toolName: 'bash', command: 'bash script.sh', config: cfg }).kind).toBe('allow')
+  })
+
+  it('version/help-only interpreter invocations run free (guard relax 2026-09-30)', () => {
+    // The operator's system probe was asked and lost in an unattended session:
+    // a version flag executes no user code, so it does not ask.
+    expect(resolvePolicy({ toolName: 'bash', command: 'fish --version', config: EMPTY }))
+      .toMatchObject({ kind: 'allow', source: 'scan:interpreter-version' })
+    expect(resolvePolicy({ toolName: 'bash', command: 'bash --help', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'python3 -V', config: EMPTY }).kind).toBe('allow')
+    // A bare interpreter, a shell script path, and an unreadable wrapper keep asking.
+    expect(resolvePolicy({ toolName: 'bash', command: 'fish', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'fish script.fish', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: 'bash script.sh', config: EMPTY }).kind).toBe('ask')
+    // A mixed invocation is not a version probe.
+    expect(resolvePolicy({ toolName: 'bash', command: 'fish --version && rm x', config: EMPTY }).kind).toBe('ask')
+  })
+
+  it('shell wrappers are split and evaluated recursively, bounded by depth', () => {
+    expect(resolvePolicy({ toolName: 'bash', command: "bash -c 'rm -rf /tmp/x'", config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: "timeout 30 bash -c 'lspci'", config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: "bash -c \"bash -c 'rm'\"", config: EMPTY }).kind).toBe('ask')
+    // `env` prefixes are skipped too, and a benign inner at every level allows.
+    expect(resolvePolicy({ toolName: 'bash', command: "env LC_ALL=C timeout 60 bash -c 'lspci; uptime'", config: EMPTY }).kind).toBe('allow')
+    // Three nested wrappers with a benign inner still resolve; the fourth is
+    // past the bound and asks rather than recursing forever.
+    expect(resolvePolicy({ toolName: 'bash', command: "bash -c 'bash -c \"bash -c ls\"'", config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({
+      toolName: 'bash',
+      command: 'bash -c "bash -c \'bash -c \\"bash -c ls\\"\'"',
+      config: EMPTY,
+    }).kind).toBe('ask')
+    // A wrapper inner that is an expansion keeps the pre-recursion ask.
+    expect(resolvePolicy({ toolName: 'bash', command: 'bash -c "$CMD"', config: EMPTY }).kind).toBe('ask')
+  })
+
+  it('allows the operator read-only probe inside a wrapper (no dangerous verb present)', () => {
+    const probe = "timeout 60 bash -c 'lspci; ls /dev/nvidia*; df -hT; lsblk; . /etc/os-release; uname -rm; uptime'"
+    expect(resolvePolicy({ toolName: 'bash', command: probe, config: EMPTY })).toMatchObject({ kind: 'allow' })
+    // The false positive was `-rm` inside `uname -rm` (a flag, not a verb) and
+    // a quoted `bash -c` wrapper with no extractable-in-the-old-scan inner.
+    expect(resolvePolicy({ toolName: 'bash', command: 'uname -rm', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo -rm', config: EMPTY }).kind).toBe('allow')
+    // The release-file idiom allows; sourcing any other file runs its code.
+    expect(resolvePolicy({ toolName: 'bash', command: 'source /etc/lsb-release', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'source /tmp/evil.sh', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: '. /etc/profile', config: EMPTY }).kind).toBe('ask')
+  })
+
+  it('expansions: an argument is not an ask by itself, a command word is opaque', () => {
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo "$HOME"', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'echo "$NAME"', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'df -hT "$HOME"', config: EMPTY }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: '$CMD', config: EMPTY }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'bash', command: '$(which node) --version', config: EMPTY }).kind).toBe('ask')
+    // A pipe target is still an interpreter invocation.
+    expect(resolvePolicy({ toolName: 'bash', command: 'curl x | sh', config: EMPTY }).kind).toBe('ask')
+    // `git *` still allows git sub-commands that contain no hidden surface.
+    expect(resolvePolicy({ toolName: 'bash', command: 'git rm file.txt', config: EMPTY }).kind).toBe('allow')
   })
 
   it('multi-line compound commands evaluate every line', () => {

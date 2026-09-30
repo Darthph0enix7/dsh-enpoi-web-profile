@@ -350,22 +350,39 @@ export function grantsShortCircuit(
 const HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</
 
 /**
- * Dangerous verbs anywhere in the raw text (word-boundary), used ONLY when a
- * hidden surface is present — a plain `git rm` never trips this because its
- * sub-command is evaluated structurally and matched by `git *`.
- */
-const DANGER_VERBS = /\b(?:rm|rmdir|unlink|dd|mkfs(?:\.[a-z0-9]+)?|fdisk|sfdisk|parted|shutdown|reboot|poweroff|halt|wipefs|shred|chmod|chown|mount|umount|kill|pkill|killall|truncate)\b/
-
-/**
- * The danger-list verbs as a set: the same vocabulary {@link DANGER_VERBS}
- * scans for, used to name the broad action ("allow all rm"). `mkfs.ext4`
- * normalizes to `mkfs` for membership, and the LABEL keeps the argv0 spelling.
+ * Dangerous verbs in raw text, used ONLY when a hidden surface is present — a
+ * plain `git rm` never trips this because its sub-command is evaluated
+ * structurally and matched by `git *`.
  */
 const DANGER_VERB_SET: ReadonlySet<string> = new Set([
   'rm', 'rmdir', 'unlink', 'dd', 'mkfs', 'fdisk', 'sfdisk', 'parted', 'shutdown',
   'reboot', 'poweroff', 'halt', 'wipefs', 'shred', 'chmod', 'chown', 'mount',
   'umount', 'kill', 'pkill', 'killall', 'truncate',
 ])
+
+/**
+ * The first danger-list verb appearing as a stand-alone shell word in one text
+ * span, or `undefined` when there is none. This is a token scan, not a
+ * word-boundary regex: surrounding shell punctuation (quotes, `$(`, backticks,
+ * `;`, `|`, redirects, parentheses) is stripped, a leading `-` marks a flag and
+ * is never a verb, and the basename is matched so `/bin/rm` counts. A version
+ * suffix normalizes for membership but the spelling is kept (`mkfs.ext4` →
+ * `mkfs.ext4`). A flag fragment (`uname -rm`, `--rm`) and an ordinary argument
+ * expansion (`echo "$HOME"`) are therefore not verbs.
+ * @param text - one sub-command or wrapper-inner segment.
+ * @returns the verb as spelled, or undefined.
+ */
+export function dangerVerbInText(text: string): string | undefined {
+  for (const token of text.split(/\s+/)) {
+    const cleaned = token.replace(/^[^A-Za-z0-9_/.-]+/, '').replace(/[^A-Za-z0-9_.-]+$/, '')
+    if (cleaned === '' || cleaned.startsWith('-')) continue
+    const base = cleaned.slice(cleaned.lastIndexOf('/') + 1)
+    if (base === '') continue
+    const normalized = base.includes('.') ? base.slice(0, base.indexOf('.')) : base
+    if (DANGER_VERB_SET.has(normalized)) return base
+  }
+  return undefined
+}
 
 /**
  * The danger-list verb a bash rule pattern asks for, or `undefined` for an
@@ -397,11 +414,23 @@ function patternAsk(pattern: string, reason: string, source: string): PolicyDeci
   }
 }
 
-/** Interpreters whose invocation can execute arbitrary code. */
-const OPAQUE_EXECUTORS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'eval', 'source', '.'])
+/** Shell interpreters: a bare call, a script path, or an inline `-c` command can execute arbitrary code. */
+const SHELL_INTERPRETERS: ReadonlySet<string> = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish'])
 
 /** Interpreters where only the inline (-c/-e/--eval) form is opaque. */
 const INLINE_INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|deno|bun|php)$/
+
+/** Source builtins: a bare `.`/`source` reads stdin; with a path it reads that file. */
+const SOURCE_BUILTINS: ReadonlySet<string> = new Set(['source', '.'])
+
+/** Interpreters whose invocation can execute arbitrary code. */
+const OPAQUE_EXECUTORS = new Set([...SHELL_INTERPRETERS, 'eval', 'source', '.'])
+
+/** Version/help flags: an interpreter invoked with ONLY these runs no user code. */
+const VERSION_HELP_FLAGS: ReadonlySet<string> = new Set(['--version', '-V', '--help', '-h'])
+
+/** Bound on nested wrapper inspection (`bash -c "bash -c '…'"`). */
+const MAX_WRAPPER_DEPTH = 3
 
 /** One sub-command's decision through the four tiers (no grants, no compound). */
 function decideSubCommand(
@@ -437,6 +466,260 @@ function decideSubCommand(
   if (globalTool === 'deny') return { kind: 'deny', reason: 'operator policy denies bash', source: 'matrix:global' }
   if (globalTool === 'ask') return { kind: 'ask', reason: 'operator policy asks for bash', source: 'matrix:global', grantTier: 'tool' }
   return { kind: 'allow', source: 'matrix:global' }
+}
+
+/** The basename of one shell word (`/usr/bin/bash` → `bash`). */
+function baseName(word: string): string {
+  return word.slice(word.lastIndexOf('/') + 1)
+}
+
+/**
+ * Split a sub-command into shell words, honoring single/double quotes and
+ * backslash escapes. Quotes are dropped and no expansion is performed: this is
+ * a lexical read for recognizing interpreters and wrappers, never an execution
+ * model.
+ * @param sub - one sub-command.
+ * @returns the words with quoting removed.
+ */
+function shellWords(sub: string): string[] {
+  const words: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  let i = 0
+  while (i < sub.length) {
+    const ch = sub[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else current += ch
+      i += 1
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null
+        i += 1
+        continue
+      }
+      if (ch === '\\' && (sub[i + 1] === '"' || sub[i + 1] === '\\')) {
+        current += sub[i + 1]
+        i += 2
+        continue
+      }
+      current += ch
+      i += 1
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      i += 1
+      continue
+    }
+    if (ch === '\\' && i + 1 < sub.length) {
+      current += sub[i + 1]
+      i += 2
+      continue
+    }
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      if (current !== '') {
+        words.push(current)
+        current = ''
+      }
+      i += 1
+      continue
+    }
+    current += ch
+    i += 1
+  }
+  if (current !== '') words.push(current)
+  return words
+}
+
+/**
+ * Index of the effective command word in a wrapper-prefixed word list: a
+ * leading `timeout [flags] <duration>` or `env [flags] [KEY=VALUE]…` prefix is
+ * skipped. Option values that take an argument (`timeout -k/--kill-after/
+ * -s/--signal`, `env -u/--unset/-C/--chdir/-S/--split-string`) are skipped with
+ * it; an unparsable prefix stops where it stands, which keeps the ask for the
+ * unrecognized form.
+ * @param words - the sub-command's shell words.
+ * @returns the index of the command word (0 when there is no prefix).
+ */
+function wrapperPrefixEnd(words: string[]): number {
+  let i = 0
+  while (i < words.length) {
+    const argv0 = baseName(words[i] ?? '')
+    if (argv0 === 'timeout') {
+      i += 1
+      while (i < words.length && (words[i] ?? '').startsWith('-')) {
+        const flag = words[i] ?? ''
+        i += 1
+        if (flag === '-k' || flag === '--kill-after' || flag === '-s' || flag === '--signal') i += 1
+      }
+      if (i < words.length) i += 1
+      continue
+    }
+    if (argv0 === 'env') {
+      i += 1
+      while (i < words.length) {
+        const word = words[i] ?? ''
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+          i += 1
+          continue
+        }
+        if (word.startsWith('-')) {
+          i += 1
+          if (word === '-u' || word === '--unset' || word === '-C' || word === '--chdir'
+            || word === '-S' || word === '--split-string') i += 1
+          continue
+        }
+        break
+      }
+      continue
+    }
+    break
+  }
+  return i
+}
+
+/** Whether one word is a pure expansion (`$CMD`, `${CMD}`, `$(cmd)`, `` `cmd` ``). */
+function isExpansionWord(word: string | undefined): boolean {
+  return word !== undefined && /^[$`]/.test(word)
+}
+
+/**
+ * Whether every argument following the command word is a version/help flag
+ * (and there is at least one).
+ * @param words - the sub-command's shell words.
+ * @param commandIndex - the effective command word's index.
+ * @returns `true` only for a version/help-only invocation.
+ */
+function versionHelpOnly(words: string[], commandIndex: number): boolean {
+  const args = words.slice(commandIndex + 1)
+  return args.length > 0 && args.every(arg => VERSION_HELP_FLAGS.has(arg))
+}
+
+/** Whether an inline interpreter carries executable code (`-c`, `-e`, `--eval`). */
+function hasInlineFlag(words: string[], commandIndex: number): boolean {
+  return words.slice(commandIndex + 1).some(word => word === '-c' || word === '-e' || word === '--eval')
+}
+
+/**
+ * What one bash call's recursive evaluation carries: the resolved policy
+ * config, the asking agent, and the raw command. The raw command is the
+ * exact-command pin every opaque/scan ask records, so an Always-allow grant
+ * written for the full call keeps absorbing it.
+ */
+interface BashEvaluationContext {
+  readonly config: PermissionPolicyConfig
+  readonly agent: string | undefined
+  readonly rawCommand: string
+}
+
+/** An opaque-executor ask pinned to the full raw command. */
+function opaqueAsk(verb: string, ctx: BashEvaluationContext): PolicyDecision {
+  return {
+    kind: 'ask',
+    reason: `command runs ${verb}, which can execute arbitrary code — approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead`,
+    source: 'scan:opaque-executor',
+    grantTier: 'pattern',
+    pattern: ctx.rawCommand,
+  }
+}
+
+/** An expansion-as-command-word ask pinned to the full raw command. */
+function opaqueExpansionAsk(ctx: BashEvaluationContext): PolicyDecision {
+  return {
+    kind: 'ask',
+    reason: 'command word is a shell expansion, so the command it runs is opaque — approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead',
+    source: 'scan:opaque-expansion',
+    grantTier: 'pattern',
+    pattern: ctx.rawCommand,
+  }
+}
+
+/** A hidden-surface danger ask pinned to the full raw command. */
+function hiddenDangerAsk(ctx: BashEvaluationContext): PolicyDecision {
+  return {
+    kind: 'ask',
+    reason: 'command embeds a shell expansion or wrapper containing a destructive verb — approve explicitly; to read file contents use the read tool (or grep/glob to search) instead',
+    source: 'scan:hidden-danger',
+    grantTier: 'pattern',
+    pattern: ctx.rawCommand,
+  }
+}
+
+/**
+ * One sub-command's decision, including wrapper recursion. Rules first (agent
+ * and global patterns), then: an expansion as the command word asks (opaque
+ * execution); a shell wrapper `<interp> -c '<inner>'` is split and evaluated by
+ * the same rules (bounded by {@link MAX_WRAPPER_DEPTH}) and asks only when that
+ * inner evaluation asks; a wrapper whose inner cannot be extracted statically
+ * (missing, expansion, past the depth bound) keeps the pre-recursion ask. An
+ * interpreter invoked with only version/help flags is allowed; a bare
+ * interpreter, a shell script path, and inline `-c`/`-e` code still ask; a
+ * hidden surface containing a stand-alone danger-list verb asks. An expansion
+ * as an ordinary argument is not itself an ask — the segment's verb decides.
+ * @param sub - one env-stripped sub-command.
+ * @param depth - wrapper nesting already entered (0 at the top level).
+ * @param ctx - config, agent, and the raw command for exact-command pins.
+ * @returns the sub-command's decision.
+ */
+function evaluateSubCommand(sub: string, depth: number, ctx: BashEvaluationContext): PolicyDecision {
+  const rules = decideSubCommand(sub, ctx.config, ctx.agent)
+  if (rules.kind !== 'allow') return rules
+  const words = shellWords(sub)
+  const commandIndex = wrapperPrefixEnd(words)
+  const argv0 = baseName(words[commandIndex] ?? '')
+  if (isExpansionWord(words[commandIndex])) return opaqueExpansionAsk(ctx)
+  if (SHELL_INTERPRETERS.has(argv0)) {
+    const inlineIndex = words.findIndex((word, index) => index > commandIndex && word === '-c')
+    if (inlineIndex !== -1) {
+      const inner = words[inlineIndex + 1]
+      if (inner === undefined || isExpansionWord(inner) || depth >= MAX_WRAPPER_DEPTH) return opaqueAsk(argv0, ctx)
+      return evaluateCompound(inner, depth + 1, ctx)
+    }
+  }
+  if ((SHELL_INTERPRETERS.has(argv0) || INLINE_INTERPRETERS.test(argv0) || SOURCE_BUILTINS.has(argv0))
+    && versionHelpOnly(words, commandIndex)) {
+    return { kind: 'allow', source: 'scan:interpreter-version' }
+  }
+  // `.`/`source` with a path reads that file; only the release-file idiom of
+  // read-only probes (`. /etc/os-release`) allows — sourcing any other file
+  // runs its code and stays opaque. A bare dotted invocation reads stdin.
+  if (SOURCE_BUILTINS.has(argv0)) {
+    const target = words[commandIndex + 1]
+    return target !== undefined && /^\/etc\/[^/]*release[^/]*$/.test(target)
+      ? { kind: 'allow', source: 'scan:source-release' }
+      : opaqueAsk(argv0, ctx)
+  }
+  if (OPAQUE_EXECUTORS.has(argv0)) return opaqueAsk(argv0, ctx)
+  if (INLINE_INTERPRETERS.test(argv0) && hasInlineFlag(words, commandIndex)) return opaqueAsk(argv0, ctx)
+  if (HIDDEN_SURFACE.test(sub) && dangerVerbInText(sub) !== undefined) return hiddenDangerAsk(ctx)
+  // A plain allow keeps the tier that allowed it (agent rule, global rule, or
+  // the catch-all), so the resolution source stays attributable.
+  return rules
+}
+
+/**
+ * Evaluate one command text (a full call or a wrapper inner): split the
+ * compound at quote depth 0, env-strip each part, and aggregate — a deny
+ * anywhere denies, the first ask wins, and every-sub-allowed allows.
+ * @param command - the command text.
+ * @param depth - wrapper nesting already entered.
+ * @param ctx - config, agent, and the raw command for exact-command pins.
+ * @returns the aggregate decision.
+ */
+function evaluateCompound(command: string, depth: number, ctx: BashEvaluationContext): PolicyDecision {
+  let sawAsk: PolicyDecision | null = null
+  let firstAllow: PolicyDecision | null = null
+  for (const raw of splitCompoundCommand(command)) {
+    const decision = evaluateSubCommand(stripEnvPrefixes(raw), depth, ctx)
+    if (decision.kind === 'deny') return decision
+    if (decision.kind === 'ask' && sawAsk === null) sawAsk = decision
+    if (decision.kind === 'allow' && firstAllow === null) firstAllow = decision
+  }
+  if (sawAsk !== null) return sawAsk
+  return firstAllow ?? { kind: 'allow', source: 'policy:all-subcommands-allowed' }
 }
 
 export interface PolicyResolutionInput {
@@ -589,12 +872,13 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
     }
     const subs = splitCompoundCommand(command)
     if (subs.length === 0) return { kind: 'deny', reason: 'empty bash command', source: 'policy:empty' }
+    const evalCtx: BashEvaluationContext = { config: input.config, agent: input.agent, rawCommand: command }
 
     let sawAsk: PolicyDecision | null = null
     let firstAllow: PolicyDecision | null = null
     for (const raw of subs) {
       const sub = stripEnvPrefixes(raw)
-      const subDecision = decideSubCommand(sub, input.config, agent)
+      const subDecision = evaluateSubCommand(sub, 0, evalCtx)
       if (subDecision.kind === 'deny') {
         const suffix = subs.length > 1 ? ' (part of compound command)' : ''
         return { kind: 'deny', reason: `${subDecision.reason}${suffix}`, source: subDecision.source }
@@ -620,42 +904,6 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
         return { kind: 'allow', source: 'grant:tool' }
       }
       return sawAsk
-    }
-    // Fail-safe 1: opaque executors. A shell/interpreter invocation can run
-    // anything (including `base64 -d | bash` payloads) regardless of the
-    // verbs visible in the text — ask explicitly. An Always-allow grant pins
-    // the exact raw command string.
-    const opaque = subs.map(stripEnvPrefixes).find((sub) => {
-      const argv0 = sub.split(/\s+/)[0] ?? ''
-      if (OPAQUE_EXECUTORS.has(argv0)) return true
-      return INLINE_INTERPRETERS.test(argv0) && /(?:^|\s)(?:-c|-e|--eval)\b/.test(sub)
-    })
-    if (opaque !== undefined) {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'pattern', command)) {
-        return { kind: 'allow', source: 'grant:command' }
-      }
-      return {
-        kind: 'ask',
-        reason: `command runs ${opaque.split(/\s+/)[0]}, which can execute arbitrary code — approve explicitly; to read, decode, or search files use the read, grep, or glob tools instead`,
-        source: 'scan:opaque-executor',
-        grantTier: 'pattern',
-        pattern: command,
-      }
-    }
-    // Fail-safe 2: hidden surfaces: an otherwise-allowed command that embeds
-    // a dangerous verb inside substitution/wrapper syntax asks explicitly.
-    // An Always-allow grant pins the exact raw command string.
-    if (HIDDEN_SURFACE.test(command) && DANGER_VERBS.test(command)) {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'pattern', command)) {
-        return { kind: 'allow', source: 'grant:command' }
-      }
-      return {
-        kind: 'ask',
-        reason: 'command embeds a shell expansion or wrapper containing a destructive verb — approve explicitly; to read file contents use the read tool (or grep/glob to search) instead',
-        source: 'scan:hidden-danger',
-        grantTier: 'pattern',
-        pattern: command,
-      }
     }
     return { kind: 'allow', source: firstAllow?.source ?? 'policy:all-subcommands-allowed' }
   }
