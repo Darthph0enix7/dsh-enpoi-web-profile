@@ -133,12 +133,11 @@
         (codebase mapping, symbol search, tracing), librarian (web/docs/API
         research with citations), designer (UI/UX, styling, frontend craft).
         ALWAYS name the role first in the description — "librarian: research X",
-        "fixer: implement Y" — that is how the child receives its persona.
-        Every dispatch is a fresh, self-contained session: there is no
-        continuation and no child to resume. A follow-up is a NEW dispatch that
-        carries the full context — including what the previous child reported
-        and what has changed since. No reuse, no agent ids, no send_message, no
-        job_output — nothing to poll, nothing to resume. Two modes:
+        "fixer: implement Y" — that is how the child receives its persona. New
+        work is always a fresh, self-contained dispatch: a follow-up to a
+        finished task is a NEW dispatch that carries the full context —
+        including what the previous child reported and what has changed since.
+        Two modes:
         * Background (the default): the call returns immediately, you finish
           your turn or keep working, and when the child settles its outcome and
           final report are injected into this session — a notice wakes the
@@ -147,7 +146,14 @@
           arrive as each finishes.
         * run_in_background: false — the call waits and returns the report in
           the tool result; use it when your very next step needs that answer.
-        One task per dispatch — for a follow-up, dispatch again with the full
+      - Continuation is for RECOVERY, not a second dispatch lane. A child that
+        stopped before its end result names its session id and the stop reason
+        in the settlement notice; inspect that session with the session-query
+        tools (session_trace / session_event_read), then continue it with
+        send_message if its context is worth resuming — do not re-brief a fresh
+        child for the same work. New work is always a fresh dispatch; there is
+        no child to poll and no job id to watch — the notice IS the delivery.
+        One task per dispatch — for new work dispatch again with the full
         context. The roster above is authoritative: never search the repository
         or the harness sources to find out which agents exist.
       - memory_save / memory_search / memory_rescind / memory_confirm —
@@ -348,26 +354,29 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
-      # Enpoi: disabled. send_message reused parked children by id instead of
-      # dispatching fresh work; delegation is one-shot (see tool-subagent).
-      disabled: true
+      # Enpoi: enabled for RECOVERY. send_message continues a child that
+      # stopped before its end result — the settlement notice names its
+      # session id and stop reason. New work stays a fresh dispatch (see
+      # tool-subagent).
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-      # Enpoi: disabled with send_message — no id bookkeeping for workers.
-      disabled: true
+      # Enpoi: enabled with send_message — lists this parent's continuable
+      # children by id for the recovery flow.
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
-        # Enpoi: every dispatch is a fresh session. Background dispatches are
+        # Enpoi: new work is always a fresh session. Background dispatches are
         # continuable fibers whose settlement notice carries the child's final
         # report and wakes/steers this session (no job ids, no job_output, no
-        # tool-jobs notices, no send_message — the id-based control tools are
-        # disabled below). run_in_background: false waits in the tool result.
-        # Only the Oracle keeps a session across a query, inside its own plugin.
+        # tool-jobs notices). Recovery is deliberate: a child that stopped
+        # before its end result names its session id and stop reason in the
+        # notice, and send_message below continues that session with its
+        # history. run_in_background: false waits in the tool result. Only the
+        # Oracle keeps a session across a query, inside its own plugin.
         backgroundMode: continuable
 
     - id: tool-subagent-fork

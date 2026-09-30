@@ -229,26 +229,29 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
-      # Enpoi: disabled. send_message reused parked children by id instead of
-      # dispatching fresh work; delegation is one-shot (see tool-subagent).
-      disabled: true
+      # Enpoi: enabled for RECOVERY. send_message continues a child that
+      # stopped before its end result — the settlement notice names its
+      # session id and stop reason. New work stays a fresh dispatch (see
+      # tool-subagent).
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-      # Enpoi: disabled with send_message — no id bookkeeping for workers.
-      disabled: true
+      # Enpoi: enabled with send_message — lists this parent's continuable
+      # children by id for the recovery flow.
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
-        # Enpoi: every dispatch is a fresh session. Background dispatches are
+        # Enpoi: new work is always a fresh session. Background dispatches are
         # continuable fibers whose settlement notice carries the child's final
         # report and wakes/steers this session (no job ids, no job_output, no
-        # tool-jobs notices, no send_message — the id-based control tools are
-        # disabled below). run_in_background: false waits in the tool result.
-        # Only the Oracle keeps a session across a query, inside its own plugin.
+        # tool-jobs notices). Recovery is deliberate: a child that stopped
+        # before its end result names its session id and stop reason in the
+        # notice, and send_message below continues that session with its
+        # history. run_in_background: false waits in the tool result. Only the
+        # Oracle keeps a session across a query, inside its own plugin.
         backgroundMode: continuable
 
     - id: tool-subagent-fork

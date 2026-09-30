@@ -677,6 +677,13 @@ var init_policy = __esm({
       session_event_read: "allow",
       session_event_trace: "allow",
       council_list: "allow",
+      // Fleet recovery (doc 07): the orchestrator continues a child that stopped
+      // before its end result — the settlement notice names its session id and
+      // reason. Messaging and listing its own children is core orchestration;
+      // stopping a child stays an ask, like killing a background job.
+      send_message: "allow",
+      list_agents: "allow",
+      interrupt_agent: "ask",
       // The whiteboard is permanent core orchestrator context (doc 66 §3c/§67 §B):
       // its five per-feature asks fold into ONE family policy (the curated
       // `whiteboard_*` row in the Permissions UI, permissions-model.ts
