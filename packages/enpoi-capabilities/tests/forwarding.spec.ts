@@ -143,7 +143,7 @@ describe('rails are never card-approvable', () => {
   })
 })
 
-describe('Full access = applied parent judgement (Adam’s rule, doc 82 item 8)', () => {
+describe('Full access = applied parent judgement (doc 82 item 8)', () => {
   it('applies an allow judgement: allowed-once, named reason, no card, audited', async () => {
     const f = fakeDeps({
       mode: 'full-access',

@@ -31,7 +31,7 @@ pairings:
     remoteSessionId: sess-xyz     # optional; omit to address the alias (create/adopt)
     token: null                   # reserved; sent as Authorization: Bearer, not verified by the host yet
     create:
-      cwd: /home/adam/projects/thing
+      cwd: /home/user/projects/thing
       agentPreset: standard
 ```
 

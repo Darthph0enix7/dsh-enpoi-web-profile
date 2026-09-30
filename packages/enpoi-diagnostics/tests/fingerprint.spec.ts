@@ -4,7 +4,7 @@ import { fingerprintMessage, normalizeMessage, MAX_NORMALIZED_CHARS } from '../s
 describe('normalizeMessage', () => {
   it('strips uuids, numbers, paths, durations, and timestamps', () => {
     const normalized = normalizeMessage(
-      'session 3f9a2c1e-8b7d-4a5f-9c3e-2d1b0a9f8e7d failed after 42ms at /home/adam/.dsh/profiles/web/package.json on 2026-09-22T19:41:03.123Z with 17 retries',
+      'session 3f9a2c1e-8b7d-4a5f-9c3e-2d1b0a9f8e7d failed after 42ms at /home/user/.dsh/profiles/web/package.json on 2026-09-22T19:41:03.123Z with 17 retries',
     )
     expect(normalized).toContain('<uuid>')
     expect(normalized).toContain('<dur>')

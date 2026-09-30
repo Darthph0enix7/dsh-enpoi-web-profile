@@ -75,7 +75,7 @@ const MUTATION_TOOLS = new Set(['bash', 'edit', 'write', 'str_replace_editor'])
 /**
  * Whether an asking session runs in Full access: approval prompts disabled AND
  * the danger-full-access sandbox. That pair is the operator's standing consent
- * (Adam's corrected model, 2026-09-28): a MAIN/root session in this mode
+ * (the corrected model, 2026-09-28): a MAIN/root session in this mode
  * resolves every ask-policy call as allowed without a card, rails included. A
  * delegated child never uses this helper — its ask is forwarded to the parent.
  * @param approvalPolicy - the session's effective approval policy.
@@ -238,7 +238,7 @@ export function stripEnvPrefixes(subCommand: string): string {
  * One pattern against ONE (env-stripped) sub-command:
  * - bare token (`rm`, no space, no star): argv0 exact match
  * - trailing star binds to ARGUMENTS, never the argv0 prefix (`rm*` ≡ `rm`;
- *   `rmdir` stays a separate token — matching Adam's OpenCode list semantics)
+ *   `rmdir` stays a separate token — matching the OpenCode list semantics)
  * - pattern containing a space: glob over the full sub-command string
  */
 export function matchBashPattern(pattern: string, subCommand: string): boolean {
@@ -714,7 +714,7 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
  * policy. Only a tool that can never run is dropped: a `deny` resolution is
  * final — no user can answer it and the executor hard-denies every call — so
  * an explicitly denied tool is absent from the advertised surface rather than
- * shown and refused (Adam's corrected model, 2026-09-28). An `ask` stays
+ * shown and refused (the corrected model, 2026-09-28). An `ask` stays
  * visible because it is answerable: by the human card, by the parent (the
  * doc-55 forwarding path for a delegated child), or by the session's own
  * Full-access mode (the operator's standing consent). A grant resolves the

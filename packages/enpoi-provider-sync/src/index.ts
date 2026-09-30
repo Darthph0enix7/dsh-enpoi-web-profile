@@ -1139,7 +1139,7 @@ export function apply(ctx: Context, config: Config): void {
     const revision = () => settings.describe().find(entry => entry.ns === LLM_NS)?.revision
 
     // Configured routes plus every endpoint this deployment knows about. The
-    // extra endpoints are how a provider Adam has *selected but not yet saved*
+    // extra endpoints are how a provider the operator has *selected but not yet saved*
     // — a preset with a baseURL and no models — gets discovered and cached
     // before the config write that would otherwise refuse it for resolving no
     // models. A catalog-less route is never written to settings unless it is

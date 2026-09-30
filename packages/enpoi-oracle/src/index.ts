@@ -1,7 +1,7 @@
 /**
  * Enpoi Harness — `oracle_review` tool.
  *
- * The Oracle is Adam's senior architectural supervisor and deep reviewer: a
+ * The Oracle is the senior architectural supervisor and deep reviewer: a
  * per-session continuable fiber that reviews plans, logic, and edge cases.
  * Call #1 receives the full package (Living Brief + request + reading-list
  * artifacts); calls #2+ are delta-only continuation turns, so the fiber's KV
@@ -645,7 +645,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
         let fiber = fibers.get(key)
 
         // Query-bound (I13): the oracle fiber is persistent within ONE user query / task.
-        // When Adam sends a new prompt (query boundary), or the child died, reset for a clean task.
+        // When the operator sends a new prompt (query boundary), or the child died, reset for a clean task.
         // Scorecard rollover (doc 35 amendment 6): the old fiber's scorecard
         // seeds the fresh one — 10-consultation rollover must not lose history.
         let rolloverScorecard: OracleFiber['scorecard'] | null = null

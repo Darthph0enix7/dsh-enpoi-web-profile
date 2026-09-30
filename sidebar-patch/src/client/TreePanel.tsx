@@ -55,7 +55,7 @@ export function TreePanel(props: {
     setRefreshTick(tick => tick + 1)
   }, [fsChangedTick])
 
-  // Auto-refresh the tree when the window regains focus (Adam: "come back →
+  // Auto-refresh the tree when the window regains focus (the "come back →
   // fresh" mental model). The refresh tick wipes the level cache.
   useEffect(() => {
     const onFocus = (): void => { setRefreshTick(tick => tick + 1) }

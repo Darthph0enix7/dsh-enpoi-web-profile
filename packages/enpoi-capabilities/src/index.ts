@@ -287,7 +287,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     )
     let kept = disabled.size === 0 ? assembled.tools : assembled.tools.filter(tool => !disabled.has(tool.name))
     const scope = (context as { scope?: AgentLike & { session?: { id?: string } } } | undefined)?.scope
-    // 1e. Approval-mode honesty, both directions (Adam's corrected model,
+    // 1e. Approval-mode honesty, both directions (the corrected model,
     // 2026-09-28): a tool whose effective policy resolves `deny` can never run
     // — the executor hard-denies every call — so it is absent from every
     // advertised surface (hide, never show-then-refuse). An `ask` stays
@@ -320,7 +320,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   //     fiber for the server catalog entry (enpoi-orchestration.mcpServers) —
   //     its mcp__<server>__* tools register and are injected like native tools.
   //     false = the fiber is disposed and the tools vanish from the schema
-  //     entirely (Adam's model: "disabling = not injected at all"). The B1
+  //     entirely (the model: "disabling = not injected at all"). The B1
   //     guard stays as the execution backstop for in-flight turns.
   import('@deepseek-ai/dsh-mcp-client').then(async (mcpClient) => {
     type Fiber = { dispose: () => Promise<void> } & PromiseLike<unknown>
@@ -447,7 +447,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     ctx.on('settings/updated', onTogglesUpdated)
     ctx.on('settings/document-updated', onTogglesUpdated)
 
-    // 2b. Reachability heartbeat (Adam): liveness of each catalog server,
+    // 2b. Reachability heartbeat (operator): liveness of each catalog server,
     //     INDEPENDENT of the enable toggle. green=mounted, blue=running but
     //     toggled off, grey=unreachable. Results land in
     //     enpoi-orchestration.mcpStatus so every client renders the same dots.
@@ -924,7 +924,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         }
         return downstream
       }
-      // Full access (Adam's corrected model, 2026-09-28): a MAIN/root
+      // Full access (the corrected model, 2026-09-28): a MAIN/root
       // session's mode — approval prompts disabled + the danger-full-access
       // sandbox — IS the operator's standing consent. Every ask-policy call
       // resolves allow with the mode named and an audit line: no card, no

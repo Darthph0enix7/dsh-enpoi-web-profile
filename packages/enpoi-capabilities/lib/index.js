@@ -1578,7 +1578,7 @@ var ChildApprovalForwarder = class {
     };
   }
   /**
-   * FULL ACCESS = PARENT JUDGEMENT (Adam, doc 82 item 8). The operator's
+   * FULL ACCESS = PARENT JUDGEMENT (doc 82 item 8). The operator's
    * Full-access mode delegates the answer to the parent agent: the SAME bounded
    * root-side one-shot the card path uses judges this ask and its suggestion is
    * APPLIED in the operator's place — an allow resolves `allowed-once` with the

@@ -28,7 +28,7 @@ const DOCUMENT = [
   '    runawayCeiling: null',
   '    allowModelChange: false',
   '    create:',
-  '      cwd: /home/adam/projects/thing',
+  '      cwd: /home/user/projects/thing',
   '      agentPreset: standard',
   '  - alias: caller-only',
   '    peer: macbook',
@@ -52,7 +52,7 @@ describe('pairing document parser', () => {
     expect(coDev.remoteSessionId).toBe('sess-xyz')
     expect(coDev.token).toBeUndefined()
     expect(coDev.runawayCeiling).toBeUndefined()
-    expect(coDev.create).toMatchObject({ cwd: '/home/adam/projects/thing', agentPreset: 'standard' })
+    expect(coDev.create).toMatchObject({ cwd: '/home/user/projects/thing', agentPreset: 'standard' })
   })
 
   it('resolves only dialable caller-role entries', () => {

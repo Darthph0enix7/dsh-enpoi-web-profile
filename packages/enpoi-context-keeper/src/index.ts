@@ -190,7 +190,7 @@ const PROSE_PROMPT = [
 
 /** Claims-only extraction prompt — decoupled from prose (Oracle amendment 5). */
 const CLAIMS_PROMPT = [
-  'You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about Adam\'s environment, infrastructure, and architecture.',
+  'You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about operator\'s environment, infrastructure, and architecture.',
   'NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.',
   '',
   'Output EXACTLY one line: "CLAIMS:" followed by a JSON array: [{"fact":"...","category":"ARCHITECTURE","tags":"...","source":"tool"}]',

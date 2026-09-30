@@ -13,6 +13,7 @@
  *      harness source when present, with a local replica of the rule as fallback).
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -22,7 +23,7 @@ const PROFILE_ROOT = resolve(TESTS_DIR, '..', '..', '..')
 const PACKAGES_ROOT = join(PROFILE_ROOT, 'packages')
 
 /** Harness root holding session-format-v3-to-v4; override when the checkout moves. */
-const HARNESS_ROOT = process.env['DSH_HARNESS_ROOT'] ?? '/home/adam/deepseek-harness'
+const HARNESS_ROOT = process.env['DSH_HARNESS_ROOT'] ?? join(homedir(), 'deepseek-harness')
 const ENGINE_SOURCES = join(
   HARNESS_ROOT,
   'packages/session/session-format-v3-to-v4/src/message-sources.ts',

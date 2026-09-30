@@ -8,7 +8,7 @@
     - id: enpoi-context-keeper
       name: 'dsh-enpoi-context-keeper'
       config:
-        # Free-quota primary (Adam: freellmapi for background/repetitive work)
+        # Free-quota primary (operator: freellmapi for background/repetitive work)
         # + one fallback (soft-degrading, never blocks).
         provider: freellmapi
         model: auto

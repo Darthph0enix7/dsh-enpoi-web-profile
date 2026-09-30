@@ -30,7 +30,7 @@ pairings:
     remoteSessionId: sess-xyz     # 可选；省略则按 alias 寻址（创建/采纳）
     token: null                   # 可选；以 Authorization: Bearer 发送
     create:
-      cwd: /home/adam/projects/thing
+      cwd: /home/user/projects/thing
       agentPreset: standard
 ```
 

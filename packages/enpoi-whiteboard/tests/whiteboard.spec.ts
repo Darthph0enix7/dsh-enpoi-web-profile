@@ -677,18 +677,18 @@ describe('enpoi-whiteboard context injection (real system-prompt seam)', () => {
       entries: [{ id: 'a', kind: 'path', text: 'docs/67-heart-implementation-plan.md', pinned: true, pinnedAt: 1, version: 2 }],
     })
 
-    const parent = { session: { id: 'parent-session', header: { cwd: '/home/adam' } } }
+    const parent = { session: { id: 'parent-session', header: { cwd: '/home/user' } } }
     const parentSnapshot = renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: parent, agent: parent })) as string
     expect(parentSnapshot).toContain('### Pinned context (v3)')
     expect(parentSnapshot).toContain('docs/67-heart-implementation-plan.md')
 
     // A direct child (durable parentSession lineage) inherits the parent board.
-    const child = { session: { id: 'child-session', header: { cwd: '/home/adam', parentSession: 'parent-session' } } }
+    const child = { session: { id: 'child-session', header: { cwd: '/home/user', parentSession: 'parent-session' } } }
     const childSnapshot = renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: child, agent: child })) as string
     expect(childSnapshot).toContain('### Pinned context (v3)')
 
     // An unrelated session renders nothing (a session board never leaks).
-    const unrelated = { session: { id: 'other-session', header: { cwd: '/home/adam' } } }
+    const unrelated = { session: { id: 'other-session', header: { cwd: '/home/user' } } }
     const otherSnapshot = renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: unrelated, agent: unrelated })) as string
     expect(otherSnapshot).not.toContain('Pinned context')
 
@@ -710,7 +710,7 @@ describe('enpoi-whiteboard context injection (real system-prompt seam)', () => {
     }))
 
     const assemble = async (id: string): Promise<string> => {
-      const agent = { session: { id, header: { cwd: '/home/adam' } } }
+      const agent = { session: { id, header: { cwd: '/home/user' } } }
       return renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: agent, agent })) as string
     }
 

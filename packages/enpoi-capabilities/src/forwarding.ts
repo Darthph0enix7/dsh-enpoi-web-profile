@@ -16,7 +16,7 @@
  *      the parent's own effective policy: an `allow` there passes, anything else
  *      denies with the rail named. The child asking nicely can never lift them.
  *   2. Subtree grants answered earlier on a forwarded card (this session only).
- *   3. FULL ACCESS = PARENT JUDGEMENT (Adam, doc 82 item 8): when the ROOT
+ *   3. FULL ACCESS = PARENT JUDGEMENT (doc 82 item 8): when the ROOT
  *      session runs in Full access / no-restrictions mode (sandbox
  *      `danger-full-access` + approval `never`), the parent's own bounded
  *      reasoner judges each forwarded ask and the judgement is APPLIED in the
@@ -751,7 +751,7 @@ export class ChildApprovalForwarder {
   }
 
   /**
-   * FULL ACCESS = PARENT JUDGEMENT (Adam, doc 82 item 8). The operator's
+   * FULL ACCESS = PARENT JUDGEMENT (doc 82 item 8). The operator's
    * Full-access mode delegates the answer to the parent agent: the SAME bounded
    * root-side one-shot the card path uses judges this ask and its suggestion is
    * APPLIED in the operator's place — an allow resolves `allowed-once` with the

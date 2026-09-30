@@ -1,5 +1,5 @@
 /**
- * Root Full-access seam (Adam's corrected model, 2026-09-28).
+ * Root Full-access seam (the corrected model, 2026-09-28).
  *
  * A MAIN/root session with approval prompts disabled + the danger-full-access
  * sandbox resolves every ask-policy call as ALLOWED — the mode is the

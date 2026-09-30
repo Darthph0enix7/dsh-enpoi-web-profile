@@ -61,7 +61,7 @@ function metaOf(tab: SidebarTab): Record<string, unknown> {
 
 /** Read the persisted tree-panel flag of one editor tab: an explicit
  *  boolean meta wins; otherwise the panel defaults OPEN for every tab
- *  (the tree stays visible when a file opens — Adam's requirement). */
+ *  (the tree stays visible when a file opens — the operator's requirement). */
 function treeOpenOf(tab: SidebarTab): boolean {
   const treeOpen = metaOf(tab).treeOpen
   return typeof treeOpen === 'boolean' ? treeOpen : true

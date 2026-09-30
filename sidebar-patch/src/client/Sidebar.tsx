@@ -870,7 +870,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   }, [state])
 
   /**
-   * Auto-widen the panel on the FIRST file open per session (Adam): a fresh
+   * Auto-widen the panel on the FIRST file open per session (operator): a fresh
    * session seeds the panel at defaultWidthPercent (20% — the tree dock alone
    * nearly fills it, leaving a few characters of editor). When an editor tab
    * with a path becomes active and the panel is still at the seeded default

@@ -99,7 +99,7 @@ describe('enpoi-catalog-rules visibility precedence', () => {
     expect(decision.source).toBe('rule')
     expect(decision.reason).toBe('hidden by rule: free models')
     expect(formatHiddenReason(decision)).toBe('hidden by rule: free models')
-    // Without a label the predicate summary is the reason (Adam's example).
+    // Without a label the predicate summary is the reason (the example).
     const unlabeled = decideVisibility(free, rulesOf({ visibility: { hide: [{ when: { zeroPrice: true } }] } }), 'unknown')
     expect(unlabeled.reason).toBe('hidden by rule: zero-price')
   })

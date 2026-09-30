@@ -109,7 +109,7 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
 
   ctx.tools.register({
     name: 'memory_confirm',
-    description: 'Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action — use only on facts you or Adam verified. Facts saved with memory_save are already committed; confirmation applies to tentative chat-sourced claims.',
+    description: 'Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action — use only on facts you or the operator verified. Facts saved with memory_save are already committed; confirmation applies to tentative chat-sourced claims.',
     parameters: {
       type: 'object',
       properties: {

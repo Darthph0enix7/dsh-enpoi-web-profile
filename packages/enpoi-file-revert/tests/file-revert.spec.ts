@@ -652,7 +652,7 @@ describe('applyResolution', () => {
 })
 
 describe('matrix: 3-turn combination with creation, edit, text-only turn, and conflict resolution', () => {
-  it('Adam incident combination: Turn 1 create + Turn 2 edit + Turn 3 text', async () => {
+  it('Operator incident combination: Turn 1 create + Turn 2 edit + Turn 3 text', async () => {
     // Turn 1: Write file (creates file)
     // Turn 1: User message at seq 5 -> tool mutation at seq 10 (creates file)
     await simulateMutation({

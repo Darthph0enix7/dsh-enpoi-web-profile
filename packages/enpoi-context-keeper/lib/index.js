@@ -136,7 +136,7 @@ var PROSE_PROMPT = [
   "No other text at all \u2014 no preamble, no CLAIMS block, no JSON."
 ].join("\n");
 var CLAIMS_PROMPT = [
-  "You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about Adam's environment, infrastructure, and architecture.",
+  "You are the Enpoi Harness memory extractor. From the [RECENT SESSION EVENTS & TOOL RESULTS] below, extract durable, permanent facts about the operator's environment, infrastructure, and architecture.",
   "NEVER extract, repeat, or retain credentials, passwords, API keys, tokens, or personal secrets.",
   "",
   'Output EXACTLY one line: "CLAIMS:" followed by a JSON array: [{"fact":"...","category":"ARCHITECTURE","tags":"...","source":"tool"}]',

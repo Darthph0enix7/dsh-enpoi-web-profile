@@ -256,13 +256,13 @@ describe('resolution order (Oracle-amended)', () => {
   it('unconfigured tools default to ask; unpatterned bash runs free (catch-all)', () => {
     expect(resolvePolicy({ toolName: 'brand_new_tool', config: EMPTY }).kind).toBe('ask')
     expect(resolvePolicy({ toolName: 'read', config: EMPTY }).kind).toBe('allow')
-    // Adam's OpenCode model: unpatterned commands allow; only the dangerous
+    // The OpenCode model: unpatterned commands allow; only the dangerous
     // list asks.
     expect(resolvePolicy({ toolName: 'bash', command: 'ls', config: EMPTY }).kind).toBe('allow')
     expect(resolvePolicy({ toolName: 'bash', command: 'rm -rf /tmp/x', config: EMPTY }).kind).toBe('ask')
   })
 
-  it('shipped defaults: adam-like flow works out of the box', () => {
+  it('shipped defaults: operator-like flow works out of the box', () => {
     expect(SHIPPED_TOOL_DEFAULTS.edit).toBe('allow')
     expect(SHIPPED_TOOL_DEFAULTS.bash).toBe('ask')
     expect(resolvePolicy({ toolName: 'bash', command: 'git status', config: EMPTY }).kind).toBe('allow')
@@ -480,7 +480,7 @@ describe('never-policy tool surface (forwarding makes asks usable)', () => {
   })
 })
 
-describe('Full access standing consent (Adam’s corrected model, 2026-09-28)', () => {
+describe('Full access standing consent (the corrected model, 2026-09-28)', () => {
   it('recognizes only approval-disabled + danger-full-access as Full access', () => {
     expect(isFullAccessMode('never', 'danger-full-access')).toBe(true)
     expect(isFullAccessMode('never', 'workspace-write')).toBe(false)
