@@ -2,8 +2,11 @@
 import Schema from "@deepseek-ai/schemastery";
 import { homedir } from "node:os";
 import { join, dirname, basename, resolve, isAbsolute, relative } from "node:path";
-import { mkdir, rename, stat, writeFile, rm, open, readFile } from "node:fs/promises";
+import { mkdir, rename, stat, writeFile, rm, open, readFile, readdir } from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
+import { isSkillName } from "@deepseek-ai/dsh-skill";
 var name = "enpoi-fs-ops";
 var inject = ["webServer", "webRuntime", "sessions"];
 var TRASH_ROOT = join(homedir(), ".dsh", "trash", "sidebar");
@@ -56,7 +59,294 @@ async function backupBytes(bytes) {
   }
   return dest;
 }
-var Config = Schema.object({});
+var Config = Schema.object({
+  /** Skills directory the `skills.*` routes manage. Defaults to `<profile>/skills` (the config's base URL). */
+  skillsDir: Schema.string()
+});
+var PROTECTED_SKILL_NAMES = /* @__PURE__ */ new Set([
+  "tier1-workflow",
+  "tier2-workflow",
+  "tier3-workflow"
+]);
+var MAX_SKILL_BYTES = 1024 * 1024;
+var SKILL_FILE_NAME = "SKILL.md";
+function resolveSkillsRoot(config, ctx) {
+  if (typeof config.skillsDir === "string" && config.skillsDir !== "") return resolve(config.skillsDir);
+  const baseUrl = ctx.baseUrl;
+  if (typeof baseUrl === "string" && baseUrl !== "") {
+    try {
+      return resolve(fileURLToPath(new URL("skills/", baseUrl)));
+    } catch {
+    }
+  }
+  throw new FsOpsError(
+    "internal",
+    "skills directory is unresolved: set config.skillsDir or launch from a profile config with a file base URL",
+    500
+  );
+}
+function requireSkillName(payload) {
+  const name2 = requireString(payload, "name");
+  if (!isSkillName(name2)) {
+    throw new FsOpsError("bad-request", `invalid skill name "${name2}": expected kebab-case ([a-z0-9]+(-[a-z0-9]+)*)`, 400);
+  }
+  return name2;
+}
+function requireField(payload, key, allowEmpty = false) {
+  const record = payload;
+  const value = record?.[key];
+  if (typeof value !== "string" || !allowEmpty && value.trim() === "") {
+    throw new FsOpsError("bad-request", `missing or invalid "${key}"`, 400);
+  }
+  return value;
+}
+function requireContained(root, target) {
+  const rel = relative(root, target);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new FsOpsError("fs-error", `skill path "${target}" escapes the skills directory`, 400);
+  }
+  return target;
+}
+function isProtectedSkill(entry) {
+  return PROTECTED_SKILL_NAMES.has(entry.name) || PROTECTED_SKILL_NAMES.has(entry.entry);
+}
+function splitFrontmatter(raw) {
+  const lines = raw.split("\n");
+  if ((lines[0] ?? "").replace(/\r$/, "") !== "---") return void 0;
+  for (let index = 1; index < lines.length; index++) {
+    if (lines[index]?.replace(/\r$/, "") === "---") {
+      return { lines: lines.slice(1, index).map((line) => line.replace(/\r$/, "")), body: lines.slice(index + 1).join("\n") };
+    }
+  }
+  return void 0;
+}
+function frontmatterValue(lines, key) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? "";
+    if (/^\s/.test(line) || line === "") continue;
+    const match = /^([A-Za-z0-9_-]+)[ \t]*:[ \t]?(.*)$/.exec(line);
+    if (match === null || match[1] !== key) continue;
+    return decodeScalar(lines, index, match[2] ?? "");
+  }
+  return void 0;
+}
+function decodeScalar(lines, index, rest) {
+  if (/^[|>][+-]?[ \t]*$/.test(rest)) {
+    const block = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const line = lines[cursor] ?? "";
+      if (line.trim() !== "" && !/^\s/.test(line)) break;
+      block.push(line);
+    }
+    while (block.length > 0 && (block[block.length - 1] ?? "").trim() === "") block.pop();
+    const indents = block.filter((line) => line.trim() !== "").map((line) => line.length - line.trimStart().length);
+    const indent = indents.length === 0 ? 0 : Math.min(...indents);
+    const parts = block.map((line) => line.slice(Math.min(indent, line.length - line.trimStart().length)));
+    return (rest.startsWith(">") ? parts.join(" ") : parts.join("\n")).trim();
+  }
+  if (rest.startsWith('"')) {
+    let escaped = false;
+    for (let cursor = 1; cursor < rest.length; cursor++) {
+      const char = rest[cursor];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') return decodeDoubleQuoted(rest.slice(1, cursor));
+    }
+    return rest.slice(1);
+  }
+  if (rest.startsWith("'")) {
+    const end = rest.indexOf("'", 1);
+    if (end >= 0) return rest.slice(1, end).replace(/''/g, "'");
+    return rest.slice(1);
+  }
+  const comment = rest.search(/\s#/);
+  return (comment >= 0 ? rest.slice(0, comment) : rest).trim();
+}
+function decodeDoubleQuoted(value) {
+  let result = "";
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index] ?? "";
+    if (char !== "\\") {
+      result += char;
+      continue;
+    }
+    const next = value[++index] ?? "";
+    switch (next) {
+      case "n":
+        result += "\n";
+        break;
+      case "r":
+        result += "\r";
+        break;
+      case "t":
+        result += "	";
+        break;
+      case '"':
+        result += '"';
+        break;
+      case "\\":
+        result += "\\";
+        break;
+      case "/":
+        result += "/";
+        break;
+      case "0":
+        result += "\0";
+        break;
+      case "u": {
+        const hex = value.slice(index + 1, index + 5);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          result += String.fromCharCode(Number.parseInt(hex, 16));
+          index += 4;
+        } else {
+          result += "u";
+        }
+        break;
+      }
+      default:
+        result += next;
+    }
+  }
+  return result;
+}
+function yamlQuote(value) {
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return `"${escaped}"`;
+}
+function parseSkillMarkdown(raw) {
+  const frontmatter = splitFrontmatter(raw);
+  if (frontmatter === void 0) return { frontmatter: void 0, name: void 0, description: void 0, body: raw.trim() };
+  return {
+    frontmatter: frontmatter.lines,
+    name: frontmatterValue(frontmatter.lines, "name"),
+    description: frontmatterValue(frontmatter.lines, "description"),
+    body: frontmatter.body.trim()
+  };
+}
+function normalizeBody(body) {
+  return body.replace(/\r\n/g, "\n").replace(/^\n+/, "").replace(/\s+$/, "");
+}
+function skillFileText(existing, name2, description, body) {
+  const bodyText = normalizeBody(body);
+  if (existing?.frontmatter === void 0 || existing.name === void 0) {
+    return `---
+name: ${name2}
+description: ${yamlQuote(description)}
+---
+${bodyText === "" ? "" : `
+${bodyText}
+`}`;
+  }
+  const lines = [...existing.frontmatter];
+  const index = lines.findIndex((line) => /^description[ \t]*:/.test(line));
+  if (index >= 0) {
+    let end = index + 1;
+    while (end < lines.length && /^\s/.test(lines[end] ?? "")) end++;
+    lines.splice(index, end - index, `description: ${yamlQuote(description)}`);
+  } else {
+    lines.push(`description: ${yamlQuote(description)}`);
+  }
+  return `---
+${lines.join("\n")}
+---
+${bodyText === "" ? "" : `
+${bodyText}
+`}`;
+}
+async function readSkillText(path) {
+  const info = await stat(path);
+  if (info.size > MAX_SKILL_BYTES) {
+    throw new FsOpsError("too-large", `"${path}" is larger than ${MAX_SKILL_BYTES} bytes`, 413);
+  }
+  return await readFile(path, "utf8");
+}
+function requireSkillSize(text) {
+  if (Buffer.byteLength(text, "utf8") > MAX_SKILL_BYTES) {
+    throw new FsOpsError("too-large", `skill file would exceed ${MAX_SKILL_BYTES} bytes`, 413);
+  }
+}
+async function readSkillEntry(path, entry, rootPath, format) {
+  let raw;
+  try {
+    raw = await readSkillText(path);
+  } catch (error) {
+    if (error instanceof FsOpsError) return void 0;
+    if (error.code === "ENOENT") return void 0;
+    throw error;
+  }
+  const parsed = parseSkillMarkdown(raw);
+  if (parsed.name === void 0 || !isSkillName(parsed.name) || parsed.description === void 0 || parsed.description === "") return void 0;
+  return { entry, name: parsed.name, description: parsed.description, path, rootPath, format };
+}
+async function listSkillEntries(root) {
+  let dirents;
+  try {
+    dirents = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw new FsOpsError("fs-error", `cannot list skills in "${root}": ${error instanceof Error ? error.message : String(error)}`, 400);
+  }
+  const entries = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const dirent of dirents.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (dirent.isDirectory()) {
+      const entry = await readSkillEntry(join(root, dirent.name, SKILL_FILE_NAME), dirent.name, join(root, dirent.name), "directory");
+      if (entry !== void 0 && !seen.has(entry.name)) {
+        seen.add(entry.name);
+        entries.push(entry);
+      }
+    } else if (dirent.isFile() && dirent.name.endsWith(".md")) {
+      const stem = dirent.name.slice(0, -".md".length);
+      if (stem === "") continue;
+      const path = join(root, dirent.name);
+      const entry = await readSkillEntry(path, stem, path, "file");
+      if (entry !== void 0 && !seen.has(entry.name)) {
+        seen.add(entry.name);
+        entries.push(entry);
+      }
+    }
+  }
+  return entries;
+}
+async function findSkillEntry(root, name2) {
+  const direct = [
+    { path: join(root, name2, SKILL_FILE_NAME), rootPath: join(root, name2), format: "directory" },
+    { path: join(root, `${name2}.md`), rootPath: join(root, `${name2}.md`), format: "file" }
+  ];
+  for (const candidate of direct) {
+    const entry = await readSkillEntry(candidate.path, name2, candidate.rootPath, candidate.format);
+    if (entry !== void 0) return entry;
+  }
+  return (await listSkillEntries(root)).find((entry) => entry.name === name2);
+}
+async function trashSkill(entry) {
+  const dest = join(dshHomePath("trash", "skills"), `${Date.now()}-${randomUUID()}-${basename(entry.rootPath)}`);
+  try {
+    await mkdir(dirname(dest), { recursive: true });
+    await rename(entry.rootPath, dest);
+  } catch (error) {
+    throw new FsOpsError("fs-error", `cannot delete skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`, 400);
+  }
+  return dest;
+}
+async function readRegistrySkills(ctx, sessionId) {
+  if (sessionId === void 0 || sessionId === "") return { skills: [] };
+  const catalog = ctx.get("sessionSkillCatalog");
+  if (catalog?.list === void 0) return { skills: [], error: "skill catalog service is unavailable" };
+  try {
+    const value = await catalog.list({ sessionId }, new AbortController().signal);
+    const skills = Array.isArray(value.skills) ? value.skills : [];
+    return { skills: skills.filter((skill) => isSkillName(skill.name)) };
+  } catch (error) {
+    return { skills: [], error: error instanceof Error ? error.message : String(error) };
+  }
+}
 function header(headers, name2) {
   const value = headers[name2];
   return typeof value === "string" ? value : void 0;
@@ -155,7 +445,7 @@ function cwdOf(payload, sessions) {
   }
   return cwd;
 }
-function apply(ctx, _config) {
+function apply(ctx, config) {
   const sessions = ctx.get("sessions");
   const trustedHosts = ctx.get("webRuntime")?.trustedHosts ?? [];
   const api = {
@@ -361,6 +651,126 @@ function apply(ctx, _config) {
       await writeFileAtomic(path, bytes, mode);
       const info = await stat(path);
       return { sha256: newSha, mtimeMs: info.mtimeMs, size: bytes.length, backup };
+    },
+    "skills.list": async (payload) => {
+      const root = resolveSkillsRoot(config, ctx);
+      const entries = await listSkillEntries(root);
+      const rows = entries.map((entry) => ({
+        name: entry.name,
+        entry: entry.entry,
+        description: entry.description,
+        path: entry.path,
+        format: entry.format,
+        source: isProtectedSkill(entry) ? "default" : "profile",
+        protected: isProtectedSkill(entry),
+        editable: true
+      }));
+      const record = payload;
+      const sessionId = typeof record?.sessionId === "string" && record.sessionId !== "" ? record.sessionId : void 0;
+      const registry = await readRegistrySkills(ctx, sessionId);
+      const known = new Set(rows.flatMap((row) => [row.name, row.entry]));
+      const registryRows = registry.skills.filter((skill) => !known.has(skill.name)).map((skill) => ({
+        name: skill.name,
+        entry: skill.name,
+        description: skill.description,
+        ...skill.path === void 0 ? {} : { path: skill.path },
+        format: "file",
+        source: "registry",
+        protected: PROTECTED_SKILL_NAMES.has(skill.name),
+        editable: false
+      }));
+      return {
+        root,
+        skills: [...rows, ...registryRows].sort((left, right) => left.name.localeCompare(right.name)),
+        registry: registry.error === void 0 ? { ok: true } : { ok: false, error: registry.error }
+      };
+    },
+    "skills.read": async (payload) => {
+      const name2 = requireSkillName(payload);
+      const root = resolveSkillsRoot(config, ctx);
+      const entry = await findSkillEntry(root, name2);
+      if (entry === void 0) {
+        throw new FsOpsError("not-found", `skill "${name2}" does not exist`, 404);
+      }
+      const content = await readSkillText(entry.path);
+      const parsed = parseSkillMarkdown(content);
+      return {
+        name: entry.name,
+        entry: entry.entry,
+        description: parsed.description ?? entry.description,
+        body: parsed.body,
+        content,
+        path: entry.path,
+        format: entry.format,
+        source: isProtectedSkill(entry) ? "default" : "profile",
+        protected: isProtectedSkill(entry)
+      };
+    },
+    "skills.create": async (payload) => {
+      const name2 = requireSkillName(payload);
+      const description = requireField(payload, "description").trim();
+      const body = requireField(payload, "body", true);
+      const root = resolveSkillsRoot(config, ctx);
+      const existing = await findSkillEntry(root, name2);
+      if (existing !== void 0) {
+        throw new FsOpsError("exists", `skill "${name2}" already exists`, 409);
+      }
+      const targetDir = requireContained(root, join(root, name2));
+      const targetFile = requireContained(root, join(targetDir, SKILL_FILE_NAME));
+      const text = skillFileText(void 0, name2, description, body);
+      requireSkillSize(text);
+      try {
+        await mkdir(root, { recursive: true });
+        await mkdir(targetDir);
+      } catch (error) {
+        if (error.code === "EEXIST") {
+          throw new FsOpsError("exists", `skill "${name2}" already exists`, 409);
+        }
+        throw new FsOpsError("fs-error", `cannot create skill "${name2}": ${error instanceof Error ? error.message : String(error)}`, 400);
+      }
+      try {
+        await writeFileAtomic(targetFile, Buffer.from(text, "utf8"), 420);
+      } catch (error) {
+        await rm(targetDir, { recursive: true, force: true }).catch(() => {
+        });
+        throw error;
+      }
+      return { name: name2, path: targetFile };
+    },
+    "skills.update": async (payload) => {
+      const name2 = requireSkillName(payload);
+      const description = requireField(payload, "description").trim();
+      const body = requireField(payload, "body", true);
+      const root = resolveSkillsRoot(config, ctx);
+      const entry = await findSkillEntry(root, name2);
+      if (entry === void 0) {
+        throw new FsOpsError("not-found", `skill "${name2}" does not exist`, 404);
+      }
+      const raw = await readSkillText(entry.path);
+      const parsed = parseSkillMarkdown(raw);
+      const base = parsed.frontmatter !== void 0 && parsed.name !== void 0 ? parsed : void 0;
+      const text = skillFileText(base, entry.name, description, body);
+      requireSkillSize(text);
+      const info = await stat(entry.path);
+      await writeFileAtomic(entry.path, Buffer.from(text, "utf8"), info.mode & 511);
+      return { name: base?.name ?? entry.name, path: entry.path };
+    },
+    "skills.delete": async (payload) => {
+      const name2 = requireSkillName(payload);
+      const root = resolveSkillsRoot(config, ctx);
+      const entry = await findSkillEntry(root, name2);
+      if (entry === void 0) {
+        throw new FsOpsError("not-found", `skill "${name2}" does not exist`, 404);
+      }
+      if (isProtectedSkill(entry)) {
+        throw new FsOpsError(
+          "protected",
+          `skill "${entry.name}" is a shipped default of this profile and cannot be deleted; edit it or disable it in the capabilities center instead`,
+          400
+        );
+      }
+      const dest = await trashSkill(entry);
+      return { name: entry.name, dest };
     }
   };
   ctx.effect(() => {

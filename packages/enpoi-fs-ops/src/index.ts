@@ -15,20 +15,31 @@
  *                overwrite / create-only), content-addressed pre-overwrite
  *                backup in ~/.dsh/file-history/editor/<sha256>, .dsh-tmp
  *                staging + fsync
+ * - skills.list   — on-disk skill bundles under the profile skills dir plus,
+ *                   when a session address resolves, read-only registry rows
+ * - skills.read   — one SKILL.md: frontmatter name/description + body + raw text
+ * - skills.create — write <name>/SKILL.md (slug validation, no clobber)
+ * - skills.update — rewrite description + body, preserving other frontmatter
+ * - skills.delete — trash-stage the bundle; the shipped tier skills refuse
  *
  * Path safety mirrors dsh-better-sidebar's fs-tree: absolute paths only,
  * name validation (no '/', '..', empty), and the cwd root is never
  * deletable. The trash staging is standalone (Oracle: no coupling to
- * enpoi-file-revert's session-keyed trash).
+ * enpoi-file-revert's session-keyed trash). Skills CRUD never accepts a
+ * caller path: every operation derives <skillsDir>/<slug> from a validated
+ * kebab-case name and re-checks containment.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join, dirname, basename, resolve, isAbsolute, relative } from 'node:path'
-import { mkdir, rename, stat, writeFile, rm, open, readFile } from 'node:fs/promises'
+import { mkdir, rename, stat, writeFile, rm, open, readFile, readdir } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { randomUUID, createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { isSkillName } from '@deepseek-ai/dsh-skill'
 import type { IncomingHttpHeaders } from 'node:http'
 
 export const name = 'enpoi-fs-ops'
@@ -101,9 +112,358 @@ async function backupBytes(bytes: Buffer): Promise<string> {
   return dest
 }
 
-export const Config = Schema.object({})
+export const Config = Schema.object({
+  /** Skills directory the `skills.*` routes manage. Defaults to `<profile>/skills` (the config's base URL). */
+  skillsDir: Schema.string(),
+})
 
-export interface FsOpsConfig {}
+export interface FsOpsConfig {
+  /** Skills directory the `skills.*` routes manage; defaults to `<profile>/skills`. */
+  skillsDir?: string
+}
+
+/**
+ * Skills shipped with the profile. Delete is refused: the shipped tier
+ * workflows are the deployment's defaults, and removing one leaves no copy
+ * anywhere else.
+ */
+const PROTECTED_SKILL_NAMES: ReadonlySet<string> = new Set([
+  'tier1-workflow',
+  'tier2-workflow',
+  'tier3-workflow',
+])
+
+/** Largest SKILL.md this API reads or writes, in bytes. */
+const MAX_SKILL_BYTES = 1024 * 1024
+
+/** Frontmatter-bearing skill file name inside a directory bundle. */
+const SKILL_FILE_NAME = 'SKILL.md'
+
+/** One on-disk skill entry under the skills root. */
+interface SkillEntry {
+  /** On-disk name: the directory name, or the file stem of a flat `<name>.md`. */
+  entry: string
+  /** Skill identity: the frontmatter name (discovery addresses skills by this). */
+  name: string
+  description: string
+  /** Absolute instruction-file path. */
+  path: string
+  /** Absolute path of the bundle directory or flat file, for delete staging. */
+  rootPath: string
+  format: 'directory' | 'file'
+}
+
+/** Parsed SKILL.md: frontmatter lines (delimiters removed), name/description, body. */
+interface ParsedSkillMarkdown {
+  frontmatter: string[] | undefined
+  name: string | undefined
+  description: string | undefined
+  body: string
+}
+
+/** Resolve the managed skills directory: explicit config first, else `<baseUrl>/skills`. */
+function resolveSkillsRoot(config: FsOpsConfig, ctx: Context): string {
+  if (typeof config.skillsDir === 'string' && config.skillsDir !== '') return resolve(config.skillsDir)
+  const baseUrl = ctx.baseUrl
+  if (typeof baseUrl === 'string' && baseUrl !== '') {
+    try {
+      return resolve(fileURLToPath(new URL('skills/', baseUrl)))
+    } catch {
+      // A non-file base URL cannot anchor the profile tree; fall through to the loud failure.
+    }
+  }
+  throw new FsOpsError(
+    'internal',
+    'skills directory is unresolved: set config.skillsDir or launch from a profile config with a file base URL',
+    500,
+  )
+}
+
+/** Validate the payload's `name` as a kebab-case skill name. */
+function requireSkillName(payload: unknown): string {
+  const name = requireString(payload, 'name')
+  if (!isSkillName(name)) {
+    throw new FsOpsError('bad-request', `invalid skill name "${name}": expected kebab-case ([a-z0-9]+(-[a-z0-9]+)*)`, 400)
+  }
+  return name
+}
+
+/** Read a required string field; `allowEmpty` admits "". */
+function requireField(payload: unknown, key: string, allowEmpty = false): string {
+  const record = payload as Record<string, unknown> | null
+  const value = record?.[key]
+  if (typeof value !== 'string' || (!allowEmpty && value.trim() === '')) {
+    throw new FsOpsError('bad-request', `missing or invalid "${key}"`, 400)
+  }
+  return value
+}
+
+/** Keep a derived skills path inside the managed root. */
+function requireContained(root: string, target: string): string {
+  const rel = relative(root, target)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new FsOpsError('fs-error', `skill path "${target}" escapes the skills directory`, 400)
+  }
+  return target
+}
+
+/** Whether one entry is a shipped default (by frontmatter name or on-disk name). */
+function isProtectedSkill(entry: Pick<SkillEntry, 'name' | 'entry'>): boolean {
+  return PROTECTED_SKILL_NAMES.has(entry.name) || PROTECTED_SKILL_NAMES.has(entry.entry)
+}
+
+/**
+ * Split a raw file into frontmatter lines and body.
+ * @returns undefined when the file has no complete `---` block.
+ */
+function splitFrontmatter(raw: string): { lines: string[]; body: string } | undefined {
+  const lines = raw.split('\n')
+  if ((lines[0] ?? '').replace(/\r$/, '') !== '---') return undefined
+  for (let index = 1; index < lines.length; index++) {
+    if (lines[index]?.replace(/\r$/, '') === '---') {
+      return { lines: lines.slice(1, index).map(line => line.replace(/\r$/, '')), body: lines.slice(index + 1).join('\n') }
+    }
+  }
+  return undefined
+}
+
+/** Decode one YAML scalar for `key` from frontmatter lines, block scalars included. */
+function frontmatterValue(lines: readonly string[], key: string): string | undefined {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? ''
+    if (/^\s/.test(line) || line === '') continue
+    const match = /^([A-Za-z0-9_-]+)[ \t]*:[ \t]?(.*)$/.exec(line)
+    if (match === null || match[1] !== key) continue
+    return decodeScalar(lines, index, match[2] ?? '')
+  }
+  return undefined
+}
+
+/** Decode the value that starts on the `key:` line, consuming indented block continuation. */
+function decodeScalar(lines: readonly string[], index: number, rest: string): string {
+  if (/^[|>][+-]?[ \t]*$/.test(rest)) {
+    const block: string[] = []
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const line = lines[cursor] ?? ''
+      if (line.trim() !== '' && !/^\s/.test(line)) break
+      block.push(line)
+    }
+    while (block.length > 0 && (block[block.length - 1] ?? '').trim() === '') block.pop()
+    const indents = block.filter(line => line.trim() !== '').map(line => line.length - line.trimStart().length)
+    const indent = indents.length === 0 ? 0 : Math.min(...indents)
+    const parts = block.map(line => line.slice(Math.min(indent, line.length - line.trimStart().length)))
+    return (rest.startsWith('>') ? parts.join(' ') : parts.join('\n')).trim()
+  }
+  if (rest.startsWith('"')) {
+    let escaped = false
+    for (let cursor = 1; cursor < rest.length; cursor++) {
+      const char = rest[cursor]
+      if (escaped) { escaped = false; continue }
+      if (char === '\\') { escaped = true; continue }
+      if (char === '"') return decodeDoubleQuoted(rest.slice(1, cursor))
+    }
+    return rest.slice(1)
+  }
+  if (rest.startsWith("'")) {
+    const end = rest.indexOf("'", 1)
+    if (end >= 0) return rest.slice(1, end).replace(/''/g, "'")
+    return rest.slice(1)
+  }
+  const comment = rest.search(/\s#/)
+  return (comment >= 0 ? rest.slice(0, comment) : rest).trim()
+}
+
+/** Decode the YAML escapes admitted inside a double-quoted scalar. */
+function decodeDoubleQuoted(value: string): string {
+  let result = ''
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index] ?? ''
+    if (char !== '\\') { result += char; continue }
+    const next = value[++index] ?? ''
+    switch (next) {
+      case 'n': result += '\n'; break
+      case 'r': result += '\r'; break
+      case 't': result += '\t'; break
+      case '"': result += '"'; break
+      case '\\': result += '\\'; break
+      case '/': result += '/'; break
+      case '0': result += '\0'; break
+      case 'u': {
+        const hex = value.slice(index + 1, index + 5)
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) { result += String.fromCharCode(Number.parseInt(hex, 16)); index += 4 } else { result += 'u' }
+        break
+      }
+      default: result += next
+    }
+  }
+  return result
+}
+
+/** Quote one string as a YAML double-quoted scalar (JSON escapes plus line separators). */
+function yamlQuote(value: string): string {
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
+  return `"${escaped}"`
+}
+
+/** Parse a SKILL.md without loading any YAML library. */
+function parseSkillMarkdown(raw: string): ParsedSkillMarkdown {
+  const frontmatter = splitFrontmatter(raw)
+  if (frontmatter === undefined) return { frontmatter: undefined, name: undefined, description: undefined, body: raw.trim() }
+  return {
+    frontmatter: frontmatter.lines,
+    name: frontmatterValue(frontmatter.lines, 'name'),
+    description: frontmatterValue(frontmatter.lines, 'description'),
+    body: frontmatter.body.trim(),
+  }
+}
+
+/** Normalize a submitted body: LF line endings, no trailing whitespace, one trailing newline. */
+function normalizeBody(body: string): string {
+  return body.replace(/\r\n/g, '\n').replace(/^\n+/, '').replace(/\s+$/, '')
+}
+
+/**
+ * Compose the SKILL.md text for a create or update.
+ *
+ * With existing frontmatter, every other line is preserved verbatim (unknown
+ * fields such as `whenToUse`, invocation flags, comments) and only the
+ * `description:` entry is replaced; without frontmatter the file is written fresh.
+ */
+function skillFileText(existing: ParsedSkillMarkdown | undefined, name: string, description: string, body: string): string {
+  const bodyText = normalizeBody(body)
+  if (existing?.frontmatter === undefined || existing.name === undefined) {
+    return `---\nname: ${name}\ndescription: ${yamlQuote(description)}\n---\n${bodyText === '' ? '' : `\n${bodyText}\n`}`
+  }
+  const lines = [...existing.frontmatter]
+  const index = lines.findIndex(line => /^description[ \t]*:/.test(line))
+  if (index >= 0) {
+    let end = index + 1
+    while (end < lines.length && /^\s/.test(lines[end] ?? '')) end++
+    lines.splice(index, end - index, `description: ${yamlQuote(description)}`)
+  } else {
+    lines.push(`description: ${yamlQuote(description)}`)
+  }
+  return `---\n${lines.join('\n')}\n---\n${bodyText === '' ? '' : `\n${bodyText}\n`}`
+}
+
+/** Read one SKILL.md as UTF-8, refusing oversized files. */
+async function readSkillText(path: string): Promise<string> {
+  const info = await stat(path)
+  if (info.size > MAX_SKILL_BYTES) {
+    throw new FsOpsError('too-large', `"${path}" is larger than ${MAX_SKILL_BYTES} bytes`, 413)
+  }
+  return await readFile(path, 'utf8')
+}
+
+/** Reject a composed SKILL.md past the size cap. */
+function requireSkillSize(text: string): void {
+  if (Buffer.byteLength(text, 'utf8') > MAX_SKILL_BYTES) {
+    throw new FsOpsError('too-large', `skill file would exceed ${MAX_SKILL_BYTES} bytes`, 413)
+  }
+}
+
+/** Parse one candidate instruction file into an entry, or undefined when it is not a valid skill. */
+async function readSkillEntry(path: string, entry: string, rootPath: string, format: 'directory' | 'file'): Promise<SkillEntry | undefined> {
+  let raw: string
+  try {
+    raw = await readSkillText(path)
+  } catch (error) {
+    if (error instanceof FsOpsError) return undefined
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+  const parsed = parseSkillMarkdown(raw)
+  if (parsed.name === undefined || !isSkillName(parsed.name) || parsed.description === undefined || parsed.description === '') return undefined
+  return { entry, name: parsed.name, description: parsed.description, path, rootPath, format }
+}
+
+/** List the valid on-disk skill entries under the managed root, sorted by on-disk name. */
+async function listSkillEntries(root: string): Promise<SkillEntry[]> {
+  let dirents
+  try {
+    dirents = await readdir(root, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw new FsOpsError('fs-error', `cannot list skills in "${root}": ${error instanceof Error ? error.message : String(error)}`, 400)
+  }
+  const entries: SkillEntry[] = []
+  const seen = new Set<string>()
+  for (const dirent of dirents.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (dirent.isDirectory()) {
+      const entry = await readSkillEntry(join(root, dirent.name, SKILL_FILE_NAME), dirent.name, join(root, dirent.name), 'directory')
+      if (entry !== undefined && !seen.has(entry.name)) { seen.add(entry.name); entries.push(entry) }
+    } else if (dirent.isFile() && dirent.name.endsWith('.md')) {
+      const stem = dirent.name.slice(0, -'.md'.length)
+      if (stem === '') continue
+      const path = join(root, dirent.name)
+      const entry = await readSkillEntry(path, stem, path, 'file')
+      if (entry !== undefined && !seen.has(entry.name)) { seen.add(entry.name); entries.push(entry) }
+    }
+  }
+  return entries
+}
+
+/**
+ * Resolve one entry by skill name: the direct `<name>/SKILL.md` / `<name>.md`
+ * hit first, then a scan matching the declared frontmatter name.
+ */
+async function findSkillEntry(root: string, name: string): Promise<SkillEntry | undefined> {
+  const direct: Array<{ path: string; rootPath: string; format: 'directory' | 'file' }> = [
+    { path: join(root, name, SKILL_FILE_NAME), rootPath: join(root, name), format: 'directory' },
+    { path: join(root, `${name}.md`), rootPath: join(root, `${name}.md`), format: 'file' },
+  ]
+  for (const candidate of direct) {
+    const entry = await readSkillEntry(candidate.path, name, candidate.rootPath, candidate.format)
+    if (entry !== undefined) return entry
+  }
+  return (await listSkillEntries(root)).find(entry => entry.name === name)
+}
+
+/** Move one skill bundle into the DSH_HOME trash; never rm. */
+async function trashSkill(entry: SkillEntry): Promise<string> {
+  const dest = join(dshHomePath('trash', 'skills'), `${Date.now()}-${randomUUID()}-${basename(entry.rootPath)}`)
+  try {
+    await mkdir(dirname(dest), { recursive: true })
+    await rename(entry.rootPath, dest)
+  } catch (error) {
+    throw new FsOpsError('fs-error', `cannot delete skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`, 400)
+  }
+  return dest
+}
+
+/** One registry catalog row as the session skill catalog reports it. */
+interface RegistrySkill {
+  name: string
+  description: string
+  path?: string
+}
+
+/** Structural face of the session-addressed skill catalog service. */
+interface SkillCatalogFace {
+  list?: (request: { sessionId: string }, signal: AbortSignal) => Promise<{ skills?: readonly RegistrySkill[] }>
+}
+
+/** Read the registry catalog for one session; failures degrade to on-disk rows alone. */
+async function readRegistrySkills(
+  ctx: Context, sessionId: string | undefined,
+): Promise<{ skills: RegistrySkill[]; error?: string }> {
+  if (sessionId === undefined || sessionId === '') return { skills: [] }
+  const catalog = ctx.get('sessionSkillCatalog') as SkillCatalogFace | undefined
+  if (catalog?.list === undefined) return { skills: [], error: 'skill catalog service is unavailable' }
+  try {
+    const value = await catalog.list({ sessionId }, new AbortController().signal)
+    const skills = Array.isArray(value.skills) ? value.skills : []
+    return { skills: skills.filter(skill => isSkillName(skill.name)) }
+  } catch (error) {
+    return { skills: [], error: error instanceof Error ? error.message : String(error) }
+  }
+}
 
 /** Structural subset of the node HTTP request the fence reads. */
 interface TrustRequest {
@@ -246,7 +606,7 @@ function cwdOf(payload: unknown, sessions: { get?: (id: string) => { header?: { 
   return cwd
 }
 
-export function apply(ctx: Context, _config: FsOpsConfig): void {
+export function apply(ctx: Context, config: FsOpsConfig): void {
   const sessions = ctx.get('sessions') as { get?: (id: string) => { cwd?: string } | undefined } | undefined
   const trustedHosts = (ctx.get('webRuntime') as { trustedHosts?: readonly string[] } | undefined)?.trustedHosts ?? []
 
@@ -485,6 +845,133 @@ export function apply(ctx: Context, _config: FsOpsConfig): void {
       await writeFileAtomic(path, bytes, mode)
       const info = await stat(path)
       return { sha256: newSha, mtimeMs: info.mtimeMs, size: bytes.length, backup }
+    },
+
+    'skills.list': async (payload) => {
+      const root = resolveSkillsRoot(config, ctx)
+      const entries = await listSkillEntries(root)
+      const rows = entries.map(entry => ({
+        name: entry.name,
+        entry: entry.entry,
+        description: entry.description,
+        path: entry.path,
+        format: entry.format,
+        source: isProtectedSkill(entry) ? 'default' as const : 'profile' as const,
+        protected: isProtectedSkill(entry),
+        editable: true,
+      }))
+      const record = payload as Record<string, unknown> | null
+      const sessionId = typeof record?.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined
+      const registry = await readRegistrySkills(ctx, sessionId)
+      const known = new Set(rows.flatMap(row => [row.name, row.entry]))
+      const registryRows = registry.skills
+        .filter(skill => !known.has(skill.name))
+        .map(skill => ({
+          name: skill.name,
+          entry: skill.name,
+          description: skill.description,
+          ...skill.path === undefined ? {} : { path: skill.path },
+          format: 'file' as const,
+          source: 'registry' as const,
+          protected: PROTECTED_SKILL_NAMES.has(skill.name),
+          editable: false,
+        }))
+      return {
+        root,
+        skills: [...rows, ...registryRows].sort((left, right) => left.name.localeCompare(right.name)),
+        registry: registry.error === undefined ? { ok: true } : { ok: false, error: registry.error },
+      }
+    },
+
+    'skills.read': async (payload) => {
+      const name = requireSkillName(payload)
+      const root = resolveSkillsRoot(config, ctx)
+      const entry = await findSkillEntry(root, name)
+      if (entry === undefined) {
+        throw new FsOpsError('not-found', `skill "${name}" does not exist`, 404)
+      }
+      const content = await readSkillText(entry.path)
+      const parsed = parseSkillMarkdown(content)
+      return {
+        name: entry.name,
+        entry: entry.entry,
+        description: parsed.description ?? entry.description,
+        body: parsed.body,
+        content,
+        path: entry.path,
+        format: entry.format,
+        source: isProtectedSkill(entry) ? 'default' as const : 'profile' as const,
+        protected: isProtectedSkill(entry),
+      }
+    },
+
+    'skills.create': async (payload) => {
+      const name = requireSkillName(payload)
+      const description = requireField(payload, 'description').trim()
+      const body = requireField(payload, 'body', true)
+      const root = resolveSkillsRoot(config, ctx)
+      const existing = await findSkillEntry(root, name)
+      if (existing !== undefined) {
+        throw new FsOpsError('exists', `skill "${name}" already exists`, 409)
+      }
+      const targetDir = requireContained(root, join(root, name))
+      const targetFile = requireContained(root, join(targetDir, SKILL_FILE_NAME))
+      const text = skillFileText(undefined, name, description, body)
+      requireSkillSize(text)
+      try {
+        await mkdir(root, { recursive: true })
+        // Non-recursive mkdir is the atomic no-clobber: a racing create fails EEXIST.
+        await mkdir(targetDir)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new FsOpsError('exists', `skill "${name}" already exists`, 409)
+        }
+        throw new FsOpsError('fs-error', `cannot create skill "${name}": ${error instanceof Error ? error.message : String(error)}`, 400)
+      }
+      try {
+        await writeFileAtomic(targetFile, Buffer.from(text, 'utf8'), 0o644)
+      } catch (error) {
+        await rm(targetDir, { recursive: true, force: true }).catch(() => {})
+        throw error
+      }
+      return { name, path: targetFile }
+    },
+
+    'skills.update': async (payload) => {
+      const name = requireSkillName(payload)
+      const description = requireField(payload, 'description').trim()
+      const body = requireField(payload, 'body', true)
+      const root = resolveSkillsRoot(config, ctx)
+      const entry = await findSkillEntry(root, name)
+      if (entry === undefined) {
+        throw new FsOpsError('not-found', `skill "${name}" does not exist`, 404)
+      }
+      const raw = await readSkillText(entry.path)
+      const parsed = parseSkillMarkdown(raw)
+      const base = parsed.frontmatter !== undefined && parsed.name !== undefined ? parsed : undefined
+      const text = skillFileText(base, entry.name, description, body)
+      requireSkillSize(text)
+      const info = await stat(entry.path)
+      await writeFileAtomic(entry.path, Buffer.from(text, 'utf8'), info.mode & 0o777)
+      return { name: base?.name ?? entry.name, path: entry.path }
+    },
+
+    'skills.delete': async (payload) => {
+      const name = requireSkillName(payload)
+      const root = resolveSkillsRoot(config, ctx)
+      const entry = await findSkillEntry(root, name)
+      if (entry === undefined) {
+        throw new FsOpsError('not-found', `skill "${name}" does not exist`, 404)
+      }
+      if (isProtectedSkill(entry)) {
+        throw new FsOpsError(
+          'protected',
+          `skill "${entry.name}" is a shipped default of this profile and cannot be deleted; edit it or disable it in the capabilities center instead`,
+          400,
+        )
+      }
+      const dest = await trashSkill(entry)
+      return { name: entry.name, dest }
     },
   }
 
