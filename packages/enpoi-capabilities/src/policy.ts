@@ -731,6 +731,12 @@ export interface PolicyResolutionInput {
   toolName: string
   /** The raw command (bash only). */
   command?: string
+  /**
+   * The rendered command of a custom tool (`custom_<id>`), supplied by the
+   * enpoi-custom-tools seam. It runs through the identical sub-command danger
+   * evaluation as bash, then the tool's own matrix row decides.
+   */
+  customCommand?: string
   /** The calling agent's name (role/persona id), when known. */
   agent?: string
   /**
@@ -875,42 +881,23 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
     if (command === undefined || command.trim().length === 0) {
       return { kind: 'deny', reason: 'empty bash command', source: 'policy:empty' }
     }
-    const subs = splitCompoundCommand(command)
-    if (subs.length === 0) return { kind: 'deny', reason: 'empty bash command', source: 'policy:empty' }
-    const evalCtx: BashEvaluationContext = { config: input.config, agent: input.agent, rawCommand: command }
+    return evaluateCommandPolicy(command, input)
+  }
 
-    let sawAsk: PolicyDecision | null = null
-    let firstAllow: PolicyDecision | null = null
-    for (const raw of subs) {
-      const sub = stripEnvPrefixes(raw)
-      const subDecision = evaluateSubCommand(sub, 0, evalCtx)
-      if (subDecision.kind === 'deny') {
-        const suffix = subs.length > 1 ? ' (part of compound command)' : ''
-        return { kind: 'deny', reason: `${subDecision.reason}${suffix}`, source: subDecision.source }
-      }
-      if (subDecision.kind === 'ask' && sawAsk === null) sawAsk = subDecision
-      if (subDecision.kind === 'allow' && firstAllow === null) firstAllow = subDecision
+  // Custom tools: the rendered command runs through the IDENTICAL sub-command
+  // danger evaluation as bash (dangerous verbs, wrappers, interpreters), and
+  // the tool's own matrix row decides the tool tier (defaults.unknownTools,
+  // shipped 'ask'). Deny wins; either ask is surfaced with its own grant tier.
+  if (input.customCommand !== undefined) {
+    const commandDecision = evaluateCommandPolicy(input.customCommand, input)
+    const toolDecision = resolveToolPolicy(toolName, input)
+    if (commandDecision.kind === 'deny') return commandDecision
+    if (toolDecision.kind === 'deny') return toolDecision
+    if (commandDecision.kind === 'ask') {
+      return { ...commandDecision, reason: `custom tool ${toolName}: ${commandDecision.reason}` }
     }
-    if (sawAsk !== null) {
-      const who = input.agent
-      if (sawAsk.grantTier === 'pattern' && sawAsk.pattern !== undefined) {
-        // A danger-list ask's default "always allow" pins the exact raw command
-        // (broadAllow present); that exact pin re-allows exactly this command.
-        if (sawAsk.broadAllow !== undefined
-          && grantsShortCircuit(toolName, who, input.config.grants, 'pattern', command)) {
-          return { kind: 'allow', source: 'grant:command' }
-        }
-        // The explicit broad action pins the rule-level pattern.
-        if (grantsShortCircuit(toolName, who, input.config.grants, 'pattern', sawAsk.pattern)) {
-          return { kind: 'allow', source: `grant:pattern:${sawAsk.pattern}` }
-        }
-      }
-      if (sawAsk.grantTier === 'tool' && grantsShortCircuit(toolName, who, input.config.grants, 'tool', undefined)) {
-        return { kind: 'allow', source: 'grant:tool' }
-      }
-      return sawAsk
-    }
-    return { kind: 'allow', source: firstAllow?.source ?? 'policy:all-subcommands-allowed' }
+    if (toolDecision.kind === 'ask') return toolDecision
+    return { kind: 'allow', source: commandDecision.source ?? toolDecision.source }
   }
 
   // The dedicated read-only test-run capability (reviewer-exec): a reviewer
@@ -923,6 +910,66 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
   }
 
   // Non-bash: agent override → global table → MCP wildcard ladder → default.
+  return resolveToolPolicy(toolName, input)
+}
+
+/**
+ * The sub-command danger evaluation shared by bash and custom tools: split the
+ * compound command, evaluate every part, deny on the first deny, surface the
+ * first ask (with its grant tier), and honor standing grants exactly as the
+ * bash path always has.
+ * @param command - the raw command string.
+ * @param input - the resolution input (config, agent, grants).
+ * @returns the command-level decision.
+ */
+export function evaluateCommandPolicy(command: string, input: PolicyResolutionInput): PolicyDecision {
+  const subs = splitCompoundCommand(command)
+  if (subs.length === 0) return { kind: 'deny', reason: 'empty command', source: 'policy:empty' }
+  const evalCtx: BashEvaluationContext = { config: input.config, agent: input.agent, rawCommand: command }
+
+  let sawAsk: PolicyDecision | null = null
+  let firstAllow: PolicyDecision | null = null
+  for (const raw of subs) {
+    const sub = stripEnvPrefixes(raw)
+    const subDecision = evaluateSubCommand(sub, 0, evalCtx)
+    if (subDecision.kind === 'deny') {
+      const suffix = subs.length > 1 ? ' (part of compound command)' : ''
+      return { kind: 'deny', reason: `${subDecision.reason}${suffix}`, source: subDecision.source }
+    }
+    if (subDecision.kind === 'ask' && sawAsk === null) sawAsk = subDecision
+    if (subDecision.kind === 'allow' && firstAllow === null) firstAllow = subDecision
+  }
+  if (sawAsk !== null) {
+    const who = input.agent
+    if (sawAsk.grantTier === 'pattern' && sawAsk.pattern !== undefined) {
+      // A danger-list ask's default "always allow" pins the exact raw command
+      // (broadAllow present); that exact pin re-allows exactly this command.
+      if (sawAsk.broadAllow !== undefined
+        && grantsShortCircuit(input.toolName, who, input.config.grants, 'pattern', command)) {
+        return { kind: 'allow', source: 'grant:command' }
+      }
+      // The explicit broad action pins the rule-level pattern.
+      if (grantsShortCircuit(input.toolName, who, input.config.grants, 'pattern', sawAsk.pattern)) {
+        return { kind: 'allow', source: `grant:pattern:${sawAsk.pattern}` }
+      }
+    }
+    if (sawAsk.grantTier === 'tool' && grantsShortCircuit(input.toolName, who, input.config.grants, 'tool', undefined)) {
+      return { kind: 'allow', source: 'grant:tool' }
+    }
+    return sawAsk
+  }
+  return { kind: 'allow', source: firstAllow?.source ?? 'policy:all-subcommands-allowed' }
+}
+
+/**
+ * The non-bash tool-tier resolution: agent override → global table → MCP
+ * wildcard ladder → `defaults.unknownTools` (shipped 'ask').
+ * @param toolName - the tool being resolved.
+ * @param input - the resolution input.
+ * @returns the tool-tier decision.
+ */
+export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput): PolicyDecision {
+  const agent = input.agent ?? '(unknown)'
   const agentCfg = input.agent !== undefined ? input.config.agents?.[input.agent] : undefined
   const agentPolicy = agentCfg?.tools?.[toolName]
   if (agentPolicy !== undefined) {

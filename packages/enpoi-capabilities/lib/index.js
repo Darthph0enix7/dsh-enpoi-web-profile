@@ -494,41 +494,59 @@ function resolvePolicy(input) {
     if (command === void 0 || command.trim().length === 0) {
       return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
     }
-    const subs = splitCompoundCommand(command);
-    if (subs.length === 0) return { kind: "deny", reason: "empty bash command", source: "policy:empty" };
-    const evalCtx = { config: input.config, agent: input.agent, rawCommand: command };
-    let sawAsk = null;
-    let firstAllow = null;
-    for (const raw of subs) {
-      const sub = stripEnvPrefixes(raw);
-      const subDecision = evaluateSubCommand(sub, 0, evalCtx);
-      if (subDecision.kind === "deny") {
-        const suffix = subs.length > 1 ? " (part of compound command)" : "";
-        return { kind: "deny", reason: `${subDecision.reason}${suffix}`, source: subDecision.source };
-      }
-      if (subDecision.kind === "ask" && sawAsk === null) sawAsk = subDecision;
-      if (subDecision.kind === "allow" && firstAllow === null) firstAllow = subDecision;
+    return evaluateCommandPolicy(command, input);
+  }
+  if (input.customCommand !== void 0) {
+    const commandDecision = evaluateCommandPolicy(input.customCommand, input);
+    const toolDecision = resolveToolPolicy(toolName, input);
+    if (commandDecision.kind === "deny") return commandDecision;
+    if (toolDecision.kind === "deny") return toolDecision;
+    if (commandDecision.kind === "ask") {
+      return { ...commandDecision, reason: `custom tool ${toolName}: ${commandDecision.reason}` };
     }
-    if (sawAsk !== null) {
-      const who = input.agent;
-      if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0) {
-        if (sawAsk.broadAllow !== void 0 && grantsShortCircuit(toolName, who, input.config.grants, "pattern", command)) {
-          return { kind: "allow", source: "grant:command" };
-        }
-        if (grantsShortCircuit(toolName, who, input.config.grants, "pattern", sawAsk.pattern)) {
-          return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
-        }
-      }
-      if (sawAsk.grantTier === "tool" && grantsShortCircuit(toolName, who, input.config.grants, "tool", void 0)) {
-        return { kind: "allow", source: "grant:tool" };
-      }
-      return sawAsk;
-    }
-    return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
+    if (toolDecision.kind === "ask") return toolDecision;
+    return { kind: "allow", source: commandDecision.source ?? toolDecision.source };
   }
   if (toolName === REVIEW_RUN_TOOL) {
     return input.reviewer === true || REVIEW_ROLES.has(agent) ? { kind: "allow", source: "review:seat" } : { kind: "deny", reason: `review_run is available only to reviewer/oracle seats (role ${agent})`, source: "review:seat" };
   }
+  return resolveToolPolicy(toolName, input);
+}
+function evaluateCommandPolicy(command, input) {
+  const subs = splitCompoundCommand(command);
+  if (subs.length === 0) return { kind: "deny", reason: "empty command", source: "policy:empty" };
+  const evalCtx = { config: input.config, agent: input.agent, rawCommand: command };
+  let sawAsk = null;
+  let firstAllow = null;
+  for (const raw of subs) {
+    const sub = stripEnvPrefixes(raw);
+    const subDecision = evaluateSubCommand(sub, 0, evalCtx);
+    if (subDecision.kind === "deny") {
+      const suffix = subs.length > 1 ? " (part of compound command)" : "";
+      return { kind: "deny", reason: `${subDecision.reason}${suffix}`, source: subDecision.source };
+    }
+    if (subDecision.kind === "ask" && sawAsk === null) sawAsk = subDecision;
+    if (subDecision.kind === "allow" && firstAllow === null) firstAllow = subDecision;
+  }
+  if (sawAsk !== null) {
+    const who = input.agent;
+    if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0) {
+      if (sawAsk.broadAllow !== void 0 && grantsShortCircuit(input.toolName, who, input.config.grants, "pattern", command)) {
+        return { kind: "allow", source: "grant:command" };
+      }
+      if (grantsShortCircuit(input.toolName, who, input.config.grants, "pattern", sawAsk.pattern)) {
+        return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
+      }
+    }
+    if (sawAsk.grantTier === "tool" && grantsShortCircuit(input.toolName, who, input.config.grants, "tool", void 0)) {
+      return { kind: "allow", source: "grant:tool" };
+    }
+    return sawAsk;
+  }
+  return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
+}
+function resolveToolPolicy(toolName, input) {
+  const agent = input.agent ?? "(unknown)";
   const agentCfg = input.agent !== void 0 ? input.config.agents?.[input.agent] : void 0;
   const agentPolicy = agentCfg?.tools?.[toolName];
   if (agentPolicy !== void 0) {
@@ -2153,7 +2171,11 @@ var OrchestrationSettingsSchema = Schema.object({
   // Tool-group overrides (doc 80): `groups.<id>.enabled` and
   // `seats.<seat>.preAttach`. Declared so the namespace contract admits the
   // key; the shipped group catalog lives in dsh-enpoi-tool-groups.
-  toolGroups: live(Schema.dict(Schema.any()).default({}))
+  toolGroups: live(Schema.dict(Schema.any()).default({})),
+  // Operator-authored command tools (enpoi-custom-tools): an array of
+  // { id, name, description, params, command } records. Declared so the
+  // namespace contract admits the key; the runtime plugin owns the vocabulary.
+  customTools: live(Schema.array(Schema.any()).default([]))
 });
 var Config = OrchestrationSettingsSchema;
 async function pruneRemovedMcpPolicyRows(settings, servers, readConfig) {
@@ -2618,9 +2640,11 @@ function apply(ctx, config = {}) {
     }
     const config2 = readPermissionConfig();
     const isBash = exec.name === "bash";
+    const customCommand = !isBash && exec.name.startsWith("custom_") ? ctx.get("customToolCommands")?.render?.(exec.name, exec.arguments)?.command : void 0;
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
+      ...customCommand === void 0 ? {} : { customCommand },
       agent: askingAgentOf(exec),
       // A delegated child carries the PARENT's preset, so reviewer seats are
       // identified from the child's own subagent descriptor, not the role id.
@@ -2670,7 +2694,8 @@ function apply(ctx, config = {}) {
       };
     }
     if (typeof exec.callId === "string" && pendingGrants.size < 128) {
-      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : void 0, askingAgentOf(exec)));
+      const grantCommand = isBash ? String(exec.arguments?.command) : customCommand;
+      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, grantCommand, askingAgentOf(exec)));
     }
     return {
       kind: "ask",

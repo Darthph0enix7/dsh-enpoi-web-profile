@@ -111,6 +111,8 @@ export interface OrchestrationConfig {
   whiteboard: Volatile<Record<string, unknown>>
   /** Tool-group overrides (doc 80): per-group `enabled`, per-seat `preAttach`. */
   toolGroups: Volatile<Record<string, unknown>>
+  /** Operator-authored command tools (enpoi-custom-tools): id → record. */
+  customTools: Volatile<Array<Record<string, unknown>>>
 }
 
 export const OrchestrationSettingsSchema = Schema.object({
@@ -147,6 +149,10 @@ export const OrchestrationSettingsSchema = Schema.object({
   // `seats.<seat>.preAttach`. Declared so the namespace contract admits the
   // key; the shipped group catalog lives in dsh-enpoi-tool-groups.
   toolGroups: live(Schema.dict(Schema.any()).default({})),
+  // Operator-authored command tools (enpoi-custom-tools): an array of
+  // { id, name, description, params, command } records. Declared so the
+  // namespace contract admits the key; the runtime plugin owns the vocabulary.
+  customTools: live(Schema.array(Schema.any()).default([])),
 })
 
 /** Function-plugin Config export: the owning entry's schema IS the shared document. */
@@ -870,9 +876,18 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
     const config = readPermissionConfig()
     const isBash = exec.name === 'bash'
+    // Custom tools (enpoi-custom-tools): the rendered command enters the SAME
+    // evaluator bash uses, so dangerous verbs/wrappers/interpreters ask or deny
+    // exactly as they would for bash. The seam is optional: without the plugin
+    // the tool name alone resolves through the matrix/defaults.
+    const customCommand = !isBash && exec.name.startsWith('custom_')
+      ? (ctx.get('customToolCommands') as { render?: (name: string, args: unknown) => { command?: string } | undefined } | undefined)
+        ?.render?.(exec.name, exec.arguments)?.command
+      : undefined
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
+      ...customCommand === undefined ? {} : { customCommand },
       agent: askingAgentOf(exec),
       // A delegated child carries the PARENT's preset, so reviewer seats are
       // identified from the child's own subagent descriptor, not the role id.
@@ -950,7 +965,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
     // ask: stash the grant proposal for the host-side allow-always writer.
     if (typeof exec.callId === 'string' && pendingGrants.size < 128) {
-      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, isBash ? String(exec.arguments?.command) : undefined, askingAgentOf(exec)))
+      const grantCommand = isBash
+        ? String(exec.arguments?.command)
+        : customCommand
+      pendingGrants.set(String(exec.callId), grantProposalFor(decision, exec.name, grantCommand, askingAgentOf(exec)))
     }
     return {
       kind: 'ask',

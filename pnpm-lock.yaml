@@ -47,6 +47,9 @@ importers:
       dsh-enpoi-council:
         specifier: workspace:*
         version: link:packages/enpoi-council
+      dsh-enpoi-custom-tools:
+        specifier: workspace:*
+        version: link:packages/enpoi-custom-tools
       dsh-enpoi-debug:
         specifier: workspace:*
         version: link:packages/enpoi-debug
@@ -163,6 +166,8 @@ importers:
       dsh-enpoi-contracts:
         specifier: workspace:*
         version: link:../enpoi-contracts
+
+  packages/enpoi-custom-tools: {}
 
   packages/enpoi-debug: {}
 

