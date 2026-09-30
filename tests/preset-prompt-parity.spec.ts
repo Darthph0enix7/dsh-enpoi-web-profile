@@ -57,6 +57,19 @@ const rowsOf = (seat: string): PresetRow[] =>
 const personaOf = (seat: string): PersonaConfig =>
   rowsOf(seat).find(row => row.id === 'persona')!.config as unknown as PersonaConfig
 
+/** Every row of a preset, including rows nested in a `cordis:group` config list. */
+const allRowsOf = (seat: string): PresetRow[] => {
+  const flat: PresetRow[] = []
+  const walk = (rows: PresetRow[]): void => {
+    for (const row of rows) {
+      flat.push(row)
+      if (Array.isArray(row.config)) walk(row.config as unknown as PresetRow[])
+    }
+  }
+  walk(rowsOf(seat))
+  return flat
+}
+
 describe('preset prompt parity (cache-neutral switch contract)', () => {
   it('declares identical rows; only the persona text and the seat label differ', () => {
     const orchestrator = rowsOf('orchestrator')
@@ -68,6 +81,17 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
       .filter((row, index) => JSON.stringify(row.config ?? null) !== JSON.stringify(sysadmin[index].config ?? null))
       .map(row => row.id)
     expect(differing).toEqual(['persona', 'enpoi-orchestration'])
+
+    // Recovery continuation is on in both cache-paired presets: the two
+    // control rows must stay declared and enabled together.
+    for (const seat of ['orchestrator', 'sysadmin'] as const) {
+      const rows = allRowsOf(seat)
+      for (const id of ['tool-subagent-control', 'tool-subagent-list-agents']) {
+        const row = rows.find(item => item.id === id)
+        expect(row, `${seat} must declare ${id}`).toBeDefined()
+        expect(row!.disabled, `${seat} ${id} must be enabled`).not.toBe(true)
+      }
+    }
 
     // `enpoi-orchestration` differs only by the seat label, and the seat only resolves group
     // pre-attach: with the shipped catalog the rendered menu is identical for both seats.
