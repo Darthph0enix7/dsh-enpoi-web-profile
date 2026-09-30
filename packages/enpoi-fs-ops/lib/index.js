@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { join, dirname, basename, resolve, isAbsolute, relative } from "node:path";
 import { mkdir, rename, stat, writeFile, rm, open, readFile, readdir } from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { isSkillName } from "@deepseek-ai/dsh-skill";
 var name = "enpoi-fs-ops";
@@ -60,7 +59,7 @@ async function backupBytes(bytes) {
   return dest;
 }
 var Config = Schema.object({
-  /** Skills directory the `skills.*` routes manage. Defaults to `<profile>/skills` (the config's base URL). */
+  /** Skills directory the `skills.*` routes manage. Defaults to `$DSH_HOME/skills`. */
   skillsDir: Schema.string()
 });
 var PROTECTED_SKILL_NAMES = /* @__PURE__ */ new Set([
@@ -70,20 +69,9 @@ var PROTECTED_SKILL_NAMES = /* @__PURE__ */ new Set([
 ]);
 var MAX_SKILL_BYTES = 1024 * 1024;
 var SKILL_FILE_NAME = "SKILL.md";
-function resolveSkillsRoot(config, ctx) {
+function resolveSkillsRoot(config) {
   if (typeof config.skillsDir === "string" && config.skillsDir !== "") return resolve(config.skillsDir);
-  const baseUrl = ctx.baseUrl;
-  if (typeof baseUrl === "string" && baseUrl !== "") {
-    try {
-      return resolve(fileURLToPath(new URL("skills/", baseUrl)));
-    } catch {
-    }
-  }
-  throw new FsOpsError(
-    "internal",
-    "skills directory is unresolved: set config.skillsDir or launch from a profile config with a file base URL",
-    500
-  );
+  return dshHomePath("skills");
 }
 function requireSkillName(payload) {
   const name2 = requireString(payload, "name");
@@ -109,6 +97,14 @@ function requireContained(root, target) {
 }
 function isProtectedSkill(entry) {
   return PROTECTED_SKILL_NAMES.has(entry.name) || PROTECTED_SKILL_NAMES.has(entry.entry);
+}
+function requireUnprotectedSkill(name2, action) {
+  if (!PROTECTED_SKILL_NAMES.has(name2)) return;
+  throw new FsOpsError(
+    "protected",
+    `skill "${name2}" is a shipped default of this profile and cannot be ${action}; it lives in the profile's skills dir`,
+    400
+  );
 }
 function splitFrontmatter(raw) {
   const lines = raw.split("\n");
@@ -653,7 +649,7 @@ function apply(ctx, config) {
       return { sha256: newSha, mtimeMs: info.mtimeMs, size: bytes.length, backup };
     },
     "skills.list": async (payload) => {
-      const root = resolveSkillsRoot(config, ctx);
+      const root = resolveSkillsRoot(config);
       const entries = await listSkillEntries(root);
       const rows = entries.map((entry) => ({
         name: entry.name,
@@ -663,7 +659,7 @@ function apply(ctx, config) {
         format: entry.format,
         source: isProtectedSkill(entry) ? "default" : "profile",
         protected: isProtectedSkill(entry),
-        editable: true
+        editable: !isProtectedSkill(entry)
       }));
       const record = payload;
       const sessionId = typeof record?.sessionId === "string" && record.sessionId !== "" ? record.sessionId : void 0;
@@ -675,7 +671,7 @@ function apply(ctx, config) {
         description: skill.description,
         ...skill.path === void 0 ? {} : { path: skill.path },
         format: "file",
-        source: "registry",
+        source: PROTECTED_SKILL_NAMES.has(skill.name) ? "default" : "registry",
         protected: PROTECTED_SKILL_NAMES.has(skill.name),
         editable: false
       }));
@@ -687,7 +683,7 @@ function apply(ctx, config) {
     },
     "skills.read": async (payload) => {
       const name2 = requireSkillName(payload);
-      const root = resolveSkillsRoot(config, ctx);
+      const root = resolveSkillsRoot(config);
       const entry = await findSkillEntry(root, name2);
       if (entry === void 0) {
         throw new FsOpsError("not-found", `skill "${name2}" does not exist`, 404);
@@ -708,9 +704,10 @@ function apply(ctx, config) {
     },
     "skills.create": async (payload) => {
       const name2 = requireSkillName(payload);
+      requireUnprotectedSkill(name2, "created");
       const description = requireField(payload, "description").trim();
       const body = requireField(payload, "body", true);
-      const root = resolveSkillsRoot(config, ctx);
+      const root = resolveSkillsRoot(config);
       const existing = await findSkillEntry(root, name2);
       if (existing !== void 0) {
         throw new FsOpsError("exists", `skill "${name2}" already exists`, 409);
@@ -739,12 +736,16 @@ function apply(ctx, config) {
     },
     "skills.update": async (payload) => {
       const name2 = requireSkillName(payload);
+      requireUnprotectedSkill(name2, "edited");
       const description = requireField(payload, "description").trim();
       const body = requireField(payload, "body", true);
-      const root = resolveSkillsRoot(config, ctx);
+      const root = resolveSkillsRoot(config);
       const entry = await findSkillEntry(root, name2);
       if (entry === void 0) {
         throw new FsOpsError("not-found", `skill "${name2}" does not exist`, 404);
+      }
+      if (isProtectedSkill(entry)) {
+        throw new FsOpsError("protected", `skill "${entry.name}" is a shipped default of this profile and cannot be edited`, 400);
       }
       const raw = await readSkillText(entry.path);
       const parsed = parseSkillMarkdown(raw);
@@ -757,17 +758,14 @@ function apply(ctx, config) {
     },
     "skills.delete": async (payload) => {
       const name2 = requireSkillName(payload);
-      const root = resolveSkillsRoot(config, ctx);
+      requireUnprotectedSkill(name2, "deleted");
+      const root = resolveSkillsRoot(config);
       const entry = await findSkillEntry(root, name2);
       if (entry === void 0) {
         throw new FsOpsError("not-found", `skill "${name2}" does not exist`, 404);
       }
       if (isProtectedSkill(entry)) {
-        throw new FsOpsError(
-          "protected",
-          `skill "${entry.name}" is a shipped default of this profile and cannot be deleted; edit it or disable it in the capabilities center instead`,
-          400
-        );
+        throw new FsOpsError("protected", `skill "${entry.name}" is a shipped default of this profile and cannot be deleted`, 400);
       }
       const dest = await trashSkill(entry);
       return { name: entry.name, dest };

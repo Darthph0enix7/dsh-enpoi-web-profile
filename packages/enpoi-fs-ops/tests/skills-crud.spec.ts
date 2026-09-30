@@ -1,7 +1,7 @@
 // skills-crud.spec.ts — vitest suite for the skills.list/read/create/update/delete routes.
 // Drives the fenced /sidebar/fsops handler against a temp skills dir and a temp
-// DSH_HOME (the trash destination), with the session skill catalog faked so the
-// registry merge is exercised without a live host.
+// DSH_HOME (the user root default and the trash destination), with the session
+// skill catalog faked so the registry merge is exercised without a live host.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
@@ -16,7 +16,7 @@ interface Harness {
   catalog: { list: ReturnType<typeof vi.fn> } | undefined
 }
 
-function makeHarness(catalog: Harness['catalog']): Harness {
+function makeHarness(catalog: Harness['catalog'], config: { skillsDir?: string } = { skillsDir: skillsDir() }): Harness {
   let handler: Handler | undefined
   const ctx = {
     get(name: string) {
@@ -35,7 +35,7 @@ function makeHarness(catalog: Harness['catalog']): Harness {
     },
     effect: (fn: () => unknown) => fn(),
   }
-  apply(ctx as never, { skillsDir: skillsDir() })
+  apply(ctx as never, config)
   if (handler === undefined) throw new Error('fsops handler was not registered')
   return {
     catalog,
@@ -115,7 +115,7 @@ describe('skills.list', () => {
     const flat = body.value.skills.find((row: any) => row.name === 'flat-skill')
     expect(flat).toMatchObject({ entry: 'flat-skill', format: 'file', source: 'profile', editable: true })
     const tier = body.value.skills.find((row: any) => row.name === 'tier1-workflow')
-    expect(tier).toMatchObject({ source: 'default', protected: true, editable: true })
+    expect(tier).toMatchObject({ source: 'default', protected: true, editable: false })
   })
 
   it('merges registry-only skills as read-only rows when a session address resolves', async () => {
@@ -149,6 +149,26 @@ describe('skills.list', () => {
     expect(status).toBe(200)
     expect(body.ok).toBe(true)
     expect(body.value.skills).toEqual([])
+  })
+
+  it('marks a protected registry row as a read-only shipped default', async () => {
+    const catalog = { list: vi.fn(async () => ({ skills: [{ name: 'tier2-workflow', description: 'Shipped default from the profile' }] })) }
+    const harness = makeHarness(catalog)
+    const { body } = await harness.call('skills.list', { sessionId: 'sess-1' })
+    const tier = body.value.skills.find((row: any) => row.name === 'tier2-workflow')
+    expect(tier).toMatchObject({ source: 'default', protected: true, editable: false })
+  })
+
+  it('defaults to the user root $DSH_HOME/skills and creates there', async () => {
+    const harness = makeHarness(undefined, {})
+    const created = await harness.call('skills.create', { name: 'home-skill', description: 'Lives in the user root', body: 'Body.' })
+    expect(created.status).toBe(200)
+    expect(created.body.value.path).toBe(join(home, 'skills', 'home-skill', 'SKILL.md'))
+    const listed = await harness.call('skills.list', {})
+    expect(listed.body.value.root).toBe(join(home, 'skills'))
+    expect(listed.body.value.skills.map((row: any) => row.name)).toEqual(['home-skill'])
+    // The profile skills dir never sees the write (no config, user root only).
+    await expect(readdir(skillsDir())).rejects.toThrow()
   })
 })
 
@@ -245,6 +265,19 @@ describe('skills.create', () => {
     expect(badBody.status).toBe(400)
   })
 
+  it('refuses a shipped tier name and writes nothing', async () => {
+    const harness = makeHarness(undefined)
+    const { status, body } = await harness.call('skills.create', {
+      name: 'tier1-workflow',
+      description: 'Shadow attempt',
+      body: '# Shadow',
+    })
+    expect(status).toBe(400)
+    expect(body.error.code).toBe('protected')
+    expect(body.error.message).toContain('shipped default')
+    await expect(readdir(skillsDir())).rejects.toThrow()
+  })
+
   it('quotes a description that would otherwise break the frontmatter', async () => {
     const harness = makeHarness(undefined)
     const description = 'Stars: "quoted" # hash\nsecond line'
@@ -282,6 +315,17 @@ describe('skills.update', () => {
     const { status, body } = await harness.call('skills.update', { name: 'nope', description: 'x', body: '' })
     expect(status).toBe(404)
     expect(body.error.code).toBe('not-found')
+  })
+
+  it('refuses to edit a shipped tier even when it exists in the root', async () => {
+    const harness = makeHarness(undefined)
+    await writeBundle('tier3-workflow', 'name: tier3-workflow\ndescription: Shipped default')
+    const path = join(skillsDir(), 'tier3-workflow', 'SKILL.md')
+    const before = await readFile(path, 'utf8')
+    const { status, body } = await harness.call('skills.update', { name: 'tier3-workflow', description: 'Hijacked', body: '# Hijacked' })
+    expect(status).toBe(400)
+    expect(body.error.code).toBe('protected')
+    expect(await readFile(path, 'utf8')).toBe(before)
   })
 })
 
@@ -331,5 +375,15 @@ describe('skills.delete', () => {
     expect(missing.status).toBe(404)
     const traversal = await harness.call('skills.delete', { name: '../../etc' })
     expect(traversal.status).toBe(400)
+  })
+
+  it('refuses a shipped tier name even when no on-disk copy exists', async () => {
+    const harness = makeHarness(undefined)
+    for (const name of ['tier1-workflow', 'tier2-workflow', 'tier3-workflow']) {
+      const { status, body } = await harness.call('skills.delete', { name })
+      expect(status).toBe(400)
+      expect(body.error.code).toBe('protected')
+    }
+    await expect(readdir(skillsDir())).rejects.toThrow()
   })
 })

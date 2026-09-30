@@ -102,6 +102,23 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
     expect(menu('orchestrator')).toContain('peer')
   })
 
+  it('mounts the profile skills dir on every fleet preset', () => {
+    // The shipped tier skills are canonical in the profile's own `skills/`
+    // dir; every fleet preset must scan it (custom rank precedes the user
+    // root), or a preset silently falls back to whatever `$DSH_HOME/skills`
+    // happens to hold.
+    const customDirs = (seat: string): unknown => {
+      const row = allRowsOf(seat).find(item => item.id === 'skill-filesystem')
+      expect(row, `${seat} must declare skill-filesystem`).toBeDefined()
+      return (row!.config as { customSkillDirs?: unknown } | undefined)?.customSkillDirs
+    }
+    const expected = customDirs('creator')
+    expect(expected).toBeDefined()
+    for (const seat of ['orchestrator', 'sysadmin'] as const) {
+      expect(customDirs(seat), `${seat} must mount the profile skills dir`).toEqual(expected)
+    }
+  })
+
   it('keeps identity and doctrine in the tail; the prefix is the shared base', () => {
     const orchestrator = personaOf('orchestrator')
     const sysadmin = personaOf('sysadmin')
