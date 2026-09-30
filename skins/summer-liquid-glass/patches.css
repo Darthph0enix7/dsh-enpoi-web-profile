@@ -6,18 +6,18 @@
   background: none;
 }
 
+/* The composer's glass is the input CARD alone (the skin-center frost painted
+   on [data-composer-card]). The seat must never carry a session-wide layer of
+   its own: the shell's rc.8 seat gradient and this skin's former seat ::before
+   mask (gradient + blur(34px), inset 0) spanned the whole conversation column,
+   so the card read as one more pane of the glazed session instead of a blob
+   floating over it — left/right filled bands with a second translucent layer
+   (operator's input-card report). ConversationRoot already paints no seat
+   ground (background: none), and the skin-center scene neutralizer removed the
+   same layer only while backdrop art was mounted; deleting the rule here makes
+   the card the sole composer glass in every state, marker or not. */
 [data-phase="active"] [class*="composerSeat"] {
   background: none !important;
-}
-
-[data-phase="active"] [class*="composerSeat"]:before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background: linear-gradient(180deg, transparent 0px, var(--dsw-alias-bg-base) 36px);
-  backdrop-filter: blur(34px) saturate(150%);
 }
 
 :focus-visible {

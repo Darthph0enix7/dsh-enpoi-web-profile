@@ -306,6 +306,43 @@ function mirrorDrift() {
   return drift
 }
 
+/**
+ * Composer-seat band guard (input-card glass): the seat must never carry a
+ * session-wide glass layer of its own. The card is the composer's only glass
+ * (the skin-center frost painted on [data-composer-card]); a seat `::before`
+ * mask paints a full-column band to the left and right of the card, which
+ * reads as a second glazed pane of the session and stops the card from
+ * floating. The skin-center scene neutralizer removed the same layer only
+ * while backdrop art was mounted, so any marker-less state (skin activation,
+ * try-on/switch, a scene-controller teardown, first paint) exposed it. Kept
+ * as a guard so a skin pass cannot reintroduce the band.
+ */
+function composerBandDrift() {
+  const drift = []
+  let patches
+  try {
+    patches = readFileSync(join(SKIN_DIR, 'patches.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ')
+  } catch (error) {
+    return [`composer band: cannot read ${join(SKIN_DIR, 'patches.css')} (${error instanceof Error ? error.message : String(error)})`]
+  }
+  const rule = /([^{}]*composerSeat[^{}]*)\{([^{}]*)\}/g
+  let match
+  while ((match = rule.exec(patches)) !== null) {
+    const selector = match[1].trim()
+    const body = match[2]
+    if (!/::?before\b/.test(selector)) continue
+    const values = []
+    for (const property of ['background', 'background-image', 'background-color', 'backdrop-filter', '-webkit-backdrop-filter']) {
+      const declaration = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`, 'g')
+      for (const hit of body.matchAll(declaration)) values.push(hit[1].trim())
+    }
+    if (values.some(value => !/^(none|transparent)\b/.test(value))) {
+      drift.push(`composer band: ${selector} paints a session-wide layer (${body.replace(/\s+/g, ' ').trim().slice(0, 90)})`)
+    }
+  }
+  return drift
+}
+
 /** One resolved pair → {ratio, fg, bg} for a mode, or null when a token is unhandled. */
 function measureRaw(mode, fgRaw, bgRaw) {
   const lookup = (name) => mode.get(name)
@@ -384,7 +421,7 @@ function scanSurfaceRules() {
 
 /** Run the whole verdict; returns failure strings (empty = clean). */
 export function contrastDrift({ report = false } = {}) {
-  const drift = [...mirrorDrift()]
+  const drift = [...mirrorDrift(), ...composerBandDrift()]
   let model
   try {
     model = loadContrastModel()
