@@ -73,6 +73,47 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   }
 
   /**
+   * The servers one session has mounted (always-on servers included), read
+   * from the session-scoped mount service. Failure posture is fail-open: an
+   * unavailable service answers an empty list.
+   * @param sessionId - the session whose mounts are read.
+   * @returns the mounted rows with tool counts.
+   */
+  @Remote
+  async mcpMounts(sessionId: string): Promise<{ mounts: Array<{ id: string; serverName: string; toolCount: number }> }> {
+    try {
+      const service = this.ctx.get('mcpMounts') as
+        | { list?: (session: { id: string }) => Array<{ id: string; serverName: string; state: string; toolCount: number }> }
+        | undefined
+      const rows = service?.list?.({ id: sessionId }) ?? []
+      return { mounts: rows.filter(row => row.state === 'mounted').map(row => ({ id: row.id, serverName: row.serverName, toolCount: row.toolCount })) }
+    } catch {
+      return { mounts: [] }
+    }
+  }
+
+  /**
+   * Unmount one server from one session (the operator's close control on the
+   * session surface). The shared connection is disposed when no session holds
+   * it and the server is on-demand.
+   * @param sessionId - the session to unmount from.
+   * @param server - the catalog server id.
+   * @returns whether the unmount succeeded, with the reason on failure.
+   */
+  @Remote
+  async mcpUnmount(sessionId: string, server: string): Promise<{ ok: boolean; reason: string }> {
+    try {
+      const service = this.ctx.get('mcpMounts') as
+        | { unmount?: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }> }
+        | undefined
+      if (service?.unmount === undefined) return { ok: false, reason: 'the mount service is unavailable' }
+      return await service.unmount({ id: sessionId }, server)
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
    * Remove one catalog MCP server AND every policy row it owned
    * (`mcp__<server>__*` + exact `mcp__<server>__<tool>` rows, global and per
    * agent) in a single revision-fenced settings write, so the Permissions page

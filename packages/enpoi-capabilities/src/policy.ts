@@ -127,6 +127,11 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   roundtable: 'allow', chorus: 'allow', subagent: 'allow', task: 'allow',
   job_output: 'allow', job_list: 'allow', job_kill: 'ask',
   skill: 'allow', ask_user_question: 'allow',
+  // MCP lifecycle (on-demand mounting): `list` is read-only, and mount/unmount
+  // only touch servers the operator already configured and allowed, scoped to
+  // the calling session and reversible. The mounted server's OWN tools keep
+  // their own rows (unknownTools = ask), so the dangerous surface still asks.
+  mcp: 'allow',
   // Read-only introspection: an unattended peer/driver run must be able to look
   // at its own session, diagnostics, and history without parking on an ask
   // nobody is there to answer (observed live: session_debug parked a turn).

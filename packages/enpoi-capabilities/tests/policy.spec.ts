@@ -599,3 +599,12 @@ describe('custom tools (enpoi-custom-tools)', () => {
     expect(decision.kind).toBe('ask')
   })
 })
+
+describe('mcp lifecycle tool default', () => {
+  it('ships allow: list is read-only and mount/unmount are session-scoped and reversible', () => {
+    expect(SHIPPED_TOOL_DEFAULTS.mcp).toBe('allow')
+    expect(resolvePolicy({ toolName: 'mcp', config: EMPTY }).kind).toBe('allow')
+    // The mounted server's own tools keep their own rows (unknownTools = ask).
+    expect(resolvePolicy({ toolName: 'mcp__unreal__spawn_actor', config: EMPTY }).kind).toBe('ask')
+  })
+})

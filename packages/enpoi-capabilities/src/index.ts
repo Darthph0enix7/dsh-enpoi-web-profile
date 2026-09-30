@@ -16,7 +16,15 @@
  */
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** The skill-hint mount note attached after a `skill` load. */
+    'mcp-mounts': { kind: 'mcp-mounts' } & ContextFormed
+  }
+}
 import Schema from '@deepseek-ai/schemastery'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import type { CapabilitiesState } from './types'
@@ -30,6 +38,11 @@ import {
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
+import {
+  buildMountRows, isOnDemand, mcpMountsProjection, mcpServerOfToolName, MCP_MOUNTS_EVENT,
+  serverModeOf, serverNameOf,
+  type McpMountRow, type McpServerRecord,
+} from './mcp-mounts'
 import { stripUnavailableToolGuidance } from './prompt-honesty'
 import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
@@ -42,6 +55,9 @@ import { requestRecommendation, RECOMMENDATION_TIMEOUT_MS } from './recommendati
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
+
+/** Last logged on-demand surface signature (dedupe of repeated assemble passes). */
+let lastOnDemandSurfaceSignature: string | undefined
 
 export const name = 'enpoi-capabilities'
 export const inject = ['tools', 'systemPrompt', 'settings', 'timer']
@@ -71,6 +87,12 @@ export interface OrchestrationMcpServer {
   headers?: Record<string, string>
   toolCallTimeoutMs?: number
   apiKeyEnv?: string
+  /**
+   * `on-demand` servers are never auto-mounted: the agent mounts them for its
+   * session with the `mcp` tool (or a skill's `mcp:` hint). Absent = always-on
+   * (the pre-existing behavior).
+   */
+  mode?: 'always-on' | 'on-demand'
 }
 
 /**
@@ -264,6 +286,20 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   })
   ctx.effect(() => disposeGuard, 'enpoi-capabilities: tool guard')
 
+  /**
+   * Late-bound session-mount accessor: the mcp-client import block owns the
+   * machinery, while the assemble filter and the pre-execute listener (both
+   * registered synchronously) read it lazily.
+   */
+  let sessionMountsAccess: {
+    catalog: () => Record<string, McpServerRecord>
+    effectiveMounted: (session: { id: string }) => Set<string>
+    isToolMounted: (session: { id: string }, toolName: string) => boolean
+    list: (session: { id: string }) => McpMountRow[]
+    mount: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string; toolCount: number }>
+    unmount: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }>
+  } | undefined
+
   // 1b. Invariant B1b: Disabled tools are STRIPPED from the model-facing tool
   // schema entirely (zero token cost, no instruction-following risk). The
   // system-prompt/assemble waterfall carries the assembled tool list; we
@@ -307,6 +343,32 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       mcpServerNames: readMcpServerNames() ?? [],
     }))
     if (advertise.size < kept.length) kept = kept.filter(tool => advertise.has(tool.name))
+    // 1f. MCP on-demand honesty: an on-demand server's tools are absent from a
+    // session that has not mounted it. Model-visible ⟺ mounted ⟺ logged: the
+    // drop is announced once per surface signature.
+    const scopeSession = (scope as { session?: { id?: string } } | undefined)?.session
+    if (sessionMountsAccess !== undefined && scopeSession !== undefined && typeof scopeSession.id === 'string') {
+      const mounted = sessionMountsAccess.effectiveMounted(scopeSession as { id: string })
+      const hidden = new Set(
+        Object.entries(sessionMountsAccess.catalog())
+          .filter(([id, def]) => isOnDemand(def) && !mounted.has(id))
+          .map(([id, def]) => serverNameOf(id, def)),
+      )
+      if (hidden.size > 0) {
+        const before = kept.length
+        kept = kept.filter(tool => {
+          const server = mcpServerOfToolName(tool.name)
+          return server === undefined || !hidden.has(server)
+        })
+        if (kept.length !== before) {
+          const signature = `session=${scopeSession.id} hidden=[${[...hidden].join(',')}]`
+          if (signature !== lastOnDemandSurfaceSignature) {
+            lastOnDemandSurfaceSignature = signature
+            process.stderr.write(`[enpoi-capabilities] mcp on-demand surface: ${signature}\n`)
+          }
+        }
+      }
+    }
     // The mention dictionary is the whole registry, not the surviving list: a
     // section naming a REMOVED tool must be pruned too, and the removed name
     // only exists in the registry view.
@@ -367,18 +429,380 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     /** Signature of the last logged sync: repeated settings pushes stay silent. */
     let lastSyncSignature: string | undefined
 
-    async function syncMcpMounts(): Promise<void> {
+    /** One live session as the mount service reads it. */
+    interface SessionLike {
+      id: string
+      append: (type: string, data: unknown, options?: { ignorable?: boolean }) => void
+    }
+
+    /** In-memory fallback for sessions whose projection registry is absent. */
+    const sessionMounts = new Map<string, Set<string>>()
+
+    /** The session's mounted set: the durable projection first, memory otherwise. */
+    function mountedSetOf(session: SessionLike): Set<string> {
+      try {
+        const projections = ctx.get('sessionProjections') as
+          | { stateOf?: (session: unknown, key: string) => { mounted?: readonly string[] } | undefined }
+          | undefined
+        const state = projections?.stateOf?.(session, 'mcpMounts')
+        if (state !== undefined) return new Set(state.mounted ?? [])
+      } catch {
+        // Fall through to the in-memory set.
+      }
+      return new Set(sessionMounts.get(session.id) ?? [])
+    }
+
+    /** Persist the session's mounted set (durable event + memory mirror). */
+    function setMounted(session: SessionLike, next: Set<string>): void {
+      sessionMounts.set(session.id, next)
+      try {
+        session.append(MCP_MOUNTS_EVENT, { mounted: [...next] }, { ignorable: true })
+      } catch (error) {
+        process.stderr.write(`[enpoi-capabilities] mcp mounts append failed: ${error instanceof Error ? error.message : String(error)}\n`)
+      }
+    }
+
+    /** Every session that currently has one server mounted (refcount for disposal). */
+    function sessionsWithMount(id: string): number {
+      let count = 0
+      for (const set of sessionMounts.values()) if (set.has(id)) count += 1
+      return count
+    }
+
+    /** Count the registered tools of one mounted namespace. */
+    function toolCountOf(serverName: string): number {
+      try {
+        const schemas = (ctx.get('tools') as { schemas?: () => Array<{ name: string }> } | undefined)?.schemas?.() ?? []
+        return schemas.filter(schema => mcpServerOfToolName(schema.name) === serverName).length
+      } catch {
+        return 0
+      }
+    }
+
+    /**
+     * Connect one server's global mcp-client fiber (shared by every session).
+     * @param id - catalog server id.
+     * @param failOnStartupError - true for an explicit on-demand mount (a failed
+     *   initial connection must reject with its reason); false for the always-on
+     *   sync (the supervisor keeps retrying in the background).
+     */
+    async function mountServer(id: string, failOnStartupError = false): Promise<{ ok: boolean; reason: string }> {
+      if (mounted.has(id)) return { ok: true, reason: '' }
+      if (mountedPending.has(id)) return { ok: false, reason: 'a mount is already in flight' }
+      const def = getServerCatalog()[id]
+      if (def === undefined) {
+        process.stderr.write(`[enpoi-capabilities] mcp mount skipped: ${id} is not in the catalog\n`)
+        return { ok: false, reason: `server "${id}" is not in the catalog` }
+      }
+      if (def.url === undefined || def.url === '') {
+        process.stderr.write(`[enpoi-capabilities] mcp mount skipped: ${id} has no url\n`)
+        return { ok: false, reason: `server "${id}" has no url configured` }
+      }
+      mountedPending.add(id)
+      process.stderr.write(`[enpoi-capabilities] mcp mount starting: ${id} (${def.url})\n`)
+      try {
+        const apiKey = await resolveCredential(def.apiKeyEnv)
+        const headers: Record<string, string> = { ...(def.headers ?? {}) }
+        if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+        const fiber = ctx.plugin(mcpClient.apply, {
+          transport: 'streamable-http',
+          serverName: serverNameOf(id, def),
+          url: def.url,
+          headers,
+          toolCallTimeoutMs: def.toolCallTimeoutMs ?? 60_000,
+          failOnStartupError,
+        }) as unknown as Fiber
+        await fiber
+        mounted.set(id, fiber)
+        mountErrors.delete(id)
+        publishedMountErrors.delete(id)
+        return { ok: true, reason: '' }
+      } catch (error) {
+        const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : ''
+        const message = `${error instanceof Error ? error.message : String(error)}${cause}`
+        mountErrors.set(id, message)
+        process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${message}\n`)
+        // Publish the failure once per message: the status write itself emits
+        // `settings/updated`, which retries the mount, so an unguarded publish
+        // would spin. A different message re-publishes; a successful mount clears it.
+        if (publishedMountErrors.get(id) !== message) {
+          publishedMountErrors.set(id, message)
+          void probeAll().catch(() => {})
+        }
+        return { ok: false, reason: message }
+      } finally {
+        mountedPending.delete(id)
+      }
+    }
+
+    /** Dispose one server's global fiber. */
+    function disposeServer(id: string): void {
+      const fiber = mounted.get(id)
+      if (fiber === undefined) return
+      mounted.delete(id)
+      process.stderr.write(`[enpoi-capabilities] mcp dispose: ${id}\n`)
+      void fiber.dispose().catch(() => {})
+    }
+
+    /** The allowed set (`capabilities.mcp[id] === true`). */
+    function allowedServers(): Set<string> {
       const state = initialCapabilitiesState(getGlobalDefaults())
+      return new Set(Object.keys(getServerCatalog()).filter(id => state.mcp[id] === true))
+    }
+
+    /** The session's effective mounted set: its own mounts plus every always-on server. */
+    function effectiveMounted(session: SessionLike): Set<string> {
+      const set = mountedSetOf(session)
+      for (const [id, def] of Object.entries(getServerCatalog())) {
+        if (!isOnDemand(def)) set.add(id)
+      }
+      return set
+    }
+
+    /** Mount one server for one session (connect on first use, then record it). */
+    async function mountForSession(session: SessionLike, id: string): Promise<{ ok: boolean; reason: string; toolCount: number }> {
+      const def = getServerCatalog()[id]
+      if (def === undefined) return { ok: false, reason: `server "${id}" is not in the catalog`, toolCount: 0 }
+      if (!allowedServers().has(id)) return { ok: false, reason: `server "${id}" is not allowed (capabilities.mcp.${id} is not true)`, toolCount: 0 }
+      const outcome = await mountServer(id, true)
+      if (!outcome.ok) return { ok: false, reason: outcome.reason, toolCount: 0 }
+      const next = mountedSetOf(session)
+      next.add(id)
+      setMounted(session, next)
+      const toolCount = toolCountOf(serverNameOf(id, def))
+      process.stderr.write(`[enpoi-capabilities] mcp mount: session ${session.id} mounted ${id} (${String(toolCount)} tools)\n`)
+      return { ok: true, reason: '', toolCount }
+    }
+
+    /** Unmount one server from one session; dispose the shared fiber when nobody needs it. */
+    async function unmountForSession(session: SessionLike, id: string): Promise<{ ok: boolean; reason: string }> {
+      const def = getServerCatalog()[id]
+      if (def === undefined) return { ok: false, reason: `server "${id}" is not in the catalog` }
+      const next = mountedSetOf(session)
+      if (!next.delete(id)) return { ok: false, reason: `server "${id}" is not mounted in this session` }
+      setMounted(session, next)
+      if (!isOnDemand(def) || sessionsWithMount(id) === 0) {
+        // Always-on servers keep their fiber; an on-demand server with no
+        // remaining session mount disconnects.
+        if (isOnDemand(def)) disposeServer(id)
+      }
+      process.stderr.write(`[enpoi-capabilities] mcp unmount: session ${session.id} unmounted ${id}\n`)
+      return { ok: true, reason: '' }
+    }
+
+    /** The `mcp list` rows for one session. */
+    function listMounts(session: SessionLike): McpMountRow[] {
+      const catalog = getServerCatalog() as Record<string, McpServerRecord>
+      const toolNames = (() => {
+        try {
+          return ((ctx.get('tools') as { schemas?: () => Array<{ name: string }> } | undefined)?.schemas?.() ?? []).map(schema => schema.name)
+        } catch {
+          return []
+        }
+      })()
+      return buildMountRows(catalog, allowedServers(), effectiveMounted(session), mountErrors, toolNames)
+    }
+
+    /** The session-scoped mount service consumed by the `mcp` tool, the skill hint, and the RPC. */
+    const mcpMountsService = {
+      list: (session: SessionLike): McpMountRow[] => listMounts(session),
+      mount: (session: SessionLike, id: string) => mountForSession(session, id),
+      unmount: (session: SessionLike, id: string) => unmountForSession(session, id),
+    }
+    ctx.provide('mcpMounts', mcpMountsService)
+    try {
+      ;(ctx.get('sessionProjections') as { register?: (unit: unknown) => void } | undefined)?.register?.(mcpMountsProjection)
+    } catch (error) {
+      process.stderr.write(`[enpoi-capabilities] mcp mounts projection registration failed: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+
+    /** Whether one tool's on-demand server is mounted for this session. */
+    function isToolMounted(session: SessionLike, toolName: string): boolean {
+      const server = mcpServerOfToolName(toolName)
+      if (server === undefined) return true
+      const entry = Object.entries(getServerCatalog()).find(([id, def]) => serverNameOf(id, def) === server)
+      if (entry === undefined) return true
+      const [id, def] = entry
+      if (!isOnDemand(def)) return true
+      return effectiveMounted(session).has(id)
+    }
+
+    sessionMountsAccess = {
+      catalog: getServerCatalog,
+      effectiveMounted: (session: { id: string }) => effectiveMounted(session as SessionLike),
+      isToolMounted: (session: { id: string }, toolName: string) => isToolMounted(session as SessionLike, toolName),
+      list: (session: { id: string }) => listMounts(session as SessionLike),
+      mount: (session: { id: string }, id: string) => mountForSession(session as SessionLike, id),
+      unmount: (session: { id: string }, id: string) => unmountForSession(session as SessionLike, id),
+    }
+
+    // Session end tears the session's mounts down: the durable projection dies
+    // with the session, and an on-demand server nobody else holds disconnects.
+    ctx.on('session/disposed', ((session: SessionLike) => {
+      const set = sessionMounts.get(session.id)
+      sessionMounts.delete(session.id)
+      if (set === undefined || set.size === 0) return
+      for (const id of set) {
+        const def = getServerCatalog()[id]
+        if (def !== undefined && isOnDemand(def) && sessionsWithMount(id) === 0) disposeServer(id)
+      }
+      process.stderr.write(`[enpoi-capabilities] mcp teardown: session ${session.id} released [${[...set].join(',')}]\n`)
+    }) as (...args: unknown[]) => unknown)
+
+    // ── the `mcp` lifecycle tool ────────────────────────────────────────────
+    // One tool, three actions. Permission row: shipped `allow` (see
+    // SHIPPED_TOOL_DEFAULTS) — list is read-only, and mount/unmount only touch
+    // servers the operator already configured and allowed, scoped to the
+    // calling session and reversible. The mounted server's OWN tools keep
+    // their own rows (unknownTools = ask), so the dangerous surface still asks.
+    const MCP_TOOL_OUTPUT_SCHEMA = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string' },
+        server: { type: 'string' },
+        ok: { type: 'boolean' },
+        reason: { type: 'string' },
+        text: { type: 'string' },
+      },
+      required: ['action', 'server', 'ok', 'reason', 'text'],
+    } as const
+
+    /** Render one `mcp` tool value as model-facing text. */
+    function renderMcpToolResult(_args: unknown, value: unknown): Array<{ type: 'text'; text: string }> {
+      const run = value as { text: string }
+      return [{ type: 'text', text: run.text }]
+    }
+
+    /** One `mcp list` line. */
+    function renderMountRow(row: McpMountRow): string {
+      const detail = row.state === 'mounted'
+        ? `mounted — ${String(row.toolCount)} tools`
+        : row.state === 'available'
+          ? `available — ${String(row.toolCount)} tools`
+          : `unavailable — ${row.reason}`
+      return `- ${row.id} [${row.mode}] ${detail}`
+    }
+
+    ctx.tools.register({
+      name: 'mcp',
+      description: [
+        'Manage MCP servers for THIS session. Actions:',
+        '"list" shows every configured server with its mode (always-on | on-demand), state (mounted | available | unavailable), reason, and tool count;',
+        '"mount" connects one on-demand server and registers its tools for this session (they stay for continuing work);',
+        "\"unmount\" disconnects this session's mount when the errand is done.",
+        'Nothing auto-connects: a server that failed once stays down until explicitly mounted.',
+      ].join(' '),
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'mount', 'unmount'], description: 'The lifecycle action to perform.' },
+          server: { type: 'string', description: 'Catalog server id (required for mount/unmount).' },
+        },
+        required: ['action'],
+      },
+      output: { schema: MCP_TOOL_OUTPUT_SCHEMA as never, render: renderMcpToolResult as never },
+      isConcurrencySafe: () => false,
+      async execute(args: unknown, exec: unknown): Promise<Record<string, unknown>> {
+        const request = (args ?? {}) as { action?: unknown; server?: unknown }
+        const action = typeof request.action === 'string' ? request.action : ''
+        const server = typeof request.server === 'string' ? request.server : ''
+        const session = (exec as { agent?: { session?: SessionLike } }).agent?.session
+        if (session === undefined) {
+          return { action, server, ok: false, reason: 'mcp requires a live session', text: 'mcp requires a live session' }
+        }
+        if (action === 'list') {
+          const rows = listMounts(session)
+          const text = rows.length === 0
+            ? 'no MCP servers are configured'
+            : `mcp servers (session ${session.id}):\n${rows.map(renderMountRow).join('\n')}`
+          return { action, server: '', ok: true, reason: '', text }
+        }
+        if (action === 'mount') {
+          if (server === '') return { action, server, ok: false, reason: 'mount requires a server id', text: 'mount requires a server id' }
+          const outcome = await mountForSession(session, server)
+          const text = outcome.ok
+            ? `mounted "${server}" for this session (${String(outcome.toolCount)} tools)`
+            : `could not mount "${server}": ${outcome.reason}`
+          return { action, server, ok: outcome.ok, reason: outcome.reason, text }
+        }
+        if (action === 'unmount') {
+          if (server === '') return { action, server, ok: false, reason: 'unmount requires a server id', text: 'unmount requires a server id' }
+          const outcome = await unmountForSession(session, server)
+          const text = outcome.ok
+            ? `unmounted "${server}" for this session`
+            : `could not unmount "${server}": ${outcome.reason}`
+          return { action, server, ok: outcome.ok, reason: outcome.reason, text }
+        }
+        return { action, server, ok: false, reason: `unknown action "${action}"`, text: `unknown action "${action}"` }
+      },
+    })
+
+    // ── skill hint: `mcp: [server]` frontmatter mounts on load ──────────────
+    ctx.on('tools/post-execute', (async (
+      exec: { name: string; arguments?: Record<string, unknown>; agent?: { session?: SessionLike } },
+      _result: unknown,
+      next: () => Promise<{ kind: string; additionalContexts?: unknown[] }>,
+    ) => {
+      const downstream = await next()
+      if (exec.name !== 'skill' || downstream.kind !== 'accept') return downstream
+      const session = exec.agent?.session
+      const name = exec.arguments?.name
+      if (session === undefined || typeof name !== 'string' || name === '') return downstream
+      let hints: string[] = []
+      try {
+        const skills = ctx.get('skills') as
+          | { get?: (name: string, options: Record<string, unknown>) => Promise<{ mcp?: readonly string[] } | undefined> }
+          | undefined
+        const definition = await skills?.get?.(name, { scope: exec.agent })
+        hints = Array.isArray(definition?.mcp) ? [...definition.mcp] : []
+      } catch {
+        return downstream
+      }
+      if (hints.length === 0) return downstream
+      const notes: string[] = []
+      for (const server of hints) {
+        const outcome = await mountForSession(session, server)
+        notes.push(outcome.ok
+          ? `mcp: mounted "${server}" for this session (${String(outcome.toolCount)} tools)`
+          : `mcp: could not mount "${server}": ${outcome.reason}`)
+      }
+      // The skill tool re-renders its canonical value after post-execute, so a
+      // content replacement would be discarded; the note rides as an injected
+      // context message instead (model-visible, durable, and honest).
+      return {
+        ...downstream,
+        additionalContexts: [
+          ...(downstream.additionalContexts ?? []),
+          createUserMessage({
+            content: [{ type: 'text', text: notes.join('\n') }],
+            source: { kind: 'mcp-mounts', form: 'notice', summary: `mcp mounts for ${name}` },
+          }),
+        ],
+      }
+    }) as (...args: unknown[]) => unknown)
+
+    // ── doctrine: the mount lifecycle line ──────────────────────────────────
+    ctx.systemPrompt.section({
+      name: 'mcp:lifecycle',
+      order: ctx.systemPrompt.getSectionOrder('MCP_SERVERS'),
+      text: [
+        'MCP servers are mounted per session. A mount made for continuing work stays mounted;',
+        'a one-shot errand unmounts when it is done; when unsure, leave it mounted.',
+        'Nothing auto-connects: a server that failed once stays down until you mount it again.',
+      ].join(' '),
+    })
+
+    async function syncMcpMounts(): Promise<void> {
       const catalog = getServerCatalog()
-      const want = new Set(
-        Object.entries(catalog)
-          .filter(([id]) => state.mcp[id] === true)
-          .map(([id]) => id),
-      )
+      const allowed = allowedServers()
+      // On-demand servers are NEVER auto-mounted: only the agent's session
+      // mounts (or an always-on mode) connect them.
+      const want = new Set(Object.keys(catalog).filter(id => allowed.has(id) && !isOnDemand(catalog[id])))
       // A server that left the catalog (removed) or was toggled off no longer
       // has a failure to report; drop its error before publishing status.
       for (const id of [...mountErrors.keys()]) {
-        if (want.has(id)) continue
+        if (allowed.has(id)) continue
         mountErrors.delete(id)
         publishedMountErrors.delete(id)
       }
@@ -389,50 +813,16 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           process.stderr.write(`[enpoi-capabilities] mcp sync: ${signature}\n`)
         }
       }
-      // Unmount disabled / removed servers
-      for (const [id, fiber] of [...mounted]) {
-        if (!want.has(id)) {
-          mounted.delete(id)
-          void fiber.dispose().catch(() => {})
-        }
+      // Unmount disabled / removed servers, and on-demand servers nobody holds.
+      for (const id of [...mounted.keys()]) {
+        const def = catalog[id]
+        const keep = want.has(id) || (def !== undefined && isOnDemand(def) && sessionsWithMount(id) > 0)
+        if (!keep) disposeServer(id)
       }
-      // Mount newly enabled servers
+      // Mount newly enabled always-on servers.
       for (const id of want) {
         if (mounted.has(id) || mountedPending.has(id)) continue
-        const def = catalog[id]
-        const serverName = def.serverName ?? id.replace(/-mcp$/, '')
-        if (!def.url) continue
-        mountedPending.add(id)
-        try {
-          const apiKey = await resolveCredential(def.apiKeyEnv)
-          const headers: Record<string, string> = { ...(def.headers ?? {}) }
-          if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-          const fiber = ctx.plugin(mcpClient.apply, {
-            transport: 'streamable-http',
-            serverName,
-            url: def.url,
-            headers,
-            toolCallTimeoutMs: def.toolCallTimeoutMs ?? 60_000,
-            failOnStartupError: false,
-          }) as unknown as Fiber
-          await fiber
-          mounted.set(id, fiber)
-          mountErrors.delete(id)
-          publishedMountErrors.delete(id)
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          mountErrors.set(id, message)
-          process.stderr.write(`[enpoi-capabilities] mcp mount failed for ${id}: ${message}\n`)
-          // Publish the failure once per message: the status write itself emits
-          // `settings/updated`, which retries the mount, so an unguarded publish
-          // would spin. A different message re-publishes; a successful mount clears it.
-          if (publishedMountErrors.get(id) !== message) {
-            publishedMountErrors.set(id, message)
-            void probeAll().catch(() => {})
-          }
-        } finally {
-          mountedPending.delete(id)
-        }
+        await mountServer(id)
       }
     }
 
@@ -873,6 +1263,17 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs())
     if (!capabilityDecision.allowed) {
       return { kind: 'deny', reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` }
+    }
+    // On-demand MCP servers: a tool whose server this session has not mounted
+    // is denied at execution time too (the surface filter is the first line;
+    // this is the backstop for in-flight turns and direct calls).
+    const execSession = (exec.agent as { session?: { id?: string } } | undefined)?.session
+    if (sessionMountsAccess !== undefined && execSession !== undefined && typeof execSession.id === 'string'
+      && !sessionMountsAccess.isToolMounted(execSession as { id: string }, exec.name)) {
+      return {
+        kind: 'deny',
+        reason: `${exec.name} is not available: its MCP server is on-demand and this session has not mounted it. Use the mcp tool (action "mount") first.`,
+      }
     }
     const config = readPermissionConfig()
     const isBash = exec.name === 'bash'
