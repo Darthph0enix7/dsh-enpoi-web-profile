@@ -391,6 +391,17 @@ function requireAbsolute(path) {
   }
   return resolve(path);
 }
+function settingsDocument(ctx) {
+  const path = ctx.get("settings")?.documentPath;
+  if (typeof path !== "string" || path === "" || !isAbsolute(path)) return void 0;
+  const resolved = resolve(path);
+  return { path: resolved, root: dirname(resolved) };
+}
+function insideSettingsRoot(document, path) {
+  const rel = relative(document.root, resolve(path));
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+var MAX_LIST_ENTRIES = 2e3;
 function requireWorkspacePath(payload, sessions, key = "path") {
   const raw = requireString(payload, key);
   if (isAbsolute(raw)) return resolve(raw);
@@ -445,6 +456,13 @@ function apply(ctx, config) {
   const sessions = ctx.get("sessions");
   const trustedHosts = ctx.get("webRuntime")?.trustedHosts ?? [];
   const api = {
+    "settings.document": async () => {
+      const document = settingsDocument(ctx);
+      if (document === void 0) {
+        throw new FsOpsError("not-found", "no settings document is available", 404);
+      }
+      return document;
+    },
     "fs.rename": async (payload) => {
       const cwd = cwdOf(payload, sessions);
       const from = requireAbsolute(requireString(payload, "from"));
@@ -514,6 +532,28 @@ function apply(ctx, config) {
         throw new FsOpsError("fs-error", `cannot create "${target}": ${error instanceof Error ? error.message : String(error)}`, 400);
       }
       return { ok: true, path: target };
+    },
+    "fs.list": async (payload) => {
+      const path = requireAbsolute(requireString(payload, "path"));
+      const document = settingsDocument(ctx);
+      if (document === void 0 || !insideSettingsRoot(document, path)) {
+        throw new FsOpsError("fs-error", `"${path}" is outside the settings document directory`, 400);
+      }
+      let dirents;
+      try {
+        dirents = await readdir(path, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          throw new FsOpsError("not-found", `"${path}" does not exist`, 404);
+        }
+        throw new FsOpsError("fs-error", `cannot list "${path}": ${error instanceof Error ? error.message : String(error)}`, 400);
+      }
+      const entries = dirents.slice(0, MAX_LIST_ENTRIES).map((dirent) => {
+        if (dirent.isDirectory()) return { name: dirent.name, type: "directory" };
+        if (dirent.isFile()) return { name: dirent.name, type: "file" };
+        return { name: dirent.name, type: "other" };
+      });
+      return { path, entries, truncated: dirents.length > MAX_LIST_ENTRIES };
     },
     "fs.stat": async (payload) => {
       const path = requireWorkspacePath(payload, sessions);
@@ -612,8 +652,12 @@ function apply(ctx, config) {
       const force = record?.force === true;
       const root = resolve(cwd);
       const rel = relative(root, path);
-      if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-        throw new FsOpsError("fs-error", "file must stay inside the workspace", 400);
+      const inWorkspace = rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+      if (!inWorkspace) {
+        const document = settingsDocument(ctx);
+        if (document === void 0 || !insideSettingsRoot(document, path)) {
+          throw new FsOpsError("fs-error", "file must stay inside the workspace", 400);
+        }
       }
       const bytes = Buffer.from(content, "utf8");
       const newSha = sha256Of(bytes);

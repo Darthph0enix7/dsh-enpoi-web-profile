@@ -11,10 +11,16 @@
  * - fs.read    — text content + full-file sha256 + mtimeMs/size; refuses
  *                binary (NUL / invalid UTF-8), caps the returned content at
  *                4 MiB and flags `truncated` (never saveable, sha stays full)
+ * - fs.list    — direct children of one directory inside the settings
+ *                document's own directory; the one listing the sidebar may
+ *                take outside a session workspace (operator preview grant)
+ * - settings.document — absolute settings document path and its containing
+ *                directory, when a settings provider is mounted
  * - fs.write   — atomic optimistic save (expectedSha conflict / explicit force
  *                overwrite / create-only), content-addressed pre-overwrite
  *                backup in ~/.dsh/file-history/editor/<sha256>, .dsh-tmp
- *                staging + fsync
+ *                staging + fsync; containment is the session workspace plus
+ *                the settings document directory (operator preview grant)
  * - skills.list   — on-disk skill bundles under `$DSH_HOME/skills` plus,
  *                   when a session address resolves, read-only registry rows
  *                   (the shipped tiers come from the profile's own root)
@@ -538,6 +544,36 @@ function requireAbsolute(path: string): string {
   return resolve(path)
 }
 
+/** Structural face of the settings service's document location. */
+interface SettingsDocumentFace {
+  /** Absolute path of the profile patch the settings provider edits. */
+  readonly documentPath?: string
+}
+
+/**
+ * The settings document the operator preview may open, and its directory.
+ *
+ * The grant is derived from the live settings provider at request time, never
+ * from a caller path, so the routes below can only ever reach the one document
+ * this deployment owns. `undefined` means the provider is absent or has no
+ * path: every grant-dependent route then refuses as if no document existed.
+ */
+function settingsDocument(ctx: Context): { path: string; root: string } | undefined {
+  const path = (ctx.get('settings') as SettingsDocumentFace | undefined)?.documentPath
+  if (typeof path !== 'string' || path === '' || !isAbsolute(path)) return undefined
+  const resolved = resolve(path)
+  return { path: resolved, root: dirname(resolved) }
+}
+
+/** Whether one path is the settings document's directory or below it. */
+function insideSettingsRoot(document: { root: string }, path: string): boolean {
+  const rel = relative(document.root, resolve(path))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/** Cap on returned directory entries for `fs.list`; the rest is dropped and reported cut. */
+const MAX_LIST_ENTRIES = 2000
+
 /**
  * Resolve one payload path against the session workspace.
  *
@@ -619,6 +655,14 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
   const trustedHosts = (ctx.get('webRuntime') as { trustedHosts?: readonly string[] } | undefined)?.trustedHosts ?? []
 
   const api: Record<string, (payload: unknown) => Promise<unknown>> = {
+    'settings.document': async () => {
+      const document = settingsDocument(ctx)
+      if (document === undefined) {
+        throw new FsOpsError('not-found', 'no settings document is available', 404)
+      }
+      return document
+    },
+
     'fs.rename': async (payload) => {
       const cwd = cwdOf(payload, sessions)
       const from = requireAbsolute(requireString(payload, 'from'))
@@ -698,6 +742,33 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
         throw new FsOpsError('fs-error', `cannot create "${target}": ${error instanceof Error ? error.message : String(error)}`, 400)
       }
       return { ok: true, path: target }
+    },
+
+    'fs.list': async (payload) => {
+      // The operator tree always addresses the listing by absolute path; a
+      // relative one has no workspace to resolve against here.
+      const path = requireAbsolute(requireString(payload, 'path'))
+      const document = settingsDocument(ctx)
+      if (document === undefined || !insideSettingsRoot(document, path)) {
+        throw new FsOpsError('fs-error', `"${path}" is outside the settings document directory`, 400)
+      }
+      let dirents
+      try {
+        dirents = await readdir(path, { withFileTypes: true })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new FsOpsError('not-found', `"${path}" does not exist`, 404)
+        }
+        throw new FsOpsError('fs-error', `cannot list "${path}": ${error instanceof Error ? error.message : String(error)}`, 400)
+      }
+      const entries = dirents.slice(0, MAX_LIST_ENTRIES).map((dirent) => {
+        if (dirent.isDirectory()) return { name: dirent.name, type: 'directory' as const }
+        if (dirent.isFile()) return { name: dirent.name, type: 'file' as const }
+        // A symlink or device reports `other`, matching the workspace listing's
+        // vocabulary without following the link out of the granted directory.
+        return { name: dirent.name, type: 'other' as const }
+      })
+      return { path, entries, truncated: dirents.length > MAX_LIST_ENTRIES }
     },
 
     'fs.stat': async (payload) => {
@@ -807,12 +878,19 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
       // the on-disk version the overwrite replaces.
       const force = record?.force === true
 
-      // Containment: same rule as fs.delete — never the workspace root, never
-      // anything outside it (`relative` resolves dot-segments for us).
+      // Containment: the session workspace — never its root, never anything
+      // outside it (`relative` resolves dot-segments for us) — plus the
+      // operator preview grant: the settings document's own directory is the
+      // one place outside a workspace the sidebar may save into. The grant
+      // covers every write form below (save, force overwrite, create-beside).
       const root = resolve(cwd)
       const rel = relative(root, path)
-      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
-        throw new FsOpsError('fs-error', 'file must stay inside the workspace', 400)
+      const inWorkspace = rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+      if (!inWorkspace) {
+        const document = settingsDocument(ctx)
+        if (document === undefined || !insideSettingsRoot(document, path)) {
+          throw new FsOpsError('fs-error', 'file must stay inside the workspace', 400)
+        }
       }
 
       const bytes = Buffer.from(content, 'utf8')
