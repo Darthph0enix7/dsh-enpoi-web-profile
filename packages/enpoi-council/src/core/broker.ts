@@ -119,7 +119,7 @@ export class EvidenceQueue {
 
 const BROKER_PERSONA = [
   'You are the Council Evidence Broker — a precision research assistant serving a high-stakes deliberation.',
-  'You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.',
+  'You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search), and nothing else.',
   'You may receive MULTIPLE questions. Answer each in order, one FACT SHEET per question, in this exact format:',
   'SHEET 1',
   'CITATION: the ACTUAL file path with line number, or the exact URL you read. Never a placeholder, never a template — a real path you personally opened.',

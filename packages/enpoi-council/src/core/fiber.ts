@@ -112,7 +112,7 @@ export const COUNCIL_DENIED_TOOLS = [
 // Evidence fencing: deliberation seats additionally lose ALL retrieval tools.
 // Their only ingress to facts is the NEED_EVIDENCE protocol (doc 54 §6,
 // Oracle amendment #2 — no DECLARED_READ loophole).
-export const RETRIEVAL_TOOLS = ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'] as const
+export const RETRIEVAL_TOOLS = ['read', 'glob', 'grep', 'read_image', 'web_search'] as const
 
 /**
  * Tools every council fiber keeps regardless of fencing tier: the pinned

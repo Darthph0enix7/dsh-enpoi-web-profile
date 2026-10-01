@@ -159,8 +159,8 @@ export function seatToolDenyFor(seat: string | undefined, document: unknown): re
 /** Shipped global defaults (user-editable via settings; absent keys fall here). */
 export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   read: 'allow', glob: 'allow', grep: 'allow', read_image: 'allow',
-  web_search: 'allow', web_fetch: 'allow',
-  todo_write: 'allow', todo_read: 'allow',
+  web_search: 'allow',
+  todo_write: 'allow',
   memory_search: 'allow', memory_save: 'allow', memory_rescind: 'allow', memory_confirm: 'allow',
   oracle_review: 'allow', request_evidence: 'allow',
   roundtable: 'allow', chorus: 'allow', subagent: 'allow', task: 'allow',
