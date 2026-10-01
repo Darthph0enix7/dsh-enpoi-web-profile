@@ -4,7 +4,7 @@ import {
   mcpLadder, mcpServerNameOf, agentRoleOf, reviewerSeatOf, grantProposalFor, grantProposalForOutcome, standingGrantRecord,
   dangerVerbOfPattern, SHIPPED_TOOL_DEFAULTS, advertisedToolNames,
   isFullAccessMode, FULL_ACCESS_ASK_REASON,
-  REVIEW_RUN_TOOL, REVIEW_ROLES, type PermissionPolicyConfig,
+  REVIEW_RUN_TOOL, REVIEW_ROLES, SHIPPED_SEAT_TOOL_DENY, seatToolDenyFor, type PermissionPolicyConfig,
 } from '../src/policy'
 import { buildReviewRunCommand, reviewRunTimeoutMs, shellQuote, validateReviewTarget } from '../src/review-run'
 
@@ -400,7 +400,27 @@ describe('danger-list always-allow pins the exact command', () => {
     const ask = resolvePolicy({ toolName: 'bash', command: 'docker run img', config: { bashPatterns: [{ pattern: 'docker *', policy: 'ask' }] } })
     expect(ask).toMatchObject({ kind: 'ask', pattern: 'docker *' })
     expect((ask as { broadAllow?: unknown }).broadAllow).toBeUndefined()
-    expect(grantProposalFor(ask, 'bash', 'docker run img', undefined)).toEqual({ tool: 'bash', pattern: 'docker *' })
+    const safeProposal = grantProposalFor(ask, 'bash', 'docker run img', undefined)
+    expect(safeProposal).toEqual({ tool: 'bash', pattern: 'docker *' })
+    // The safe verb's default always-allow writes the rule pattern (no exact pin).
+    expect(grantProposalForOutcome(safeProposal, false)).toEqual({ tool: 'bash', pattern: 'docker *' })
+  })
+
+  it('the card copy states the exact scope of "Always allow" for a danger rail only', () => {
+    const danger = resolvePolicy({ toolName: 'bash', command: 'rm -f /tmp/a', config: EMPTY })
+    expect(danger.kind).toBe('ask')
+    const dangerReason = (danger as { reason: string }).reason
+    expect(dangerReason).toContain('"Always allow" grants this exact command only')
+    expect(dangerReason).toContain('"Allow all rm" grants every rm command')
+    // A safe verb's ask says nothing about an exact command: its default pin IS
+    // the rule pattern, so the added sentence would be false there.
+    const safe = resolvePolicy({
+      toolName: 'bash',
+      command: 'mkdir /tmp/x',
+      config: { bashPatterns: [{ pattern: 'mkdir *', policy: 'ask' }] },
+    })
+    expect((safe as { reason: string }).reason).not.toContain('Always allow')
+    expect((safe as { reason: string }).reason).toBe('bash rule "mkdir *" requires approval')
   })
 })
 
@@ -606,5 +626,29 @@ describe('mcp lifecycle tool default', () => {
     expect(resolvePolicy({ toolName: 'mcp', config: EMPTY }).kind).toBe('allow')
     // The mounted server's own tools keep their own rows (unknownTools = ask).
     expect(resolvePolicy({ toolName: 'mcp__unreal__spawn_actor', config: EMPTY }).kind).toBe('ask')
+  })
+})
+
+describe('per-seat execution restrictions (cache-neutral canonical shape)', () => {
+  it('denies the harness-authoring surface for orchestrator and sysadmin only', () => {
+    expect(SHIPPED_SEAT_TOOL_DENY.orchestrator).toEqual(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query'])
+    expect(SHIPPED_SEAT_TOOL_DENY.sysadmin).toEqual(SHIPPED_SEAT_TOOL_DENY.orchestrator)
+    expect(SHIPPED_SEAT_TOOL_DENY.creator).toBeUndefined()
+    for (const tool of SHIPPED_SEAT_TOOL_DENY.orchestrator ?? []) {
+      expect(seatToolDenyFor('orchestrator', undefined)).toContain(tool)
+      expect(seatToolDenyFor('sysadmin', undefined)).toContain(tool)
+      expect(seatToolDenyFor('creator', undefined)).not.toContain(tool)
+    }
+    expect(seatToolDenyFor(undefined, undefined)).toEqual([])
+    expect(seatToolDenyFor('', undefined)).toEqual([])
+  })
+
+  it('lets the orchestration document replace a seat list and admits new seats', () => {
+    const document = { orchestrator: [], 'user-preset': ['bash', 'bash', 42] }
+    expect(seatToolDenyFor('orchestrator', document)).toEqual([])
+    expect(seatToolDenyFor('user-preset', document)).toEqual(['bash'])
+    // An unnamed seat keeps the shipped default; a malformed entry is ignored.
+    expect(seatToolDenyFor('sysadmin', document)).toContain('plugin_manager')
+    expect(seatToolDenyFor('creator', { creator: 'nope' })).toEqual([])
   })
 })

@@ -302,6 +302,25 @@ describe('forwarded card', () => {
     expect(ask.secondConfirmation).toBeUndefined()
   })
 
+  it('states the exact-command scope on the forwarded card for a danger rail', async () => {
+    const f = fakeDeps({ outcomes: ['allowed-once'] })
+    const decision = bashAsk('rm /tmp/a')
+    await f.forwarder.forward({ agent: childAgent({ label: 'fixer: repair' }), toolName: 'bash', args: { command: 'rm /tmp/a' }, decision })
+    const ask = f.asks[0]
+    expect(ask.displayReason.en).toContain('"Always allow" grants this exact command only')
+    expect(ask.displayReason.en).toContain('"Allow all rm" grants every rm command')
+    expect(ask.broadAllow).toEqual({ label: 'rm' })
+  })
+
+  it('keeps the historical rule-pattern wording on a safe rule card', async () => {
+    const f = fakeDeps({ outcomes: ['allowed-once'] })
+    const decision = resolvePolicy({ toolName: 'bash', command: 'mkdir /tmp/x', config: { bashPatterns: [{ pattern: 'mkdir *', policy: 'ask' }] } })
+    if (decision.kind !== 'ask') throw new Error('fixture command did not ask')
+    await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'mkdir /tmp/x' }, decision })
+    expect(f.asks[0].displayReason.en).not.toContain('this exact command')
+    expect(f.asks[0].broadAllow).toBeUndefined()
+  })
+
   it('turns a rejection into a corrective deny, not a dead child', async () => {
     const f = fakeDeps({ outcomes: ['rejected'] })
     const result = await f.forwarder.forward({ agent: childAgent(), toolName: 'bash', args: { command: 'rm plain' }, decision: bashAsk('rm plain') })

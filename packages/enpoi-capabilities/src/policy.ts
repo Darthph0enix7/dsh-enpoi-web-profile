@@ -117,6 +117,45 @@ export const REVIEW_CHILD_LABEL_PREFIXES: readonly string[] = Object.freeze([
 /** Reviewer personas as authored by the spawning reviewer tools (defense in depth when the label convention drifts). */
 const REVIEW_CHILD_PERSONA = /^you are the (?:oracle|reviewer|critic|referee|chair|skeptic|architect|pragmatist)\b/i
 
+/**
+ * Tools a seat may never CALL, enforced at the pre-execute boundary.
+ *
+ * The advertised tool array must stay byte-identical across every main-agent
+ * preset (the provider caches the prompt prefix, and the tool declarations sit
+ * before the conversation), so a per-seat restriction can no longer be tool
+ * ABSENCE: the rows mount everywhere and this table denies the call. The
+ * harness-authoring surface is the creator's specialty; orchestrator and
+ * sysadmin keep it advertised but cannot run it. A seat absent from the table
+ * is unrestricted; the orchestration document's `seatToolDeny` record replaces
+ * a seat's shipped list when it names one.
+ */
+export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  orchestrator: Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
+  sysadmin: Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
+})
+
+/** Read one plain record from an unknown value. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/**
+ * The effective execution deny list for one seat.
+ * @param seat - the asking agent's role id (preset id for a main agent).
+ * @param document - the orchestration document's `seatToolDeny` record, when configured.
+ * @returns tool names the seat may not call; empty means unrestricted.
+ */
+export function seatToolDenyFor(seat: string | undefined, document: unknown): readonly string[] {
+  if (seat === undefined || seat === '') return []
+  const override = asRecord(document)?.[seat]
+  if (Array.isArray(override)) {
+    return [...new Set(override.filter((name): name is string => typeof name === 'string' && name !== ''))]
+  }
+  return SHIPPED_SEAT_TOOL_DENY[seat] ?? []
+}
+
 /** Shipped global defaults (user-editable via settings; absent keys fall here). */
 export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   read: 'allow', glob: 'allow', grep: 'allow', read_image: 'allow',
@@ -411,12 +450,20 @@ export function dangerVerbOfPattern(pattern: string): string | undefined {
   return DANGER_VERB_SET.has(base) ? argv0 : undefined
 }
 
-/** The pattern-ask shape carrying a danger-list verb's broad-action offer. */
+/**
+ * The pattern-ask shape carrying a danger-list verb's broad-action offer. For a
+ * danger-list rule the card copy names the exact scope of both actions: the
+ * default "Always allow" pins ONLY this exact command, and every-command
+ * coverage is the explicit "Allow all <verb>" opt-in. An ordinary rule keeps
+ * its historical copy — its default always pins the rule pattern.
+ */
 function patternAsk(pattern: string, reason: string, source: string): PolicyDecision {
   const verb = dangerVerbOfPattern(pattern)
   return {
     kind: 'ask',
-    reason,
+    reason: verb === undefined
+      ? reason
+      : `${reason}; "Always allow" grants this exact command only, "Allow all ${verb}" grants every ${verb} command`,
     source,
     grantTier: 'pattern',
     pattern,
