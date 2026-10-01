@@ -154,11 +154,14 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   @Remote
   async mcpMount(sessionId: string, server: string): Promise<{ ok: boolean; reason: string }> {
     try {
+      const sessions = this.ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
+      const session = sessions?.get?.(sessionId)
+      if (session === undefined) return { ok: false, reason: `session "${sessionId}" is not live` }
       const service = this.ctx.get('mcpMounts') as
-        | { mount?: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }> }
+        | { mount?: (session: unknown, id: string) => Promise<{ ok: boolean; reason: string }> }
         | undefined
       if (service?.mount === undefined) return { ok: false, reason: 'the mount service is unavailable' }
-      return await service.mount({ id: sessionId }, server)
+      return await service.mount(session, server)
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
@@ -175,11 +178,14 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   @Remote
   async mcpUnmount(sessionId: string, server: string): Promise<{ ok: boolean; reason: string }> {
     try {
+      const sessions = this.ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
+      const session = sessions?.get?.(sessionId)
+      if (session === undefined) return { ok: false, reason: `session "${sessionId}" is not live` }
       const service = this.ctx.get('mcpMounts') as
-        | { unmount?: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }> }
+        | { unmount?: (session: unknown, id: string) => Promise<{ ok: boolean; reason: string }> }
         | undefined
       if (service?.unmount === undefined) return { ok: false, reason: 'the mount service is unavailable' }
-      return await service.unmount({ id: sessionId }, server)
+      return await service.unmount(session, server)
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
