@@ -108,6 +108,43 @@ var MAX_FORWARD_IMAGE_BYTES_TOTAL = 16 * 1024 * 1024;
 function createImageForwarder(enabled) {
   return { enabled, images: [], seen: /* @__PURE__ */ new Set(), bytes: 0 };
 }
+function resolvePartDataUri(part, resolveImage) {
+  const payload = part.data ?? part.url ?? part.image;
+  if (typeof payload === "string" && payload.startsWith("data:")) return payload;
+  const resolved = resolveImage?.(part);
+  if (resolved !== void 0 && resolved.startsWith("data:")) return resolved;
+  if (payload === void 0) return void 0;
+  return toDataUri(payload, detectMediaType(part));
+}
+function planUserImages(messages, resolveImage) {
+  const candidates = [];
+  for (const message of messages) {
+    if (message.role !== "user" || typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (!isRecord(part) || typeof part.type !== "string") continue;
+      if (part.type !== "file" && part.type !== "image" && part.type !== "media") continue;
+      if (!detectMediaType(part).startsWith("image/")) continue;
+      const dataUri = resolvePartDataUri(part, resolveImage);
+      if (dataUri === void 0) continue;
+      candidates.push({ part, dataUri });
+    }
+  }
+  const plan = /* @__PURE__ */ new Map();
+  let keptBytes = 0;
+  let keptCount = 0;
+  for (let index = candidates.length - 1; index >= 0; index--) {
+    const candidate = candidates[index];
+    if (candidate === void 0) continue;
+    if (candidate.dataUri.length > MAX_FORWARD_IMAGE_BYTES || keptCount >= MAX_FORWARD_IMAGES_TOTAL || keptBytes + candidate.dataUri.length > MAX_FORWARD_IMAGE_BYTES_TOTAL) {
+      plan.set(candidate.part, null);
+      continue;
+    }
+    plan.set(candidate.part, candidate.dataUri);
+    keptBytes += candidate.dataUri.length;
+    keptCount += 1;
+  }
+  return plan;
+}
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
@@ -163,13 +200,29 @@ function isBinaryLikePart(part) {
   if (typeof part.url === "string" && part.url.startsWith("data:")) return true;
   return false;
 }
-function convertBinaryPart(part, parts, forwarder, resolveImage) {
+function convertBinaryPart(part, parts, forwarder, resolveImage, plan) {
   const mediaType = detectMediaType(part);
   const payload = part.data ?? part.url ?? part.image;
   if (mediaType.startsWith("image/")) {
     if (!forwarder.enabled) {
       parts.push({ type: "text", text: describeOmitted(part, mediaType, "this model does not accept image input") });
       return false;
+    }
+    const planned = plan.get(part);
+    if (planned === null) {
+      parts.push({
+        type: "text",
+        text: describeOmitted(
+          part,
+          mediaType,
+          "per-request image budget reached \u2014 older images are omitted and the newest are kept"
+        )
+      });
+      return false;
+    }
+    if (planned !== void 0) {
+      parts.push({ type: "image", image: planned, mimeType: mediaType });
+      return true;
     }
     const resolved = typeof payload === "string" && payload.startsWith("data:") ? payload : resolveImage?.(part);
     const dataUri = resolved ?? (payload === void 0 ? void 0 : toDataUri(payload, mediaType));
@@ -194,7 +247,7 @@ function convertBinaryPart(part, parts, forwarder, resolveImage) {
   parts.push({ type: "text", text: describeBinaryPart(part) });
   return false;
 }
-function convertUserContent(content, forwarder, resolveImage) {
+function convertUserContent(content, forwarder, resolveImage, plan) {
   if (typeof content === "string") return content;
   const parts = [];
   let hasMultimodal = false;
@@ -205,7 +258,7 @@ function convertUserContent(content, forwarder, resolveImage) {
       continue;
     }
     if (part.type === "file" || part.type === "image" || part.type === "media") {
-      if (convertBinaryPart(part, parts, forwarder, resolveImage)) hasMultimodal = true;
+      if (convertBinaryPart(part, parts, forwarder, resolveImage, plan)) hasMultimodal = true;
       continue;
     }
     if (isBinaryLikePart(part)) parts.push({ type: "text", text: describeBinaryPart(part) });
@@ -269,6 +322,7 @@ function toolNamesById(messages) {
 }
 function buildRequest(input) {
   const forwarder = createImageForwarder(input.visionEnabled !== false);
+  const userImagePlan = forwarder.enabled ? planUserImages(input.messages, input.resolveImage) : /* @__PURE__ */ new Map();
   const names = toolNamesById(input.messages);
   const messages = [];
   let system = input.system ?? "";
@@ -284,7 +338,10 @@ function buildRequest(input) {
     }
     if (message.role === "developer") continue;
     if (message.role === "user") {
-      messages.push({ role: "user", content: convertUserContent(message.content, forwarder, input.resolveImage) });
+      messages.push({
+        role: "user",
+        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan)
+      });
       continue;
     }
     if (message.role === "assistant") {

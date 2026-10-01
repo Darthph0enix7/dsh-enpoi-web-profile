@@ -13,7 +13,9 @@
  *    inlined raw base64 as text and produced ~1.5M-token requests);
  * 2. a binary image inside a tool result is hoisted out and re-emitted as a
  *    synthetic user message immediately after the tool message (the API
- *    accepts images only in user content);
+ *    accepts images only in user content), and user-attached images ride a
+ *    per-request size budget (12 images / 16 MiB, 8 MiB per image) that keeps
+ *    the newest and omits the oldest;
  * 3. the keypool sanitizer (embedded-base64 scrub, 200k text cap, older-turn
  *    image stripping) is NOT duplicated here — it runs once, in the keypool,
  *    for every harness.
@@ -144,6 +146,74 @@ function createImageForwarder(enabled: boolean): ImageForwarder {
   return { enabled, images: [], seen: new Set<string>(), bytes: 0 }
 }
 
+/**
+ * Per-part decision for user-attached images: the resolved data URI to send,
+ * or null when the request budget omits the image.
+ */
+type UserImagePlan = Map<CcInputPart, string | null>
+
+/** Resolve an image part to the data URI the wire would carry, if any. */
+function resolvePartDataUri(
+  part: CcInputPart,
+  resolveImage: ((part: CcInputPart) => string | undefined) | undefined,
+): string | undefined {
+  const payload = part.data ?? part.url ?? part.image
+  if (typeof payload === 'string' && payload.startsWith('data:')) return payload
+  const resolved = resolveImage?.(part)
+  if (resolved !== undefined && resolved.startsWith('data:')) return resolved
+  if (payload === undefined) return undefined
+  return toDataUri(payload, detectMediaType(part))
+}
+
+/**
+ * Plan the request's user-attached images against the same per-image and
+ * per-request budget the tool-image forwarder uses. Selection is newest-first:
+ * walking the plan backwards keeps the newest images that fit and omits the
+ * older ones, so a request bearing many historical screenshots still carries
+ * the freshest context to a native multimodal model. Parts that cannot be
+ * resolved inline are left out of the plan and reported by conversion with
+ * their own reason.
+ * @param messages - the request's messages, in wire order.
+ * @param resolveImage - optional resolver for caller-shaped image parts.
+ * @returns the per-part keep/omit decision.
+ */
+function planUserImages(
+  messages: readonly CcInputMessage[],
+  resolveImage: ((part: CcInputPart) => string | undefined) | undefined,
+): UserImagePlan {
+  const candidates: Array<{ part: CcInputPart; dataUri: string }> = []
+  for (const message of messages) {
+    if (message.role !== 'user' || typeof message.content === 'string') continue
+    for (const part of message.content) {
+      if (!isRecord(part) || typeof part.type !== 'string') continue
+      if (part.type !== 'file' && part.type !== 'image' && part.type !== 'media') continue
+      if (!detectMediaType(part).startsWith('image/')) continue
+      const dataUri = resolvePartDataUri(part, resolveImage)
+      if (dataUri === undefined) continue
+      candidates.push({ part, dataUri })
+    }
+  }
+  const plan: UserImagePlan = new Map()
+  let keptBytes = 0
+  let keptCount = 0
+  for (let index = candidates.length - 1; index >= 0; index--) {
+    const candidate = candidates[index]
+    if (candidate === undefined) continue
+    if (
+      candidate.dataUri.length > MAX_FORWARD_IMAGE_BYTES
+      || keptCount >= MAX_FORWARD_IMAGES_TOTAL
+      || keptBytes + candidate.dataUri.length > MAX_FORWARD_IMAGE_BYTES_TOTAL
+    ) {
+      plan.set(candidate.part, null)
+      continue
+    }
+    plan.set(candidate.part, candidate.dataUri)
+    keptBytes += candidate.dataUri.length
+    keptCount += 1
+  }
+  return plan
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -219,13 +289,21 @@ function isBinaryLikePart(part: CcInputPart): boolean {
 /**
  * Convert one binary user part. An image becomes the vendor CLI's own wire
  * shape (`{type:"image", image:"data:...", mimeType}`); anything that cannot
- * be transported becomes a short note, never text-inlined payload.
+ * be transported becomes a short note, never text-inlined payload. The
+ * request plan decides budget omissions before any resolution work repeats.
+ * @param part - the user content part.
+ * @param parts - accumulator for the converted wire parts.
+ * @param forwarder - the request's tool-image forwarder (vision flag).
+ * @param resolveImage - optional resolver for caller-shaped image parts.
+ * @param plan - the per-request user-image keep/omit decision.
+ * @returns whether the part became multimodal image content.
  */
 function convertBinaryPart(
   part: CcInputPart,
   parts: Array<{ type: string; [key: string]: unknown }>,
   forwarder: ImageForwarder,
   resolveImage: ((part: CcInputPart) => string | undefined) | undefined,
+  plan: UserImagePlan,
 ): boolean {
   const mediaType = detectMediaType(part)
   const payload = part.data ?? part.url ?? part.image
@@ -234,6 +312,22 @@ function convertBinaryPart(
     if (!forwarder.enabled) {
       parts.push({ type: 'text', text: describeOmitted(part, mediaType, 'this model does not accept image input') })
       return false
+    }
+    const planned = plan.get(part)
+    if (planned === null) {
+      parts.push({
+        type: 'text',
+        text: describeOmitted(
+          part,
+          mediaType,
+          'per-request image budget reached — older images are omitted and the newest are kept',
+        ),
+      })
+      return false
+    }
+    if (planned !== undefined) {
+      parts.push({ type: 'image', image: planned, mimeType: mediaType })
+      return true
     }
     const resolved = typeof payload === 'string' && payload.startsWith('data:')
       ? payload
@@ -269,6 +363,7 @@ function convertUserContent(
   content: string | readonly CcInputPart[],
   forwarder: ImageForwarder,
   resolveImage: ((part: CcInputPart) => string | undefined) | undefined,
+  plan: UserImagePlan,
 ): CcUserContent {
   if (typeof content === 'string') return content
   const parts: Array<{ type: string; [key: string]: unknown }> = []
@@ -280,7 +375,7 @@ function convertUserContent(
       continue
     }
     if (part.type === 'file' || part.type === 'image' || part.type === 'media') {
-      if (convertBinaryPart(part, parts, forwarder, resolveImage)) hasMultimodal = true
+      if (convertBinaryPart(part, parts, forwarder, resolveImage, plan)) hasMultimodal = true
       continue
     }
     if (isBinaryLikePart(part)) parts.push({ type: 'text', text: describeBinaryPart(part) })
@@ -375,6 +470,9 @@ function toolNamesById(messages: readonly CcInputMessage[]): Map<string, string>
  */
 export function buildRequest(input: BuildRequestInput): CcEnvelope {
   const forwarder = createImageForwarder(input.visionEnabled !== false)
+  const userImagePlan = forwarder.enabled
+    ? planUserImages(input.messages, input.resolveImage)
+    : new Map<CcInputPart, string | null>()
   const names = toolNamesById(input.messages)
   const messages: CcMessage[] = []
   let system = input.system ?? ''
@@ -395,7 +493,10 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     if (message.role === 'developer') continue
 
     if (message.role === 'user') {
-      messages.push({ role: 'user', content: convertUserContent(message.content, forwarder, input.resolveImage) })
+      messages.push({
+        role: 'user',
+        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan),
+      })
       continue
     }
 

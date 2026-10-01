@@ -124,3 +124,55 @@ it('treats a non-image binary as a size note, never serialized payload', () => {
   expect(text).toContain('[attachment omitted: application/pdf')
   expect(text).not.toContain(PNG)
 })
+
+it('budgets user images per request: the oldest are omitted and the newest are kept', () => {
+  // 14 images of the same size: the 12 newest must survive, oldest 2 omitted.
+  const images = Array.from({ length: 14 }, (_, index) => ({
+    type: 'file',
+    mediaType: 'image/png',
+    data: `data:image/png;base64,AAAA${index}`,
+  }))
+  const envelope = buildRequest({ model: 'm', messages: [user(images)] })
+  const content = envelope.params.messages[0]!.content as Array<{ type: string; image?: string; text?: string }>
+  expect(content).toHaveLength(14)
+  expect(content.slice(0, 2).every(part => part.type === 'text' && part.text?.includes('per-request image budget reached'))).toBe(true)
+  const kept = content.slice(2).filter(part => part.type === 'image')
+  expect(kept).toHaveLength(12)
+  // Newest kept, oldest dropped: the survivors are images 2..13.
+  expect(kept[0]!.image).toBe('data:image/png;base64,AAAA2')
+  expect(kept[11]!.image).toBe('data:image/png;base64,AAAA13')
+})
+
+it('keeps the newest user images within the request byte budget', () => {
+  const sixMiB = 6 * 1024 * 1024
+  const big = (marker: string) => ({
+    type: 'file',
+    mediaType: 'image/png',
+    data: `data:image/png;base64,${marker.repeat(sixMiB)}`,
+  })
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [user([big('a')]), user([big('b')]), user([big('c')])],
+  })
+  // 3 x 6 MiB exceeds the 16 MiB request budget: oldest (a) is omitted.
+  const [oldest, middle, newest] = envelope.params.messages
+  expect(oldest!.content as string).toContain('per-request image budget reached')
+  expect((middle!.content as Array<{ type: string }>)[0]!.type).toBe('image')
+  expect((newest!.content as Array<{ type: string }>)[0]!.type).toBe('image')
+  const keptBytes = [middle, newest]
+    .map(message => (message!.content as Array<{ image: string }>)[0]!.image.length)
+    .reduce((total, length) => total + length, 0)
+  expect(keptBytes).toBeLessThanOrEqual(16 * 1024 * 1024)
+})
+
+it('omits a lone user image over the per-image forward limit', () => {
+  const overLimit = `data:image/png;base64,${'A'.repeat(9 * 1024 * 1024)}`
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [user([{ type: 'file', mediaType: 'image/png', data: overLimit }])],
+  })
+  const content = envelope.params.messages[0]!.content as string
+  expect(content).toContain('per-request image budget reached')
+  expect(content).not.toContain('AAAAAAAA')
+})
+

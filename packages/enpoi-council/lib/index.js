@@ -156,7 +156,7 @@ var COUNCIL_DENIED_TOOLS = [
   // synchronous request_evidence tool — one evidence ingress per seat.
   "request_evidence"
 ];
-var RETRIEVAL_TOOLS = ["read", "glob", "grep", "read_image", "web_search", "web_fetch"];
+var RETRIEVAL_TOOLS = ["read", "glob", "grep", "read_image", "web_search"];
 var COUNCIL_KEPT_TOOLS = [
   "whiteboard_read",
   "whiteboard_write",
@@ -20592,7 +20592,7 @@ var EvidenceQueue = class {
 };
 var BROKER_PERSONA = [
   "You are the Council Evidence Broker \u2014 a precision research assistant serving a high-stakes deliberation.",
-  "You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search/web_fetch), and nothing else.",
+  "You answer EXACTLY the questions asked, from the codebase (read/glob/grep) or the web (web_search), and nothing else.",
   "You may receive MULTIPLE questions. Answer each in order, one FACT SHEET per question, in this exact format:",
   "SHEET 1",
   "CITATION: the ACTUAL file path with line number, or the exact URL you read. Never a placeholder, never a template \u2014 a real path you personally opened.",

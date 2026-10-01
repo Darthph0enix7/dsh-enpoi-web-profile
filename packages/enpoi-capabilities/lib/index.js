@@ -678,9 +678,7 @@ var init_policy = __esm({
       grep: "allow",
       read_image: "allow",
       web_search: "allow",
-      web_fetch: "allow",
       todo_write: "allow",
-      todo_read: "allow",
       memory_search: "allow",
       memory_save: "allow",
       memory_rescind: "allow",
@@ -924,18 +922,24 @@ var init_rpc = __esm({
       }
       async mcpMount(sessionId, server) {
         try {
+          const sessions = this.ctx.get("sessions");
+          const session = sessions?.get?.(sessionId);
+          if (session === void 0) return { ok: false, reason: `session "${sessionId}" is not live` };
           const service = this.ctx.get("mcpMounts");
           if (service?.mount === void 0) return { ok: false, reason: "the mount service is unavailable" };
-          return await service.mount({ id: sessionId }, server);
+          return await service.mount(session, server);
         } catch (error62) {
           return { ok: false, reason: error62 instanceof Error ? error62.message : String(error62) };
         }
       }
       async mcpUnmount(sessionId, server) {
         try {
+          const sessions = this.ctx.get("sessions");
+          const session = sessions?.get?.(sessionId);
+          if (session === void 0) return { ok: false, reason: `session "${sessionId}" is not live` };
           const service = this.ctx.get("mcpMounts");
           if (service?.unmount === void 0) return { ok: false, reason: "the mount service is unavailable" };
-          return await service.unmount({ id: sessionId }, server);
+          return await service.unmount(session, server);
         } catch (error62) {
           return { ok: false, reason: error62 instanceof Error ? error62.message : String(error62) };
         }
