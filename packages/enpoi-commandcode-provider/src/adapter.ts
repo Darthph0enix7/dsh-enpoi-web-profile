@@ -9,14 +9,17 @@
  * adapter therefore sends no CLI header and never touches a vendor key.
  *
  * Capabilities come exclusively from the route's catalog
- * (`{baseURL}/catalog.json`, fetched at startup); images are resolved from the
- * harness attachment service into inline data URIs, and tool-result images are
- * hoisted into a following user message by the converter.
+ * (`{baseURL}/catalog.json`, fetched at startup); user-attached images are
+ * resolved from the harness attachment service through the route's
+ * request-sized reader (the `store.readImageRequest` pixel/byte target), and
+ * tool-result images keep their stored bytes before the converter hoists them
+ * into a following user message.
  *
  * @module dsh-enpoi-commandcode-provider/adapter
  */
 
-import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef, ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
+import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import type {
   GenerateOptions,
   ImageAttachmentAccess,
@@ -48,7 +51,24 @@ export interface CommandCodeRouteProfile {
   keyless: boolean
   /** Models the route writer discovered; the catalog supersedes them. */
   models?: readonly { id: string; name?: string }[]
+  /** Total-pixel budget for one user-attached request image. */
+  userImageMaxPixels: number
+  /** Encoded-byte target for one user-attached request image. */
+  userImageMaxBytes: number
 }
+
+/** Request-size budget for user-attached images on one route. */
+export interface CcUserImageBudget {
+  /** Total-pixel budget; larger sources are downscaled proportionally. */
+  maxPixels: number
+  /** Encoded-byte target of one request image. */
+  maxBytes: number
+}
+
+/** Default total-pixel budget for user-attached request images (2048x2048, mirroring the pi-ai route default). */
+export const DEFAULT_USER_IMAGE_MAX_PIXELS = 2048 * 2048
+/** Default encoded-byte target for one user-attached request image, before base64 expansion. */
+export const DEFAULT_USER_IMAGE_MAX_BYTES = 1024 * 1024
 
 /** Constructor inputs the owning plugin supplies. */
 export interface CommandCodeAdapterOptions {
@@ -58,8 +78,14 @@ export interface CommandCodeAdapterOptions {
   catalogFor: (profile: CommandCodeRouteProfile) => CatalogStore
   /** Resolve the route credential; called once per stream call. */
   resolveApiKey: (profile: CommandCodeRouteProfile) => Promise<string | undefined>
-  /** Read one durable image attachment's bytes for an inline data URI. */
+  /** Read one durable image attachment's stored bytes for a tool-result inline data URI. */
   readImage?: (ref: ImageAttachmentRef, signal?: AbortSignal) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
+  /** Read one durable user-attached image at the route's request size for an inline data URI. */
+  readUserImage?: (
+    ref: ImageAttachmentRef,
+    target: ImageRequestTarget,
+    signal?: AbortSignal,
+  ) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
   /** Injectable fetch for tests. */
   fetchImpl?: typeof fetch
   /** Injectable clock for the envelope's date. */
@@ -90,14 +116,23 @@ export function toCcTools(tools: readonly ToolSchema[] | undefined): CcTool[] {
   }))
 }
 
+/** Deterministic request target for one source under the route's user-image budget. */
+function userImageTarget(ref: ImageAttachmentRef, budget: CcUserImageBudget): ImageRequestTarget {
+  return { ...requestImageDimensions(ref.width, ref.height, budget.maxPixels), maxBytes: budget.maxBytes }
+}
+
 /**
  * Convert one harness request into wire messages, resolving image blocks
- * through the attachment service. Every unresolved image degrades to a text
- * note; raw bytes are never inlined as text.
+ * through the attachment service. User-attached images use the route's
+ * request-sized reader when supplied; tool-result images keep their stored
+ * bytes. Every unresolved image degrades to a text note; raw bytes are never
+ * inlined as text.
  */
 export async function toCcMessages(
   options: GenerateOptions,
   readImage: CommandCodeAdapterOptions['readImage'],
+  readUserImage?: CommandCodeAdapterOptions['readUserImage'],
+  userImageBudget?: CcUserImageBudget,
 ): Promise<CcInputMessage[]> {
   const messages: CcInputMessage[] = []
   for (const message of options.messages) {
@@ -114,7 +149,9 @@ export async function toCcMessages(
               parts.push({ type: 'text', text: '[image omitted to fit request image limits]' })
               break
             }
-            const resolved = readImage === undefined ? undefined : await readImage(block.attachment, options.signal)
+            const resolved = readUserImage === undefined || userImageBudget === undefined
+              ? await readImage?.(block.attachment, options.signal)
+              : await readUserImage(block.attachment, userImageTarget(block.attachment, userImageBudget), options.signal)
             if (resolved === undefined) {
               parts.push({
                 type: 'text',
@@ -274,7 +311,10 @@ export class CommandCodeAdapter extends LlmAdapter {
       )
     }
 
-    const messages = await toCcMessages(options, this.options.readImage)
+    const messages = await toCcMessages(options, this.options.readImage, this.options.readUserImage, {
+      maxPixels: profile.userImageMaxPixels,
+      maxBytes: profile.userImageMaxBytes,
+    })
     const envelope = buildRequest({
       model: options.model,
       messages,

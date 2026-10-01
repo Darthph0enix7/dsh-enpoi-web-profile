@@ -8,7 +8,7 @@
  * COMMANDCODE_MODEL overrides the model.
  */
 import { expect, it } from 'vitest'
-import { CommandCodeAdapter } from '../src/adapter.js'
+import { CommandCodeAdapter, DEFAULT_USER_IMAGE_MAX_BYTES, DEFAULT_USER_IMAGE_MAX_PIXELS } from '../src/adapter.js'
 import { CatalogStore } from '../src/catalog.js'
 import type { CommandCodeRouteProfile } from '../src/adapter.js'
 
@@ -21,6 +21,8 @@ const profile: CommandCodeRouteProfile = {
   displayName: 'Command Code (keypool)',
   baseURL,
   keyless: true,
+  userImageMaxPixels: DEFAULT_USER_IMAGE_MAX_PIXELS,
+  userImageMaxBytes: DEFAULT_USER_IMAGE_MAX_BYTES,
 }
 
 function adapterWith(catalog: CatalogStore): CommandCodeAdapter {

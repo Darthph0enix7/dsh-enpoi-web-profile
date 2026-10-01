@@ -99,6 +99,7 @@ var CatalogStore = class {
 };
 
 // src/adapter.ts
+import { requestImageDimensions } from "@deepseek-ai/dsh-attachment";
 import { attributionHeaders, LlmAdapter, LlmError as LlmError2 } from "@deepseek-ai/dsh-llm";
 
 // src/convert.ts
@@ -703,6 +704,8 @@ async function* parseCommandCodeStream(source) {
 }
 
 // src/adapter.ts
+var DEFAULT_USER_IMAGE_MAX_PIXELS = 2048 * 2048;
+var DEFAULT_USER_IMAGE_MAX_BYTES = 1024 * 1024;
 var REQUEST_TIMEOUT_MS = 3e5;
 function toCcTools(tools) {
   return (tools ?? []).map((tool) => ({
@@ -712,7 +715,10 @@ function toCcTools(tools) {
     input_schema: tool.parameters
   }));
 }
-async function toCcMessages(options, readImage) {
+function userImageTarget(ref, budget) {
+  return { ...requestImageDimensions(ref.width, ref.height, budget.maxPixels), maxBytes: budget.maxBytes };
+}
+async function toCcMessages(options, readImage, readUserImage, userImageBudget) {
   const messages = [];
   for (const message of options.messages) {
     if (message.role === "system" || message.role === "developer") continue;
@@ -728,7 +734,7 @@ async function toCcMessages(options, readImage) {
               parts2.push({ type: "text", text: "[image omitted to fit request image limits]" });
               break;
             }
-            const resolved = readImage === void 0 ? void 0 : await readImage(block.attachment, options.signal);
+            const resolved = readUserImage === void 0 || userImageBudget === void 0 ? await readImage?.(block.attachment, options.signal) : await readUserImage(block.attachment, userImageTarget(block.attachment, userImageBudget), options.signal);
             if (resolved === void 0) {
               parts2.push({
                 type: "text",
@@ -869,7 +875,10 @@ var CommandCodeAdapter = class extends LlmAdapter {
         "MISSING_CREDENTIAL"
       );
     }
-    const messages = await toCcMessages(options, this.options.readImage);
+    const messages = await toCcMessages(options, this.options.readImage, this.options.readUserImage, {
+      maxPixels: profile.userImageMaxPixels,
+      maxBytes: profile.userImageMaxBytes
+    });
     const envelope = buildRequest({
       model: options.model,
       messages,
@@ -945,13 +954,22 @@ function routeFromConfig(route, raw) {
     if (typeof entry.id !== "string" || entry.id === "") return [];
     return [typeof entry.name === "string" ? { id: entry.id, name: entry.name } : { id: entry.id }];
   }) : [];
+  const positiveInteger = (value, field, fallback) => {
+    if (value === void 0) return fallback;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`commandcode-provider: provider "${route}" ${field} must be a positive integer`);
+    }
+    return value;
+  };
   return {
     route,
     displayName: typeof record.displayName === "string" && record.displayName !== "" ? record.displayName : route,
     baseURL,
     ...typeof record.apiKeyEnv === "string" && record.apiKeyEnv !== "" ? { apiKeyEnv: record.apiKeyEnv } : {},
     keyless: record.keyless === true || record.apiKeyEnv === void 0 && record.key === void 0,
-    models
+    models,
+    userImageMaxPixels: positiveInteger(record.userImageMaxPixels, "userImageMaxPixels", DEFAULT_USER_IMAGE_MAX_PIXELS),
+    userImageMaxBytes: positiveInteger(record.userImageMaxBytes, "userImageMaxBytes", DEFAULT_USER_IMAGE_MAX_BYTES)
   };
 }
 function apply(ctx, config) {
@@ -993,6 +1011,16 @@ function apply(ctx, config) {
       try {
         const stored = await store.readImage(ref, signal);
         return { data: stored.data, mediaType: ref.mediaType };
+      } catch {
+        return void 0;
+      }
+    },
+    readUserImage: async (ref, target, signal) => {
+      const store = attachments();
+      if (store === void 0) return void 0;
+      try {
+        const version = await store.readImageRequest(ref, target, signal);
+        return { data: version.data, mediaType: version.mediaType };
       } catch {
         return void 0;
       }

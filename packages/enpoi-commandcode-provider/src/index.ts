@@ -14,14 +14,20 @@
  *         api: commandcode/alpha-generate
  *         baseURL: http://127.0.0.1:8899/commandcode
  *         keyless: true
+ *         # Optional user-image request budget; defaults shown.
+ *         userImageMaxPixels: 4194304
+ *         userImageMaxBytes: 1048576
  * ```
  *
  * The route is dormant until the config names one — nothing is registered and
  * nothing is fetched. On mount, every route's catalog is fetched once at
  * startup from `{baseURL}/catalog.json` (falling back to the bundled
  * snapshot), and the adapter serves `commandcode` through the local keypool.
- * The sanitizer (older-image stripping, embedded-base64 scrubbing, 200k text
- * cap) lives in the keypool and is deliberately not duplicated here.
+ * User-attached images are read at the route's request size
+ * (`store.readImageRequest`); tool-result images keep their stored bytes before
+ * the converter's own forwarder budget applies. The sanitizer (older-image
+ * stripping, embedded-base64 scrubbing, 200k text cap) lives in the keypool and
+ * is deliberately not duplicated here.
  *
  * @module dsh-enpoi-commandcode-provider
  */
@@ -33,7 +39,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CatalogEntry } from './catalog.js'
 import { CatalogStore, parseCatalog } from './catalog.js'
 import type { CommandCodeRouteProfile } from './adapter.js'
-import { CommandCodeAdapter } from './adapter.js'
+import { CommandCodeAdapter, DEFAULT_USER_IMAGE_MAX_BYTES, DEFAULT_USER_IMAGE_MAX_PIXELS } from './adapter.js'
 
 /** Cordis plugin name. */
 export const name = 'commandcode-provider'
@@ -69,6 +75,13 @@ function routeFromConfig(route: string, raw: unknown): CommandCodeRouteProfile {
         return [typeof entry.name === 'string' ? { id: entry.id, name: entry.name } : { id: entry.id }]
       })
     : []
+  const positiveInteger = (value: unknown, field: string, fallback: number): number => {
+    if (value === undefined) return fallback
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`commandcode-provider: provider "${route}" ${field} must be a positive integer`)
+    }
+    return value
+  }
   return {
     route,
     displayName: typeof record.displayName === 'string' && record.displayName !== '' ? record.displayName : route,
@@ -76,6 +89,8 @@ function routeFromConfig(route: string, raw: unknown): CommandCodeRouteProfile {
     ...typeof record.apiKeyEnv === 'string' && record.apiKeyEnv !== '' ? { apiKeyEnv: record.apiKeyEnv } : {},
     keyless: record.keyless === true || (record.apiKeyEnv === undefined && record.key === undefined),
     models,
+    userImageMaxPixels: positiveInteger(record.userImageMaxPixels, 'userImageMaxPixels', DEFAULT_USER_IMAGE_MAX_PIXELS),
+    userImageMaxBytes: positiveInteger(record.userImageMaxBytes, 'userImageMaxBytes', DEFAULT_USER_IMAGE_MAX_BYTES),
   }
 }
 
@@ -130,6 +145,16 @@ export function apply(ctx: Context, config: unknown): void {
       try {
         const stored = await store.readImage(ref, signal)
         return { data: stored.data, mediaType: ref.mediaType }
+      } catch {
+        return undefined
+      }
+    },
+    readUserImage: async (ref, target, signal) => {
+      const store = attachments()
+      if (store === undefined) return undefined
+      try {
+        const version = await store.readImageRequest(ref, target, signal)
+        return { data: version.data, mediaType: version.mediaType }
       } catch {
         return undefined
       }
