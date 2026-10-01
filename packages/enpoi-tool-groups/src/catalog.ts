@@ -148,7 +148,10 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     label: 'Debug & observability',
     purpose: 'session log, event trace, and diagnostics inspection',
     mode: 'on-demand',
-    preAttach: [],
+    // The Creator and the council broker advertise self-diagnosis in their
+    // personas, so the shipped default pre-attaches the debug group for them;
+    // an operator seat override in the document still wins.
+    preAttach: ['creator', 'broker'],
     enabled: true,
     members: [
       'diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search',

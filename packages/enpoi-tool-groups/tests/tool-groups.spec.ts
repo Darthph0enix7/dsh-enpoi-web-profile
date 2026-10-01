@@ -236,6 +236,16 @@ describe('tool-group catalog', () => {
     if (!absent.ok) expect(absent.reason).toContain('not attached')
   })
 
+  it('ships the debug pre-attach for the Creator and broker by default', () => {
+    const fresh = catalogWith()
+    expect(preAttachFor(fresh, 'creator')).toEqual(['debug'])
+    expect(preAttachFor(fresh, 'broker')).toEqual(['debug'])
+    expect(preAttachFor(fresh, 'orchestrator')).toEqual([])
+    // An explicit operator override still wins, including an empty one.
+    const overridden = catalogWith({ toolGroups: { seats: { creator: { preAttach: [] } } } })
+    expect(preAttachFor(overridden, 'creator')).toEqual([])
+  })
+
   it('resolves per-seat pre-attach from the operator document over group defaults', () => {
     const catalog = catalogWith({ toolGroups: { seats: { sysadmin: { preAttach: ['debug'] } } } })
     expect(preAttachFor(catalog, 'sysadmin')).toEqual(['debug'])
