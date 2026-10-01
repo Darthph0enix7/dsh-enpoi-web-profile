@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   AgentSwitchController,
   DELTA_CONTEXT_NAME,
+  compositionContentOf,
   earliestLoggedPreset,
+  loadComposition,
   parsePersonaFromYaml,
   PERSONA_PREFIX_SECTION,
   PERSONA_SUFFIX_SECTION,
@@ -104,6 +106,30 @@ describe('persona parsing and delta composition', () => {
   it('returns undefined for a persona-less or unreadable file', () => {
     expect(parsePersonaFromYaml('- id: tool-bash\n  name: "@deepseek-ai/dsh-tool-bash"\n')).toBeUndefined()
     expect(parsePersonaFromYaml(':\n  not: [valid')).toBeUndefined()
+  })
+
+  it('extracts the composition from both roster answer shapes', () => {
+    // 0.1.7 answers `AgentPresetDocument`; earlier engines answered the raw YAML.
+    expect(compositionContentOf({ agentPreset: 'orchestrator', content: FIXTURE_PRESET })).toBe(FIXTURE_PRESET)
+    expect(compositionContentOf(FIXTURE_PRESET)).toBe(FIXTURE_PRESET)
+    expect(compositionContentOf({ agentPreset: 'x' })).toBeUndefined()
+    expect(compositionContentOf(undefined)).toBeUndefined()
+    // The wrapped content still parses to the persona (the shadow's precondition).
+    const wrapped = compositionContentOf({ agentPreset: 'orchestrator', content: FIXTURE_PRESET })
+    expect(parsePersonaFromYaml(wrapped ?? '')).toEqual(parsePersonaFromYaml(FIXTURE_PRESET))
+  })
+
+  it('reads the composition through readDocument (0.1.7) and the legacy read name', async () => {
+    const document = { agentPreset: 'orchestrator', content: FIXTURE_PRESET }
+    const ctx = (roster: unknown) => ({ get: (name: string) => (name === 'agentPresets' ? roster : undefined) })
+    // 0.1.7: the local method is readDocument (Remote exports it as `read`).
+    expect(await loadComposition(ctx({ readDocument: async () => document }) as never, 'orchestrator')).toBe(FIXTURE_PRESET)
+    // Pre-0.1.7: a local `read` answered the raw YAML.
+    expect(await loadComposition(ctx({ read: async () => FIXTURE_PRESET }) as never, 'orchestrator')).toBe(FIXTURE_PRESET)
+    // Neither method: no composition, no throw.
+    expect(await loadComposition(ctx({}) as never, 'orchestrator')).toBeUndefined()
+    // A throwing read is contained.
+    expect(await loadComposition(ctx({ readDocument: async () => { throw new Error('boom') } }) as never, 'orchestrator')).toBeUndefined()
   })
 
   it('composes the delta from label + persona, falling back to the id', () => {

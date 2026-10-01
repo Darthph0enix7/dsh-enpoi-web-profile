@@ -24,9 +24,9 @@
  * - skills.list   — on-disk skill bundles under `$DSH_HOME/skills` plus,
  *                   when a session address resolves, read-only registry rows
  *                   (the shipped tiers come from the profile's own root)
- * - skills.read   — one SKILL.md: frontmatter name/description + body + raw text
+ * - skills.read   — one SKILL.md: frontmatter name/description/mcp + body + raw
  * - skills.create — write <name>/SKILL.md (slug validation, no clobber)
- * - skills.update — rewrite description + body, preserving other frontmatter
+ * - skills.update — rewrite description + body + mcp, preserving other frontmatter
  * - skills.delete — trash-stage the bundle; the shipped tier skills refuse
  *                   every create/update/delete
  *
@@ -153,6 +153,8 @@ interface SkillEntry {
   /** Skill identity: the frontmatter name (discovery addresses skills by this). */
   name: string
   description: string
+  /** `mcp:` frontmatter hint: MCP servers loaded with this skill (empty when absent). */
+  mcp: string[]
   /** Absolute instruction-file path. */
   path: string
   /** Absolute path of the bundle directory or flat file, for delete staging. */
@@ -160,11 +162,12 @@ interface SkillEntry {
   format: 'directory' | 'file'
 }
 
-/** Parsed SKILL.md: frontmatter lines (delimiters removed), name/description, body. */
+/** Parsed SKILL.md: frontmatter lines (delimiters removed), name/description/mcp, body. */
 interface ParsedSkillMarkdown {
   frontmatter: string[] | undefined
   name: string | undefined
   description: string | undefined
+  mcp: string[] | undefined
   body: string
 }
 
@@ -325,14 +328,106 @@ function yamlQuote(value: string): string {
   return `"${escaped}"`
 }
 
+/** Split one YAML flow sequence's inner text on top-level commas. */
+function splitFlowSequence(inner: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let quote: '"' | "'" | undefined
+  let escaped = false
+  for (const char of inner) {
+    if (quote !== undefined) {
+      current += char
+      if (quote === '"') {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quote = undefined
+      } else if (char === "'") {
+        quote = undefined
+      }
+      continue
+    }
+    if (char === '"' || char === "'") { quote = char; current += char; continue }
+    if (char === ',') { parts.push(current); current = ''; continue }
+    current += char
+  }
+  parts.push(current)
+  return parts.map(part => part.trim()).filter(part => part !== '')
+}
+
+/** Decode one flow-sequence item or block-sequence scalar (quotes, trailing comment). */
+function decodeInlineScalar(raw: string): string {
+  const value = raw.trim()
+  if (value.startsWith('"')) {
+    let escaped = false
+    for (let cursor = 1; cursor < value.length; cursor++) {
+      const char = value[cursor]
+      if (escaped) { escaped = false; continue }
+      if (char === '\\') { escaped = true; continue }
+      if (char === '"') return decodeDoubleQuoted(value.slice(1, cursor))
+    }
+    return value.slice(1)
+  }
+  if (value.startsWith("'")) {
+    const end = value.indexOf("'", 1)
+    if (end >= 0) return value.slice(1, end).replace(/''/g, "'")
+    return value.slice(1)
+  }
+  const comment = value.search(/\s#/)
+  return (comment >= 0 ? value.slice(0, comment) : value).trim()
+}
+
+/**
+ * Parse an optional string-array frontmatter field: the one-line flow form
+ * (`mcp: [server]`) the UI writes, or an indented `- server` block.
+ * @returns the decoded entries, or undefined when the key is absent.
+ */
+function frontmatterStringArray(lines: readonly string[], key: string): string[] | undefined {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? ''
+    if (/^\s/.test(line) || line === '') continue
+    const match = /^([A-Za-z0-9_-]+)[ \t]*:[ \t]?(.*)$/.exec(line)
+    if (match === null || match[1] !== key) continue
+    const rest = (match[2] ?? '').trim()
+    if (rest.startsWith('[')) {
+      const end = rest.lastIndexOf(']')
+      if (end < 0) return []
+      return splitFlowSequence(rest.slice(1, end)).map(decodeInlineScalar).filter(entry => entry !== '')
+    }
+    const entries: string[] = []
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const item = lines[cursor] ?? ''
+      if (item.trim() === '') continue
+      if (!/^\s/.test(item)) break
+      const bullet = /^\s*-[ \t]*(.*)$/.exec(item)
+      if (bullet === null) continue
+      const value = decodeInlineScalar(bullet[1] ?? '')
+      if (value !== '') entries.push(value)
+    }
+    return entries
+  }
+  return undefined
+}
+
+/** Whether one string is safe as a bare YAML flow-sequence scalar. */
+function isBareYamlScalar(value: string): boolean {
+  return /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value)
+    && !/^(?:true|false|null|yes|no|on|off|~)$/i.test(value)
+}
+
+/** Serialize the `mcp:` hint as one flow sequence (unsafe entries quoted). */
+function yamlArray(values: readonly string[]): string {
+  return `[${values.map(value => isBareYamlScalar(value) ? value : yamlQuote(value)).join(', ')}]`
+}
+
 /** Parse a SKILL.md without loading any YAML library. */
 function parseSkillMarkdown(raw: string): ParsedSkillMarkdown {
   const frontmatter = splitFrontmatter(raw)
-  if (frontmatter === undefined) return { frontmatter: undefined, name: undefined, description: undefined, body: raw.trim() }
+  if (frontmatter === undefined) return { frontmatter: undefined, name: undefined, description: undefined, mcp: undefined, body: raw.trim() }
   return {
     frontmatter: frontmatter.lines,
     name: frontmatterValue(frontmatter.lines, 'name'),
     description: frontmatterValue(frontmatter.lines, 'description'),
+    mcp: frontmatterStringArray(frontmatter.lines, 'mcp'),
     body: frontmatter.body.trim(),
   }
 }
@@ -346,13 +441,24 @@ function normalizeBody(body: string): string {
  * Compose the SKILL.md text for a create or update.
  *
  * With existing frontmatter, every other line is preserved verbatim (unknown
- * fields such as `whenToUse`, invocation flags, comments) and only the
- * `description:` entry is replaced; without frontmatter the file is written fresh.
+ * fields such as `whenToUse`, invocation flags, comments) and the
+ * `description:` and `mcp:` entries are replaced; without frontmatter the file
+ * is written fresh. `mcp` undefined leaves an existing hint untouched, an
+ * empty list removes the entry, a non-empty list replaces it.
  */
-function skillFileText(existing: ParsedSkillMarkdown | undefined, name: string, description: string, body: string): string {
+function skillFileText(
+  existing: ParsedSkillMarkdown | undefined,
+  name: string,
+  description: string,
+  body: string,
+  mcp?: readonly string[],
+): string {
   const bodyText = normalizeBody(body)
+  const mcpLine = mcp === undefined || mcp.length === 0 ? undefined : `mcp: ${yamlArray(mcp)}`
   if (existing?.frontmatter === undefined || existing.name === undefined) {
-    return `---\nname: ${name}\ndescription: ${yamlQuote(description)}\n---\n${bodyText === '' ? '' : `\n${bodyText}\n`}`
+    const fresh = [`name: ${name}`, `description: ${yamlQuote(description)}`]
+    if (mcpLine !== undefined) fresh.push(mcpLine)
+    return `---\n${fresh.join('\n')}\n---\n${bodyText === '' ? '' : `\n${bodyText}\n`}`
   }
   const lines = [...existing.frontmatter]
   const index = lines.findIndex(line => /^description[ \t]*:/.test(line))
@@ -363,7 +469,39 @@ function skillFileText(existing: ParsedSkillMarkdown | undefined, name: string, 
   } else {
     lines.push(`description: ${yamlQuote(description)}`)
   }
+  if (mcp !== undefined) {
+    const mcpIndex = lines.findIndex(line => /^mcp[ \t]*:/.test(line))
+    if (mcpIndex >= 0) {
+      let end = mcpIndex + 1
+      while (end < lines.length && /^\s/.test(lines[end] ?? '')) end++
+      if (mcpLine === undefined) lines.splice(mcpIndex, end - mcpIndex)
+      else lines.splice(mcpIndex, end - mcpIndex, mcpLine)
+    } else if (mcpLine !== undefined) {
+      lines.push(mcpLine)
+    }
+  }
   return `---\n${lines.join('\n')}\n---\n${bodyText === '' ? '' : `\n${bodyText}\n`}`
+}
+
+/** Read the optional `mcp` write field: undefined when absent, else validated unique strings. */
+function readMcpField(payload: unknown): string[] | undefined {
+  const record = payload as Record<string, unknown> | null
+  if (record === null || record.mcp === undefined) return undefined
+  if (!Array.isArray(record.mcp)) {
+    throw new FsOpsError('bad-request', '"mcp" must be an array of server ids', 400)
+  }
+  const values: string[] = []
+  for (const entry of record.mcp) {
+    if (typeof entry !== 'string') {
+      throw new FsOpsError('bad-request', '"mcp" entries must be strings', 400)
+    }
+    const value = entry.trim()
+    if (value === '') {
+      throw new FsOpsError('bad-request', '"mcp" entries must be non-empty server ids', 400)
+    }
+    if (!values.includes(value)) values.push(value)
+  }
+  return values
 }
 
 /** Read one SKILL.md as UTF-8, refusing oversized files. */
@@ -394,7 +532,7 @@ async function readSkillEntry(path: string, entry: string, rootPath: string, for
   }
   const parsed = parseSkillMarkdown(raw)
   if (parsed.name === undefined || !isSkillName(parsed.name) || parsed.description === undefined || parsed.description === '') return undefined
-  return { entry, name: parsed.name, description: parsed.description, path, rootPath, format }
+  return { entry, name: parsed.name, description: parsed.description, mcp: parsed.mcp ?? [], path, rootPath, format }
 }
 
 /** List the valid on-disk skill entries under the managed root, sorted by on-disk name. */
@@ -940,6 +1078,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
         name: entry.name,
         entry: entry.entry,
         description: entry.description,
+        mcp: entry.mcp,
         path: entry.path,
         format: entry.format,
         source: isProtectedSkill(entry) ? 'default' as const : 'profile' as const,
@@ -956,6 +1095,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
           name: skill.name,
           entry: skill.name,
           description: skill.description,
+          mcp: [],
           ...skill.path === undefined ? {} : { path: skill.path },
           format: 'file' as const,
           source: PROTECTED_SKILL_NAMES.has(skill.name) ? 'default' as const : 'registry' as const,
@@ -982,6 +1122,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
         name: entry.name,
         entry: entry.entry,
         description: parsed.description ?? entry.description,
+        mcp: parsed.mcp ?? entry.mcp,
         body: parsed.body,
         content,
         path: entry.path,
@@ -996,6 +1137,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
       requireUnprotectedSkill(name, 'created')
       const description = requireField(payload, 'description').trim()
       const body = requireField(payload, 'body', true)
+      const mcp = readMcpField(payload)
       const root = resolveSkillsRoot(config)
       const existing = await findSkillEntry(root, name)
       if (existing !== undefined) {
@@ -1003,7 +1145,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
       }
       const targetDir = requireContained(root, join(root, name))
       const targetFile = requireContained(root, join(targetDir, SKILL_FILE_NAME))
-      const text = skillFileText(undefined, name, description, body)
+      const text = skillFileText(undefined, name, description, body, mcp)
       requireSkillSize(text)
       try {
         await mkdir(root, { recursive: true })
@@ -1029,6 +1171,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
       requireUnprotectedSkill(name, 'edited')
       const description = requireField(payload, 'description').trim()
       const body = requireField(payload, 'body', true)
+      const mcp = readMcpField(payload)
       const root = resolveSkillsRoot(config)
       const entry = await findSkillEntry(root, name)
       if (entry === undefined) {
@@ -1040,7 +1183,7 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
       const raw = await readSkillText(entry.path)
       const parsed = parseSkillMarkdown(raw)
       const base = parsed.frontmatter !== undefined && parsed.name !== undefined ? parsed : undefined
-      const text = skillFileText(base, entry.name, description, body)
+      const text = skillFileText(base, entry.name, description, body, mcp)
       requireSkillSize(text)
       const info = await stat(entry.path)
       await writeFileAtomic(entry.path, Buffer.from(text, 'utf8'), info.mode & 0o777)

@@ -99,6 +99,17 @@ var __callDispose = (stack, error62, hasError) => {
 function isFullAccessMode(approvalPolicy, sandboxMode) {
   return approvalPolicy === "never" && sandboxMode === "danger-full-access";
 }
+function asRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function seatToolDenyFor(seat, document) {
+  if (seat === void 0 || seat === "") return [];
+  const override = asRecord(document)?.[seat];
+  if (Array.isArray(override)) {
+    return [...new Set(override.filter((name2) => typeof name2 === "string" && name2 !== ""))];
+  }
+  return SHIPPED_SEAT_TOOL_DENY[seat] ?? [];
+}
 function splitCompoundCommand(command) {
   const parts = [];
   let current = "";
@@ -229,7 +240,7 @@ function patternAsk(pattern, reason, source) {
   const verb = dangerVerbOfPattern(pattern);
   return {
     kind: "ask",
-    reason,
+    reason: verb === void 0 ? reason : `${reason}; "Always allow" grants this exact command only, "Allow all ${verb}" grants every ${verb} command`,
     source,
     grantTier: "pattern",
     pattern,
@@ -629,7 +640,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -657,6 +668,10 @@ var init_policy = __esm({
       "pragmatist:"
     ]);
     REVIEW_CHILD_PERSONA = /^you are the (?:oracle|reviewer|critic|referee|chair|skeptic|architect|pragmatist)\b/i;
+    SHIPPED_SEAT_TOOL_DENY = Object.freeze({
+      orchestrator: Object.freeze(["plugin_manager", "cordis_inspect_list", "cordis_inspect_query"]),
+      sysadmin: Object.freeze(["plugin_manager", "cordis_inspect_list", "cordis_inspect_query"])
+    });
     SHIPPED_TOOL_DEFAULTS = {
       read: "allow",
       glob: "allow",
@@ -22001,7 +22016,11 @@ var OrchestrationSettingsSchema = Schema.object({
   // Operator-authored command tools (enpoi-custom-tools): an array of
   // { id, name, description, params, command } records. Declared so the
   // namespace contract admits the key; the runtime plugin owns the vocabulary.
-  customTools: live(Schema.array(Schema.any()).default([]))
+  customTools: live(Schema.array(Schema.any()).default([])),
+  // Per-seat execution deny lists (tool names a seat may not CALL). Declared so
+  // the namespace contract admits the key; the shipped defaults live in
+  // `policy.ts` (`SHIPPED_SEAT_TOOL_DENY`) and a seat key here replaces one.
+  seatToolDeny: live(Schema.dict(Schema.array(Schema.string())).default({}))
 });
 var Config = OrchestrationSettingsSchema;
 async function pruneRemovedMcpPolicyRows(settings, servers, readConfig) {
@@ -22598,6 +22617,13 @@ ${rows.map(renderMountRow).join("\n")}`;
       return {};
     }
   }
+  function readSeatToolDeny() {
+    try {
+      return documentValue(config2.seatToolDeny, "seatToolDeny") ?? {};
+    } catch {
+      return {};
+    }
+  }
   function readMcpCatalogDefs() {
     try {
       const catalog = documentValue(config2.mcpServers, "mcpServers");
@@ -22783,6 +22809,14 @@ ${rows.map(renderMountRow).join("\n")}`;
     if (!capabilityDecision.allowed) {
       return { kind: "deny", reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` };
     }
+    const agentRole = askingAgentOf(exec);
+    const seatDeny = seatToolDenyFor(agentRole, readSeatToolDeny());
+    if (seatDeny.includes(exec.name)) {
+      return {
+        kind: "deny",
+        reason: `${exec.name} is restricted to the creator seat; seat "${agentRole ?? "unknown"}" may not run it. Switch to the creator agent for harness authoring.`
+      };
+    }
     const execSession = exec.agent?.session;
     if (sessionMountsAccess !== void 0 && execSession !== void 0 && typeof execSession.id === "string" && !sessionMountsAccess.isToolMounted(execSession, exec.name)) {
       return {
@@ -22797,7 +22831,7 @@ ${rows.map(renderMountRow).join("\n")}`;
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
       ...customCommand === void 0 ? {} : { customCommand },
-      agent: askingAgentOf(exec),
+      agent: agentRole,
       // A delegated child carries the PARENT's preset, so reviewer seats are
       // identified from the child's own subagent descriptor, not the role id.
       // Computed only for the gated tool: the descriptor scan is unnecessary

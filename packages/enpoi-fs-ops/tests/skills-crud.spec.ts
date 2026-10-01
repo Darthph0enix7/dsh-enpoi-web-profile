@@ -126,7 +126,7 @@ describe('skills.list', () => {
     const { body } = await harness.call('skills.list', { sessionId: 'sess-1' })
     expect(catalog.list).toHaveBeenCalledWith({ sessionId: 'sess-1' }, expect.anything())
     const remote = body.value.skills.find((row: any) => row.name === 'remote-skill')
-    expect(remote).toMatchObject({ source: 'registry', editable: false, protected: false })
+    expect(remote).toMatchObject({ source: 'registry', editable: false, protected: false, mcp: [] })
     expect(body.value.registry).toEqual({ ok: true })
     // Registry rows never duplicate a local name.
     const localNames = body.value.skills.filter((row: any) => row.source !== 'registry').map((row: any) => row.name)
@@ -278,6 +278,41 @@ describe('skills.create', () => {
     await expect(readdir(skillsDir())).rejects.toThrow()
   })
 
+  it('writes the mcp hint line and returns it from list and read', async () => {
+    const harness = makeHarness(undefined)
+    const created = await harness.call('skills.create', {
+      name: 'hinted-skill',
+      description: 'Loads a server',
+      body: 'Body.',
+      mcp: ['test-mcp'],
+    })
+    expect(created.status).toBe(200)
+    const raw = await readFile(join(skillsDir(), 'hinted-skill', 'SKILL.md'), 'utf8')
+    expect(raw).toContain('mcp: [test-mcp]')
+
+    const listed = await harness.call('skills.list', {})
+    expect(listed.body.value.skills[0].mcp).toEqual(['test-mcp'])
+    const read = await harness.call('skills.read', { name: 'hinted-skill' })
+    expect(read.body.value.mcp).toEqual(['test-mcp'])
+
+    // Without the field (or an empty list) there is no mcp line and the read path reports [].
+    await harness.call('skills.create', { name: 'plain-skill', description: 'No hint', body: '' })
+    const plainRaw = await readFile(join(skillsDir(), 'plain-skill', 'SKILL.md'), 'utf8')
+    expect(plainRaw).not.toContain('mcp:')
+    const plainRead = await harness.call('skills.read', { name: 'plain-skill' })
+    expect(plainRead.body.value.mcp).toEqual([])
+  })
+
+  it('refuses a non-array mcp field, non-string entries, and empty ids', async () => {
+    const harness = makeHarness(undefined)
+    for (const mcp of ['test-mcp', 42, [42], [''], [null]]) {
+      const { status, body } = await harness.call('skills.create', { name: 'ok-name', description: 'x', body: 'y', mcp })
+      expect(status).toBe(400)
+      expect(body.error.code).toBe('bad-request')
+    }
+    await expect(readdir(skillsDir())).rejects.toThrow()
+  })
+
   it('quotes a description that would otherwise break the frontmatter', async () => {
     const harness = makeHarness(undefined)
     const description = 'Stars: "quoted" # hash\nsecond line'
@@ -308,6 +343,63 @@ describe('skills.update', () => {
     const read = await harness.call('skills.read', { name: 'alpha-skill' })
     expect(read.body.value.description).toBe('New description')
     expect(read.body.value.body).toBe('# Updated\n\nNew body.')
+  })
+
+  it('adds, replaces, and removes the mcp hint while preserving other frontmatter', async () => {
+    const harness = makeHarness(undefined)
+    await writeBundle('hinted', 'name: hinted\ndescription: Old\nwhenToUse: Keep me')
+    const path = join(skillsDir(), 'hinted', 'SKILL.md')
+
+    // Add.
+    await harness.call('skills.update', { name: 'hinted', description: 'New', body: 'Body.', mcp: ['server-a', 'server-b'] })
+    let raw = await readFile(path, 'utf8')
+    expect(raw).toContain('mcp: [server-a, server-b]')
+    expect(raw).toContain('whenToUse: Keep me')
+    let read = await harness.call('skills.read', { name: 'hinted' })
+    expect(read.body.value.mcp).toEqual(['server-a', 'server-b'])
+
+    // Replace (and quote an entry that is not a bare YAML scalar).
+    await harness.call('skills.update', { name: 'hinted', description: 'New', body: 'Body.', mcp: ['server c'] })
+    raw = await readFile(path, 'utf8')
+    expect(raw).toContain('mcp: ["server c"]')
+    expect(raw).not.toContain('server-a')
+    read = await harness.call('skills.read', { name: 'hinted' })
+    expect(read.body.value.mcp).toEqual(['server c'])
+
+    // Remove: the line and its block continuation disappear.
+    await harness.call('skills.update', { name: 'hinted', description: 'New', body: 'Body.', mcp: [] })
+    raw = await readFile(path, 'utf8')
+    expect(raw).not.toContain('mcp:')
+    read = await harness.call('skills.read', { name: 'hinted' })
+    expect(read.body.value.mcp).toEqual([])
+
+    // Absent field leaves the stored hint untouched.
+    await harness.call('skills.update', { name: 'hinted', description: 'New', body: 'Body.', mcp: ['kept-mcp'] })
+    await harness.call('skills.update', { name: 'hinted', description: 'Newer', body: 'Body.' })
+    expect(await readFile(path, 'utf8')).toContain('mcp: [kept-mcp]')
+  })
+
+  it('parses and removes a block-sequence mcp hint', async () => {
+    const harness = makeHarness(undefined)
+    await writeBundle('blocky', 'name: blocky\ndescription: Block hint\nmcp:\n  - first-mcp\n  - second-mcp')
+    const read = await harness.call('skills.read', { name: 'blocky' })
+    expect(read.body.value.mcp).toEqual(['first-mcp', 'second-mcp'])
+
+    await harness.call('skills.update', { name: 'blocky', description: 'Block hint', body: 'Body.', mcp: [] })
+    const raw = await readFile(join(skillsDir(), 'blocky', 'SKILL.md'), 'utf8')
+    expect(raw).not.toContain('mcp:')
+    expect(raw).not.toContain('first-mcp')
+  })
+
+  it('refuses an invalid mcp field without touching the file', async () => {
+    const harness = makeHarness(undefined)
+    await writeBundle('locked', 'name: locked\ndescription: Keep me')
+    const path = join(skillsDir(), 'locked', 'SKILL.md')
+    const before = await readFile(path, 'utf8')
+    const { status, body } = await harness.call('skills.update', { name: 'locked', description: 'x', body: '', mcp: 'not-an-array' })
+    expect(status).toBe(400)
+    expect(body.error.code).toBe('bad-request')
+    expect(await readFile(path, 'utf8')).toBe(before)
   })
 
   it('404s a missing skill', async () => {

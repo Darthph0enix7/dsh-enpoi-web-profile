@@ -1,18 +1,21 @@
 /**
- * Preset prompt parity — the cache-neutral switch contract for orchestrator ↔ sysadmin.
+ * Preset prompt parity — the cache-neutral switch contract for every main agent.
  *
  * The provider prefix cache is keyed by the exact request prefix, and the tool block plus the
  * system prompt sit before the conversation, so any per-preset byte this early rebuilds the
  * whole cached prefix on a switch (measured live: control turn-2 cacheRead 12,288 → treatment 0
- * after an orchestrator→sysadmin switch). The two preset declarations must therefore assemble
- * identical bytes up to the per-preset doctrine that `dsh-persona` renders LAST (suffix order
- * 10200): a SHARED BASE prefix + a PER-PRESET TAIL suffix.
+ * after an orchestrator→sysadmin switch). Every main-agent preset declaration must therefore
+ * assemble identical bytes up to the per-preset doctrine that `dsh-persona` renders LAST
+ * (suffix order 10200): a SHARED BASE prefix + a PER-PRESET TAIL suffix, with per-seat tool
+ * restrictions enforced at execution (the enpoi-capabilities pre-execute guard) instead of by
+ * tool absence — `orchestrator`, `sysadmin`, `creator`, and any preset the authoring flow
+ * clones from one of them.
  *
  * This spec reads the active declarations in `cordis.patch.yml` (the source the host mounts),
- * proves every other row/config is identical, and assembles both prompts through the real
+ * proves every other row/config is identical, and assembles all three prompts through the real
  * `SystemPrompt` registry to prove the shared prefix is byte-identical and only the tail
  * differs. A future edit that puts per-preset text back into the prefix — or ships a new
- * row/config the other preset lacks — fails here instead of silently costing cache rebuilds.
+ * row/config one preset lacks — fails here instead of silently costing cache rebuilds.
  */
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -71,20 +74,36 @@ const allRowsOf = (seat: string): PresetRow[] => {
 }
 
 describe('preset prompt parity (cache-neutral switch contract)', () => {
-  it('declares identical rows; only the persona text and the seat label differ', () => {
-    const orchestrator = rowsOf('orchestrator')
-    const sysadmin = rowsOf('sysadmin')
-    expect(orchestrator.map(row => [row.id, row.name, row.disabled]))
-      .toEqual(sysadmin.map(row => [row.id, row.name, row.disabled]))
+  it('declares identical rows across every main agent; only persona text and the seat label differ', () => {
+    const seats = ['orchestrator', 'sysadmin', 'creator'] as const
+    const rows = Object.fromEntries(seats.map(seat => [seat, rowsOf(seat)])) as Record<typeof seats[number], PresetRow[]>
+    const reference = rows.orchestrator
+    for (const seat of seats) {
+      expect(rows[seat].map(row => [row.id, row.name, row.disabled]), `${seat} row list`)
+        .toEqual(reference.map(row => [row.id, row.name, row.disabled]))
 
-    const differing = orchestrator
-      .filter((row, index) => JSON.stringify(row.config ?? null) !== JSON.stringify(sysadmin[index].config ?? null))
-      .map(row => row.id)
-    expect(differing).toEqual(['persona', 'enpoi-orchestration'])
+      const differing = reference
+        .filter((row, index) => JSON.stringify(row.config ?? null) !== JSON.stringify(rows[seat][index].config ?? null))
+        .map(row => row.id)
+      // `persona` carries the per-preset doctrine (the tail); `enpoi-orchestration`
+      // carries the seat id, which only resolves group pre-attach — with the
+      // shipped catalog the rendered menu is identical for every main seat.
+      expect(differing, `${seat} differing configs`)
+        .toEqual(seat === 'orchestrator' ? [] : ['persona', 'enpoi-orchestration'])
+    }
 
-    // Recovery continuation is on in both cache-paired presets: the two
+    // The canonical surface mounts the harness-authoring rows and the oracle row
+    // on EVERY main agent: the tool array must not differ, so restrictions are
+    // enforced at execution by the enpoi-capabilities pre-execute guard.
+    for (const seat of seats) {
+      for (const id of ['tool-plugin-manager', 'tool-cordis', 'enpoi-oracle', 'enpoi-debug']) {
+        expect(allRowsOf(seat).find(row => row.id === id), `${seat} must mount ${id}`).toBeDefined()
+      }
+    }
+
+    // Recovery continuation is on in every cache-paired preset: the two
     // control rows must stay declared and enabled together.
-    for (const seat of ['orchestrator', 'sysadmin'] as const) {
+    for (const seat of seats) {
       const rows = allRowsOf(seat)
       for (const id of ['tool-subagent-control', 'tool-subagent-list-agents']) {
         const row = rows.find(item => item.id === id)
@@ -94,11 +113,14 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
     }
 
     // `enpoi-orchestration` differs only by the seat label, and the seat only resolves group
-    // pre-attach: with the shipped catalog the rendered menu is identical for both seats.
+    // pre-attach: with the shipped catalog the rendered menu is identical for every main seat.
     const catalog = resolveToolGroups(undefined)
-    expect(preAttachFor(catalog, 'orchestrator')).toEqual(preAttachFor(catalog, 'sysadmin'))
+    const orchestratorAttach = preAttachFor(catalog, 'orchestrator')
+    expect(orchestratorAttach).toEqual(preAttachFor(catalog, 'sysadmin'))
+    expect(orchestratorAttach).toEqual(preAttachFor(catalog, 'creator'))
     const menu = (seat: string): string => renderMenuText(catalog, new Set(preAttachFor(catalog, seat)))
     expect(menu('orchestrator')).toBe(menu('sysadmin'))
+    expect(menu('orchestrator')).toBe(menu('creator'))
     expect(menu('orchestrator')).toContain('peer')
   })
 
@@ -120,9 +142,12 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
   })
 
   it('keeps identity and doctrine in the tail; the prefix is the shared base', () => {
-    const orchestrator = personaOf('orchestrator')
-    const sysadmin = personaOf('sysadmin')
-    expect(orchestrator.prefix).toBe(sysadmin.prefix)
+    const seats = ['orchestrator', 'sysadmin', 'creator'] as const
+    const personas = Object.fromEntries(seats.map(seat => [seat, personaOf(seat)])) as Record<typeof seats[number], PersonaConfig>
+    const orchestrator = personas.orchestrator
+    for (const seat of seats) {
+      expect(personas[seat].prefix, `${seat} prefix must be the shared base`).toBe(orchestrator.prefix)
+    }
     expect(orchestrator.prefix.length).toBeGreaterThan(512)
     expect(orchestrator.prefix).toContain('## Tooling')
     expect(orchestrator.prefix).toContain('## Verification & Ambiguity')
@@ -131,12 +156,18 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
     expect(orchestrator.suffix).toContain('Master Orchestrator')
     expect(orchestrator.suffix).toContain('## Delegation Doctrine')
     expect(orchestrator.suffix).toContain('## Fleet')
-    expect(sysadmin.suffix).toContain('You are Sysadmin')
-    expect(sysadmin.suffix).toContain('verify service state before and after every action')
-    expect(orchestrator.suffix).not.toBe(sysadmin.suffix)
+    expect(personas.sysadmin.suffix).toContain('You are Sysadmin')
+    expect(personas.sysadmin.suffix).toContain('verify service state before and after every action')
+    expect(personas.creator.suffix).toContain('You are the Creator')
+    expect(personas.creator.suffix).toContain('## Knowledge base')
+    expect(orchestrator.suffix).not.toBe(personas.sysadmin.suffix)
+    expect(orchestrator.suffix).not.toBe(personas.creator.suffix)
 
-    expect(orchestrator.prefix).not.toContain('Master Orchestrator')
-    expect(orchestrator.prefix).not.toContain('You are Sysadmin')
+    for (const seat of seats) {
+      expect(personas[seat].prefix).not.toContain('Master Orchestrator')
+      expect(personas[seat].prefix).not.toContain('You are Sysadmin')
+      expect(personas[seat].prefix).not.toContain('You are the Creator')
+    }
   })
 
   it('assembles identical shared prefixes and only the suffix tail differs', async () => {
@@ -146,7 +177,9 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
     const keys = {
       orchestrator: { id: 'parity-orchestrator' },
       sysadmin: { id: 'parity-sysadmin' },
+      creator: { id: 'parity-creator' },
     } as const
+    const seats = ['orchestrator', 'sysadmin', 'creator'] as const
     const scopes: Array<{ dispose: () => Promise<void> }> = []
     try {
       await ctx.plugin(SystemPrompt)
@@ -171,7 +204,7 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
           section('mcp:servers', 'MCP_SERVERS', 'mcp sentinel')
           section('tool-groups:menu', TOOL_GROUPS_MENU_ORDER, 'menu sentinel')
 
-          for (const seat of ['orchestrator', 'sysadmin'] as const) {
+          for (const seat of seats) {
             const persona = personaOf(seat)
             const scope = createScope(pluginCtx, keys[seat])
             scopes.push(scope)
@@ -189,25 +222,27 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
         },
       } as never)
 
-      const orchestratorAssembly = await ctx.systemPrompt.assemble({ scope: keys.orchestrator })
-      const sysadminAssembly = await ctx.systemPrompt.assemble({ scope: keys.sysadmin })
-      expect(orchestratorAssembly.sections.at(-1)?.name).toBe(PERSONA_SUFFIX_SECTION)
-      expect(sysadminAssembly.sections.at(-1)?.name).toBe(PERSONA_SUFFIX_SECTION)
-
-      const orchestratorPersona = personaOf('orchestrator')
-      const sysadminPersona = personaOf('sysadmin')
-      const orchestratorPrompt = renderPrompt(orchestratorAssembly)
-      const sysadminPrompt = renderPrompt(sysadminAssembly)
-      expect(orchestratorPrompt.endsWith(orchestratorPersona.suffix ?? '')).toBe(true)
-      expect(sysadminPrompt.endsWith(sysadminPersona.suffix ?? '')).toBe(true)
-
-      const sharedPrefix = orchestratorPrompt.slice(0, orchestratorPrompt.length - (orchestratorPersona.suffix ?? '').length)
-      const sysadminPrefix = sysadminPrompt.slice(0, sysadminPrompt.length - (sysadminPersona.suffix ?? '').length)
-      expect(sysadminPrefix).toBe(sharedPrefix)
-      expect(sharedPrefix).toContain(orchestratorPersona.prefix)
-      expect(sharedPrefix).toContain('menu sentinel')
-      expect(sharedPrefix).not.toContain('Master Orchestrator')
-      expect(sharedPrefix).not.toContain('You are Sysadmin')
+      const sharedPrefixes = seats.map(seat => {
+        const assembly = ctx.systemPrompt.assemble({ scope: keys[seat] })
+        return assembly
+      })
+      const assemblies = await Promise.all(sharedPrefixes)
+      const prompts = assemblies.map((assembly, index) => {
+        expect(assembly.sections.at(-1)?.name).toBe(PERSONA_SUFFIX_SECTION)
+        const prompt = renderPrompt(assembly)
+        const persona = personaOf(seats[index])
+        expect(prompt.endsWith(persona.suffix ?? '')).toBe(true)
+        return { prompt, suffix: persona.suffix ?? '' }
+      })
+      const base = prompts[0].prompt.slice(0, prompts[0].prompt.length - prompts[0].suffix.length)
+      for (const { prompt, suffix } of prompts) {
+        expect(prompt.slice(0, prompt.length - suffix.length)).toBe(base)
+      }
+      expect(base).toContain(personaOf('orchestrator').prefix)
+      expect(base).toContain('menu sentinel')
+      for (const marker of ['Master Orchestrator', 'You are Sysadmin', 'You are the Creator']) {
+        expect(base).not.toContain(marker)
+      }
     } finally {
       for (const scope of scopes) await scope.dispose()
       await ctx.fiber.dispose()

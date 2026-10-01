@@ -236,20 +236,22 @@ describe('tool-group catalog', () => {
     if (!absent.ok) expect(absent.reason).toContain('not attached')
   })
 
-  it('ships the debug pre-attach for the Creator and broker by default', () => {
+  it('ships the debug pre-attach for every main-agent seat by default', () => {
     const fresh = catalogWith()
-    expect(preAttachFor(fresh, 'creator')).toEqual(['debug'])
-    expect(preAttachFor(fresh, 'broker')).toEqual(['debug'])
-    expect(preAttachFor(fresh, 'orchestrator')).toEqual([])
+    for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker']) {
+      expect(preAttachFor(fresh, seat), seat).toEqual(['debug'])
+    }
+    expect(preAttachFor(fresh, 'default')).toEqual([])
     // An explicit operator override still wins, including an empty one.
     const overridden = catalogWith({ toolGroups: { seats: { creator: { preAttach: [] } } } })
     expect(preAttachFor(overridden, 'creator')).toEqual([])
   })
 
   it('resolves per-seat pre-attach from the operator document over group defaults', () => {
-    const catalog = catalogWith({ toolGroups: { seats: { sysadmin: { preAttach: ['debug'] } } } })
-    expect(preAttachFor(catalog, 'sysadmin')).toEqual(['debug'])
-    expect(preAttachFor(catalog, 'orchestrator')).toEqual([])
+    const catalog = catalogWith({ toolGroups: { seats: { sysadmin: { preAttach: ['peer'] } } } })
+    expect(preAttachFor(catalog, 'sysadmin')).toEqual(['peer'])
+    expect(preAttachFor(catalog, 'orchestrator')).toEqual(['debug'])
+    expect(preAttachFor(catalog, 'default')).toEqual([])
     // A disabled group can never be pre-attached.
     const disabled = catalogWith({
       toolGroups: { groups: { debug: { enabled: false } }, seats: { sysadmin: { preAttach: ['debug'] } } },
@@ -288,13 +290,15 @@ describe('toolGroups projection', () => {
 })
 
 describe('tool_groups plugin', () => {
-  it('installs the base surface at agent creation: every on-demand member denied, nothing static', () => {
+  it('installs the base surface at agent creation: unattached on-demand members denied, nothing static', () => {
     const { ctx, installer } = mount()
     const agent = fakeAgent()
     ctx.fire('agent/created', { agent, source: 'fresh' })
     expect(installer.calls).toHaveLength(1)
-    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
-    for (const name of CORE) expect(installer.live()).not.toContain(name)
+    // The debug group is pre-attached for the orchestrator seat (uniform
+    // main-agent surface); peer stays on-demand and is denied at the base.
+    expect(installer.live()?.sort()).toEqual([...PEER].sort())
+    for (const name of [...CORE, ...DEBUG]) expect(installer.live()).not.toContain(name)
   })
 
   it('attach adds exactly the group members and detach removes exactly them, at the turn boundary', async () => {
@@ -304,30 +308,30 @@ describe('tool_groups plugin', () => {
       if (type === 'tool-groups/change') projections.set('session-1', data.attached)
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
-    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
+    expect(installer.live()?.sort()).toEqual([...PEER].sort())
 
     const attached = await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
     expect(attached.ok).toBe(true)
-    expect(attached.attached).toEqual(['peer'])
+    expect(attached.attached).toEqual(['peer', 'debug'])
     expect(agent.appended).toHaveLength(1)
     expect(agent.appended[0].type).toBe('tool-groups/change')
-    expect(agent.appended[0].data).toEqual({ attached: ['peer'] })
+    expect(agent.appended[0].data).toEqual({ attached: ['peer', 'debug'] })
     expect(agent.appended[0].opts).toEqual({ ignorable: true })
     // The filter does not change mid-turn: the current request's catalog stays.
-    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
+    expect(installer.live()?.sort()).toEqual([...PEER].sort())
     // The menu names the pending change instead of claiming it is live.
     expect(menu.text({ scope: agent })).toContain('attached — applies from the next turn')
 
-    // The projection drive committed the event; turn/end applies it.
+    // The projection drive committed the event; turn/end applies it. With every
+    // on-demand group attached the deny set is empty, so the filter lifts.
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
-    expect(installer.live()?.sort()).toEqual([...DEBUG].sort())
-    for (const name of PEER) expect(installer.live()).not.toContain(name)
+    expect(installer.live()).toBeNull()
 
     const detached = await tool.execute({ action: 'detach', group: 'peer' }, EXEC(agent))
     expect(detached.ok).toBe(true)
-    expect(detached.attached).toEqual([])
+    expect(detached.attached).toEqual(['debug'])
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
-    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
+    expect(installer.live()?.sort()).toEqual([...PEER].sort())
   })
 
   it('removes the restriction entirely when every on-demand group is attached', async () => {
@@ -338,8 +342,7 @@ describe('tool_groups plugin', () => {
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
     await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
-    await tool.execute({ action: 'attach', group: 'debug' }, EXEC(agent))
-    expect(agent.appended[1].data).toEqual({ attached: ['peer', 'debug'] })
+    expect(agent.appended[0].data).toEqual({ attached: ['peer', 'debug'] })
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
     expect(installer.calls[0].disposed).toBe(true)
     expect(installer.live()).toBeNull()
@@ -371,12 +374,12 @@ describe('tool_groups plugin', () => {
     const first = mount({ projections })
     const agent = fakeAgent('resumed')
     first.ctx.fire('agent/created', { agent, source: 'resume' })
-    expect(first.installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
-    projections.set('resumed', ['debug'])
+    expect(first.installer.live()?.sort()).toEqual([...PEER].sort())
+    projections.set('resumed', ['peer'])
     const second = mount({ projections })
     const secondInstaller = second.installer
     second.ctx.fire('agent/created', { agent, source: 'resume' })
-    expect(secondInstaller.live()?.sort()).toEqual([...PEER].sort())
+    expect(secondInstaller.live()?.sort()).toEqual([...DEBUG].sort())
   })
 
   it('lists every enabled on-demand group with members and state, and renders the menu', async () => {
@@ -491,7 +494,7 @@ describe('tool_groups plugin', () => {
     const run = (name: string) => handlers[0]({ agent, name }, () => Promise.resolve({ kind: 'allow' }))
 
     // Never attached: point at the attach action.
-    const unattached = await run('session_debug')
+    const unattached = await run('peer_status')
     expect(unattached.kind).toBe('deny')
     expect(unattached.reason).toContain('not attached')
     expect(unattached.reason).toContain('attach')

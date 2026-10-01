@@ -215,25 +215,118 @@ function yamlQuote(value) {
   const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
   return `"${escaped}"`;
 }
+function splitFlowSequence(inner) {
+  const parts = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (const char of inner) {
+    if (quote !== void 0) {
+      current += char;
+      if (quote === '"') {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') quote = void 0;
+      } else if (char === "'") {
+        quote = void 0;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ",") {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts.map((part) => part.trim()).filter((part) => part !== "");
+}
+function decodeInlineScalar(raw) {
+  const value = raw.trim();
+  if (value.startsWith('"')) {
+    let escaped = false;
+    for (let cursor = 1; cursor < value.length; cursor++) {
+      const char = value[cursor];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') return decodeDoubleQuoted(value.slice(1, cursor));
+    }
+    return value.slice(1);
+  }
+  if (value.startsWith("'")) {
+    const end = value.indexOf("'", 1);
+    if (end >= 0) return value.slice(1, end).replace(/''/g, "'");
+    return value.slice(1);
+  }
+  const comment = value.search(/\s#/);
+  return (comment >= 0 ? value.slice(0, comment) : value).trim();
+}
+function frontmatterStringArray(lines, key) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? "";
+    if (/^\s/.test(line) || line === "") continue;
+    const match = /^([A-Za-z0-9_-]+)[ \t]*:[ \t]?(.*)$/.exec(line);
+    if (match === null || match[1] !== key) continue;
+    const rest = (match[2] ?? "").trim();
+    if (rest.startsWith("[")) {
+      const end = rest.lastIndexOf("]");
+      if (end < 0) return [];
+      return splitFlowSequence(rest.slice(1, end)).map(decodeInlineScalar).filter((entry) => entry !== "");
+    }
+    const entries = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const item = lines[cursor] ?? "";
+      if (item.trim() === "") continue;
+      if (!/^\s/.test(item)) break;
+      const bullet = /^\s*-[ \t]*(.*)$/.exec(item);
+      if (bullet === null) continue;
+      const value = decodeInlineScalar(bullet[1] ?? "");
+      if (value !== "") entries.push(value);
+    }
+    return entries;
+  }
+  return void 0;
+}
+function isBareYamlScalar(value) {
+  return /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value) && !/^(?:true|false|null|yes|no|on|off|~)$/i.test(value);
+}
+function yamlArray(values) {
+  return `[${values.map((value) => isBareYamlScalar(value) ? value : yamlQuote(value)).join(", ")}]`;
+}
 function parseSkillMarkdown(raw) {
   const frontmatter = splitFrontmatter(raw);
-  if (frontmatter === void 0) return { frontmatter: void 0, name: void 0, description: void 0, body: raw.trim() };
+  if (frontmatter === void 0) return { frontmatter: void 0, name: void 0, description: void 0, mcp: void 0, body: raw.trim() };
   return {
     frontmatter: frontmatter.lines,
     name: frontmatterValue(frontmatter.lines, "name"),
     description: frontmatterValue(frontmatter.lines, "description"),
+    mcp: frontmatterStringArray(frontmatter.lines, "mcp"),
     body: frontmatter.body.trim()
   };
 }
 function normalizeBody(body) {
   return body.replace(/\r\n/g, "\n").replace(/^\n+/, "").replace(/\s+$/, "");
 }
-function skillFileText(existing, name2, description, body) {
+function skillFileText(existing, name2, description, body, mcp) {
   const bodyText = normalizeBody(body);
+  const mcpLine = mcp === void 0 || mcp.length === 0 ? void 0 : `mcp: ${yamlArray(mcp)}`;
   if (existing?.frontmatter === void 0 || existing.name === void 0) {
+    const fresh = [`name: ${name2}`, `description: ${yamlQuote(description)}`];
+    if (mcpLine !== void 0) fresh.push(mcpLine);
     return `---
-name: ${name2}
-description: ${yamlQuote(description)}
+${fresh.join("\n")}
 ---
 ${bodyText === "" ? "" : `
 ${bodyText}
@@ -248,12 +341,42 @@ ${bodyText}
   } else {
     lines.push(`description: ${yamlQuote(description)}`);
   }
+  if (mcp !== void 0) {
+    const mcpIndex = lines.findIndex((line) => /^mcp[ \t]*:/.test(line));
+    if (mcpIndex >= 0) {
+      let end = mcpIndex + 1;
+      while (end < lines.length && /^\s/.test(lines[end] ?? "")) end++;
+      if (mcpLine === void 0) lines.splice(mcpIndex, end - mcpIndex);
+      else lines.splice(mcpIndex, end - mcpIndex, mcpLine);
+    } else if (mcpLine !== void 0) {
+      lines.push(mcpLine);
+    }
+  }
   return `---
 ${lines.join("\n")}
 ---
 ${bodyText === "" ? "" : `
 ${bodyText}
 `}`;
+}
+function readMcpField(payload) {
+  const record = payload;
+  if (record === null || record.mcp === void 0) return void 0;
+  if (!Array.isArray(record.mcp)) {
+    throw new FsOpsError("bad-request", '"mcp" must be an array of server ids', 400);
+  }
+  const values = [];
+  for (const entry of record.mcp) {
+    if (typeof entry !== "string") {
+      throw new FsOpsError("bad-request", '"mcp" entries must be strings', 400);
+    }
+    const value = entry.trim();
+    if (value === "") {
+      throw new FsOpsError("bad-request", '"mcp" entries must be non-empty server ids', 400);
+    }
+    if (!values.includes(value)) values.push(value);
+  }
+  return values;
 }
 async function readSkillText(path) {
   const info = await stat(path);
@@ -278,7 +401,7 @@ async function readSkillEntry(path, entry, rootPath, format) {
   }
   const parsed = parseSkillMarkdown(raw);
   if (parsed.name === void 0 || !isSkillName(parsed.name) || parsed.description === void 0 || parsed.description === "") return void 0;
-  return { entry, name: parsed.name, description: parsed.description, path, rootPath, format };
+  return { entry, name: parsed.name, description: parsed.description, mcp: parsed.mcp ?? [], path, rootPath, format };
 }
 async function listSkillEntries(root) {
   let dirents;
@@ -699,6 +822,7 @@ function apply(ctx, config) {
         name: entry.name,
         entry: entry.entry,
         description: entry.description,
+        mcp: entry.mcp,
         path: entry.path,
         format: entry.format,
         source: isProtectedSkill(entry) ? "default" : "profile",
@@ -713,6 +837,7 @@ function apply(ctx, config) {
         name: skill.name,
         entry: skill.name,
         description: skill.description,
+        mcp: [],
         ...skill.path === void 0 ? {} : { path: skill.path },
         format: "file",
         source: PROTECTED_SKILL_NAMES.has(skill.name) ? "default" : "registry",
@@ -738,6 +863,7 @@ function apply(ctx, config) {
         name: entry.name,
         entry: entry.entry,
         description: parsed.description ?? entry.description,
+        mcp: parsed.mcp ?? entry.mcp,
         body: parsed.body,
         content,
         path: entry.path,
@@ -751,6 +877,7 @@ function apply(ctx, config) {
       requireUnprotectedSkill(name2, "created");
       const description = requireField(payload, "description").trim();
       const body = requireField(payload, "body", true);
+      const mcp = readMcpField(payload);
       const root = resolveSkillsRoot(config);
       const existing = await findSkillEntry(root, name2);
       if (existing !== void 0) {
@@ -758,7 +885,7 @@ function apply(ctx, config) {
       }
       const targetDir = requireContained(root, join(root, name2));
       const targetFile = requireContained(root, join(targetDir, SKILL_FILE_NAME));
-      const text = skillFileText(void 0, name2, description, body);
+      const text = skillFileText(void 0, name2, description, body, mcp);
       requireSkillSize(text);
       try {
         await mkdir(root, { recursive: true });
@@ -783,6 +910,7 @@ function apply(ctx, config) {
       requireUnprotectedSkill(name2, "edited");
       const description = requireField(payload, "description").trim();
       const body = requireField(payload, "body", true);
+      const mcp = readMcpField(payload);
       const root = resolveSkillsRoot(config);
       const entry = await findSkillEntry(root, name2);
       if (entry === void 0) {
@@ -794,7 +922,7 @@ function apply(ctx, config) {
       const raw = await readSkillText(entry.path);
       const parsed = parseSkillMarkdown(raw);
       const base = parsed.frontmatter !== void 0 && parsed.name !== void 0 ? parsed : void 0;
-      const text = skillFileText(base, entry.name, description, body);
+      const text = skillFileText(base, entry.name, description, body, mcp);
       requireSkillSize(text);
       const info = await stat(entry.path);
       await writeFileAtomic(entry.path, Buffer.from(text, "utf8"), info.mode & 511);

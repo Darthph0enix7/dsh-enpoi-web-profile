@@ -120,7 +120,14 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     label: "Debug & observability",
     purpose: "session log, event trace, and diagnostics inspection",
     mode: "on-demand",
-    preAttach: [],
+    // Every main-agent seat pre-attaches the debug group: the presented tool
+    // array must be byte-identical across an agent switch (the provider caches
+    // the prompt prefix and the tool block sits before the conversation), so a
+    // seat-specific attached set is a cache invalidation. The Creator and the
+    // council broker advertise self-diagnosis in their personas; orchestrator
+    // and sysadmin now carry the same read-only diagnostics surface. An
+    // operator seat override in the document still wins.
+    preAttach: ["orchestrator", "sysadmin", "creator", "broker"],
     enabled: true,
     members: [
       "diagnostics_report",

@@ -495,7 +495,14 @@ interface SessionEventLike {
 
 /** Roster surface used for persona text and labels. */
 interface RosterLike {
-  read(id: string): Promise<string>
+  /**
+   * One preset's declared composition. The 0.1.7 service method is
+   * `readDocument` (exported over Remote as `read`); the pre-0.1.7 engine
+   * exposed a local `read`. Both answer `AgentPresetDocument`
+   * (`{ agentPreset, content }`) or the raw YAML string.
+   */
+  readDocument?(id: string): Promise<string | { readonly content?: unknown }>
+  read?(id: string): Promise<string | { readonly content?: unknown }>
   resolve(id?: string): Promise<{ readonly name?: string }>
   /** Unmemoized discovery; present on the real roster, omitted by structural tests. */
   list?(): Promise<readonly { readonly id?: string; readonly name?: string }[]>
@@ -543,12 +550,32 @@ function currentPreset(ctx: Context, session: SessionLike | undefined): string |
   return readHeaderPreset(session)
 }
 
+/**
+ * Extract the YAML composition from one roster `read` answer. The 0.1.7
+ * registry answers `AgentPresetDocument` (`{ agentPreset, content }`); earlier
+ * engines answered the raw YAML string. Without this the warm cache held
+ * `undefined` for every preset and the switch never froze the original persona
+ * (the system prompt rebuilt on every agent switch).
+ * @param document - the roster answer.
+ * @returns the composition YAML, or undefined when the answer carries none.
+ */
+export function compositionContentOf(document: unknown): string | undefined {
+  if (typeof document === 'string') return document
+  if (document === null || typeof document !== 'object') return undefined
+  const content = (document as { content?: unknown }).content
+  return typeof content === 'string' ? content : undefined
+}
+
 /** Read a preset's raw composition from the roster. */
-async function loadComposition(ctx: Context, presetId: string): Promise<string | undefined> {
+export async function loadComposition(ctx: Context, presetId: string): Promise<string | undefined> {
   const roster = ctx.get('agentPresets') as RosterLike | undefined
   if (roster === undefined) return undefined
+  // 0.1.7 renamed the local method to `readDocument` (Remote export `read`);
+  // keep the old name as the fallback for engines that still expose it.
+  const read = roster.readDocument?.bind(roster) ?? roster.read?.bind(roster)
+  if (read === undefined) return undefined
   try {
-    return await roster.read(presetId)
+    return compositionContentOf(await read(presetId))
   } catch {
     return undefined
   }

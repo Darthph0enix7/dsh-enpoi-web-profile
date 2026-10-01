@@ -34,7 +34,7 @@ import { filterSkillCatalogMessages } from './catalog'
 import { evaluateToolCall } from './enforcement'
 import {
   resolvePolicy, grantProposalFor, grantProposalForOutcome, standingGrantRecord, agentRoleOf, reviewerSeatOf, mcpServerNameOf, mcpPolicyRemovalOps,
-  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames, isFullAccessMode, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL,
+  SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, advertisedToolNames, isFullAccessMode, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, seatToolDenyFor,
   type AgentLike, type PermissionPolicyConfig, type GrantProposal, type StandingGrant,
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
@@ -140,6 +140,12 @@ export interface OrchestrationConfig {
   toolGroups: Volatile<Record<string, unknown>>
   /** Operator-authored command tools (enpoi-custom-tools): id → record. */
   customTools: Volatile<Array<Record<string, unknown>>>
+  /**
+   * Per-seat execution deny lists (tool names a seat may not CALL while the
+   * tool stays advertised for prompt-prefix cache neutrality). A seat key
+   * replaces its shipped list; absent = the shipped default.
+   */
+  seatToolDeny: Volatile<Record<string, string[]>>
 }
 
 export const OrchestrationSettingsSchema = Schema.object({
@@ -180,6 +186,10 @@ export const OrchestrationSettingsSchema = Schema.object({
   // { id, name, description, params, command } records. Declared so the
   // namespace contract admits the key; the runtime plugin owns the vocabulary.
   customTools: live(Schema.array(Schema.any()).default([])),
+  // Per-seat execution deny lists (tool names a seat may not CALL). Declared so
+  // the namespace contract admits the key; the shipped defaults live in
+  // `policy.ts` (`SHIPPED_SEAT_TOOL_DENY`) and a seat key here replaces one.
+  seatToolDeny: live(Schema.dict(Schema.array(Schema.string())).default({})),
 })
 
 /** Function-plugin Config export: the owning entry's schema IS the shared document. */
@@ -1043,6 +1053,15 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }
 
+  /** The operator's per-seat execution deny overrides (`seatToolDeny`), fresh per dispatch. */
+  function readSeatToolDeny(): Record<string, string[]> {
+    try {
+      return documentValue(config.seatToolDeny, 'seatToolDeny') ?? {}
+    } catch {
+      return {}
+    }
+  }
+
   /**
    * The live MCP catalog (`enpoi-orchestration.mcpServers`) as id → descriptor.
    * `undefined` = settings unreadable; `{}` = no catalog entries. The
@@ -1328,6 +1347,19 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     if (!capabilityDecision.allowed) {
       return { kind: 'deny', reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` }
     }
+    // Per-seat execution restriction: the canonical main-agent compositions
+    // mount the same tool rows (prompt-prefix cache neutrality forbids
+    // per-agent tool ABSENCE), so a seat that must not run a tool is denied
+    // HERE while the tool stays advertised. Denial is final: the model reads
+    // the reason and the alternative seat.
+    const agentRole = askingAgentOf(exec)
+    const seatDeny = seatToolDenyFor(agentRole, readSeatToolDeny())
+    if (seatDeny.includes(exec.name)) {
+      return {
+        kind: 'deny',
+        reason: `${exec.name} is restricted to the creator seat; seat "${agentRole ?? 'unknown'}" may not run it. Switch to the creator agent for harness authoring.`,
+      }
+    }
     // On-demand MCP servers: a tool whose server this session has not mounted
     // is denied at execution time too (the surface filter is the first line;
     // this is the backstop for in-flight turns and direct calls).
@@ -1353,7 +1385,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
       ...customCommand === undefined ? {} : { customCommand },
-      agent: askingAgentOf(exec),
+      agent: agentRole,
       // A delegated child carries the PARENT's preset, so reviewer seats are
       // identified from the child's own subagent descriptor, not the role id.
       // Computed only for the gated tool: the descriptor scan is unnecessary

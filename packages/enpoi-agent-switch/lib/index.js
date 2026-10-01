@@ -3366,11 +3366,19 @@ function currentPreset(ctx, session) {
   }
   return readHeaderPreset(session);
 }
+function compositionContentOf(document) {
+  if (typeof document === "string") return document;
+  if (document === null || typeof document !== "object") return void 0;
+  const content = document.content;
+  return typeof content === "string" ? content : void 0;
+}
 async function loadComposition(ctx, presetId) {
   const roster = ctx.get("agentPresets");
   if (roster === void 0) return void 0;
+  const read = roster.readDocument?.bind(roster) ?? roster.read?.bind(roster);
+  if (read === void 0) return void 0;
   try {
-    return await roster.read(presetId);
+    return compositionContentOf(await read(presetId));
   } catch {
     return void 0;
   }
@@ -3488,8 +3496,10 @@ export {
   PERSONA_SUFFIX_SECTION,
   apply,
   composeDeltaText,
+  compositionContentOf,
   earliestLoggedPreset,
   inject,
+  loadComposition,
   name,
   parsePersonaFromYaml,
   readHeaderPreset,
