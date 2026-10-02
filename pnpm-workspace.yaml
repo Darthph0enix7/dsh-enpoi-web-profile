@@ -10,3 +10,5 @@ allowBuilds:
   esbuild: true
   node-pty: true
   ssh2: true
+patchedDependencies:
+  dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch
