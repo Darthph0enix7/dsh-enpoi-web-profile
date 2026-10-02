@@ -7,14 +7,24 @@
  * fixture without either fails this spec — the registry grew and nobody
  * decided whether the new surface works by default or asks.
  *
+ * The first-party on-demand peer family is not in the preset fixtures (it
+ * mounts from enpoi-peer-bridge only while the peer driver runs), so the
+ * documented `peer_` exemption is exercised directly by name here.
+ *
  * The fixtures are the committed wire captures of
  * `deepseek-harness/scripts/preset-tool-inventory.mjs`. Copies live beside this
  * spec so the guard runs self-contained; when the canonical directory exists
  * the copies must equal it (a fixture update fails until it is synced here,
  * and the synced tool then fails the completeness assertion until decided).
  * Override the canonical location with `DSH_TOOL_INVENTORY_DIR`.
+ *
+ * The same spec verifies `HOST_DEFAULTS_DIGEST` in the client's generated
+ * permissions mirror (`deepseek-harness/packages/client/ui-brand-enpoi`)
+ * when that checkout is present, so a default change here fails until the
+ * mirror is regenerated; the client parity spec verifies the reverse.
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -26,6 +36,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const LOCAL_FIXTURE_DIR = join(HERE, 'fixtures', 'tool-inventory')
 const CANONICAL_FIXTURE_DIR = process.env.DSH_TOOL_INVENTORY_DIR
   ?? join(homedir(), 'deepseek-harness', 'scripts', 'tool-inventory')
+const CLIENT_MIRROR_FILE = process.env.DSH_CLIENT_PERMISSIONS_MIRROR
+  ?? join(homedir(), 'deepseek-harness', 'packages', 'client', 'ui-brand-enpoi', 'src', 'client', 'permissions-defaults.generated.ts')
 
 /** The main-agent presets the inventory probe surveys by default. */
 const PRESETS = ['orchestrator', 'sysadmin', 'creator'] as const
@@ -125,5 +137,37 @@ describe('tool-defaults completeness guard', () => {
         expect(decision.source, `${tool} on ${preset} fell through to defaults.unknownTools`).toBe('matrix:global')
       }
     }
+  })
+
+  it('accounts for the first-party on-demand peer tools through the documented family exemption', () => {
+    const peerTools = ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status'] as const
+    const config = { defaults: { unknownTools: 'ask' as const } }
+    for (const tool of peerTools) {
+      expect(SHIPPED_TOOL_DEFAULTS[tool], `${tool} must stay on the documented exemption, not a hand row`).toBeUndefined()
+      expect(exemptionFor(tool)?.prefix, `${tool} matches no documented exemption`).toBe('peer_')
+      const decision = resolvePolicy({ toolName: tool, agent: 'orchestrator', config })
+      expect(decision.kind, `${tool} must ask until the operator sets a row`).toBe('ask')
+      expect(decision.source, `${tool} must fall through to the unknown-tools ask`).toBe('defaults')
+    }
+  })
+
+  it('matches the client permissions mirror digest when the harness checkout is present', () => {
+    if (!existsSync(CLIENT_MIRROR_FILE)) return
+    const mirror = readFileSync(CLIENT_MIRROR_FILE, 'utf8')
+    const embedded = /export const HOST_DEFAULTS_DIGEST = "([0-9a-f]{64})"/.exec(mirror)?.[1]
+    expect(embedded, `${CLIENT_MIRROR_FILE} carries no HOST_DEFAULTS_DIGEST`).toBeDefined()
+    const defaults: Record<string, string> = {}
+    for (const key of Object.keys(SHIPPED_TOOL_DEFAULTS).sort()) {
+      defaults[key] = SHIPPED_TOOL_DEFAULTS[key] as string
+    }
+    const exemptions = SHIPPED_TOOL_DEFAULT_EXEMPTIONS.map(entry => ({ prefix: entry.prefix, reason: entry.reason }))
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ shippedToolDefaults: defaults, shippedToolDefaultExemptions: exemptions }))
+      .digest('hex')
+    expect(
+      embedded,
+      'the client permissions mirror is stale — regenerate with `pnpm exec tsx ' +
+      'packages/client/ui-brand-enpoi/scripts/generate-permissions-mirror.ts --write` in deepseek-harness',
+    ).toBe(digest)
   })
 })

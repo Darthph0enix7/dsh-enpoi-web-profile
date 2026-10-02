@@ -778,6 +778,10 @@ var init_policy = __esm({
       {
         prefix: "mcp__",
         reason: "tools of mounted MCP servers are third-party surface; the MCP wildcard ladder and the unknown-tools ask gate them until the operator trusts a row or a server wildcard"
+      },
+      {
+        prefix: "peer_",
+        reason: "first-party on-demand fleet tools (peer_ask, peer_asks, peer_answer, peer_cancel, peer_status) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device's agent, so until the operator sets a row the unknown-tools ask is the intended gate"
       }
     ]);
     SHIPPED_BASH_PATTERNS = [
