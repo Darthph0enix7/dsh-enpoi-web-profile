@@ -112,7 +112,10 @@ function keeperEnabled(ctx: Context): boolean {
   }
 }
 
-/** Keeper primary/fallback route plus its per-wake budgets (doc 38; live-editable). */
+/** Keeper primary/fallback route plus its per-wake budgets (doc 38; live-editable).
+ * The primary defaults to the keyless kilo seed (`kilo/kilo-auto/free`) a fresh
+ * install can reach; a configured machine overrides it through the plugin row or
+ * `enpoi-orchestration.personas.keeper`. */
 export interface Config {
   provider?: Volatile<string>
   model?: Volatile<string>
@@ -138,8 +141,8 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  provider: live(Schema.string().default('freellmapi')),
-  model: live(Schema.string().default('auto')),
+  provider: live(Schema.string().default('kilo')),
+  model: live(Schema.string().default('kilo-auto/free')),
   fallbackProvider: live(Schema.string().default('antigravity')),
   fallbackModel: live(Schema.string().default('gemini-3.7-flash-tiered')),
   leaseMs: live(Schema.number().default(45_000)),
@@ -355,7 +358,8 @@ export function resolveKeeperParams(ctx: Context, config: Config): Config {
  *
  * Precedence (Oracle amendment): `enpoi-orchestration.personas.keeper` (operator
  * assignment) > plugin Config primary/fallback. The fallback route is constant
- * in both branches. Partial entries (missing provider or model) are ignored.
+ * in both branches. Partial entries (missing provider or model) are ignored. The
+ * Config primary defaults to the keyless kilo seed a fresh install routes.
  */
 export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute {
   config = plainConfig(config)
@@ -405,8 +409,8 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
     // settings unavailable — fall through to config defaults
   }
   return {
-    provider: config.provider ?? 'freellmapi',
-    model: config.model ?? 'auto',
+    provider: config.provider ?? 'kilo',
+    model: config.model ?? 'kilo-auto/free',
     fallbackProvider,
     fallbackModel,
   }

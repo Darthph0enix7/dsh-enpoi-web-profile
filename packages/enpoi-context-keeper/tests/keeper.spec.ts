@@ -96,6 +96,15 @@ describe('enpoi-context-keeper route resolution', () => {
     expect(route.reasoningEffort).toBeUndefined()
   })
 
+  it('defaults to the keyless kilo seed when no Config route is supplied', () => {
+    const ctx = makeCtx({ personas: {} })
+    const route = resolveKeeperRoute(ctx as never, {} as Config)
+    expect(route.provider).toBe('kilo')
+    expect(route.model).toBe('kilo-auto/free')
+    expect(route.fallbackProvider).toBe('antigravity')
+    expect(route.fallbackModel).toBe('gemini-3.7-flash-tiered')
+  })
+
   it('uses the assigned keeper persona as primary, keeping the config fallback', () => {
     const ctx = makeCtx({
       personas: { keeper: { provider: 'antigravity', model: 'gemini-3.7-flash-tiered' } },

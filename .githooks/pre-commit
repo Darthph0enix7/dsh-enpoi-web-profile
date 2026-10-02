@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Refuse to commit live operator state in the tracked profile template.
+# Install with: git config core.hooksPath .githooks  (or symlink into .git/hooks)
+set -euo pipefail
+repo="$(git rev-parse --show-toplevel)"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+if git show :cordis.patch.yml > "$tmp" 2>/dev/null; then
+  if ! node "$repo/scripts/verify-profile-template.mjs" "$tmp"; then
+    echo "pre-commit: refusing to commit operator state in cordis.patch.yml" >&2
+    echo "pre-commit: the tracked file must stay the fresh-install template (see packages/enpoi-capabilities/tests/profile-patch.spec.ts)" >&2
+    exit 1
+  fi
+fi

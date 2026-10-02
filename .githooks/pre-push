@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Refuse to push any ref whose committed cordis.patch.yml carries operator
+# state: the channel branches are what fresh installs clone, so the packaging
+# gate has to run on the outgoing commit, not only on the index.
+set -euo pipefail
+repo="$(git rev-parse --show-toplevel)"
+status=0
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+  tmp="$(mktemp)"
+  if git show "$local_sha:cordis.patch.yml" > "$tmp" 2>/dev/null; then
+    if ! node "$repo/scripts/verify-profile-template.mjs" "$tmp"; then
+      echo "pre-push: refusing to push $local_ref with operator state in cordis.patch.yml" >&2
+      status=1
+    fi
+  fi
+  rm -f "$tmp"
+done
+exit "$status"
