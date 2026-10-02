@@ -406,6 +406,23 @@ describe('danger-list always-allow pins the exact command', () => {
     expect(grantProposalForOutcome(safeProposal, false)).toEqual({ tool: 'bash', pattern: 'docker *' })
   })
 
+  it('path-less patterns match the command word basename and version stem', () => {
+    // The danger scan already treats /bin/rm as `rm`; the structural rule
+    // matcher now does too, so the ask cannot be sidestepped with a path.
+    expect(matchBashPattern('rm', '/bin/rm -rf /tmp/x')).toBe(true)
+    expect(matchBashPattern('rm', '/usr/bin/rmdir /tmp/x')).toBe(false)
+    expect(matchBashPattern('rm *', '/bin/rm -rf /tmp/x')).toBe(true)
+    expect(matchBashPattern('chmod -R *', '/bin/chmod -R 777 /tmp/x')).toBe(true)
+    expect(matchBashPattern('shutdown', '/sbin/shutdown now')).toBe(true)
+    // A version suffix normalizes for membership (`mkfs*` catches mkfs.ext4).
+    expect(matchBashPattern('mkfs*', 'mkfs.ext4 /dev/sdb1')).toBe(true)
+    expect(matchBashPattern('mkfs*', '/sbin/mkfs.ext4 /dev/sdb1')).toBe(true)
+    expect(matchBashPattern('rm*', 'rmdir /x')).toBe(false)
+    // A pattern that names a path keeps literal matching.
+    expect(matchBashPattern('/usr/bin/rm', '/usr/bin/rm -rf /tmp/x')).toBe(true)
+    expect(matchBashPattern('/usr/bin/rm', '/bin/rm -rf /tmp/x')).toBe(false)
+  })
+
   it('the card copy states the exact scope of "Always allow" for a danger rail only', () => {
     const danger = resolvePolicy({ toolName: 'bash', command: 'rm -f /tmp/a', config: EMPTY })
     expect(danger.kind).toBe('ask')
@@ -421,6 +438,126 @@ describe('danger-list always-allow pins the exact command', () => {
     })
     expect((safe as { reason: string }).reason).not.toContain('Always allow')
     expect((safe as { reason: string }).reason).toBe('bash rule "mkdir *" requires approval')
+  })
+})
+
+describe('guard regression corpus (2026-10-02): danger vocabulary × forms', () => {
+  // The shipped danger rules crossed with the forms an operator can write:
+  // bare, flags, absolute path, wrapper shell, expansion, xargs, assignment.
+  // Every one must ask or deny — never fall through to the catch-all.
+  const DANGER_CORPUS: readonly string[] = [
+    'rm /tmp/x',
+    'rm -f /tmp/x',
+    'rm -rf /tmp/x',
+    'rm -r /tmp/x',
+    '/bin/rm /tmp/x',
+    '/usr/bin/rm -rf /tmp/x',
+    'bash -c "rm -f /tmp/x"',
+    "sh -c 'rm -rf /tmp/x'",
+    'timeout 30 bash -c "rm -f /tmp/x"',
+    'env FOO=1 bash -c "rm -f /tmp/x"',
+    'echo $(rm -f /tmp/x)',
+    'echo `rm -f /tmp/x`',
+    '$(rm -f /tmp/x)',
+    'echo /tmp/x | xargs rm',
+    'xargs rm < /tmp/list',
+    'tmp=$(mktemp); rm "$tmp"',
+    'rmdir /tmp/x',
+    '/bin/rmdir /tmp/x',
+    'unlink /tmp/x',
+    '/usr/bin/unlink /tmp/x',
+    'dd if=/dev/zero of=/tmp/x bs=1 count=1',
+    '/bin/dd if=/dev/zero of=/tmp/x',
+    'fdisk /dev/sdb',
+    '/sbin/fdisk /dev/sdb',
+    'mkfs /dev/sdb1',
+    'mkfs.ext4 /dev/sdb1',
+    '/sbin/mkfs.ext4 /dev/sdb1',
+    'shutdown now',
+    '/sbin/shutdown now',
+    'reboot',
+    '/sbin/reboot',
+    'poweroff',
+    '/sbin/poweroff',
+    'halt',
+    '/sbin/halt',
+    'chmod -R 777 /tmp/x',
+    '/bin/chmod -R 777 /tmp/x',
+    'chown -R adam /tmp/x',
+    '/bin/chown -R adam /tmp/x',
+  ]
+
+  // The benign shapes the guard-relax pass (2026-09-30) must keep allowing:
+  // unreadable-file probes, --version invocations, and read-only bash -c probes.
+  const BENIGN_CORPUS: readonly string[] = [
+    'fish --version',
+    'bash --version',
+    'python3 --version',
+    'uname -rm',
+    'echo -rm',
+    'echo "$HOME"',
+    "timeout 60 bash -c 'lspci; ls /dev/nvidia*; df -hT; lsblk; . /etc/os-release; uname -rm; uptime'",
+    'timeout 30 bash -c "lspci"',
+    'ls -la /tmp',
+    'cat /etc/os-release',
+    '. /etc/os-release',
+    'git status',
+    'grep -rn "rm " /tmp/x',
+  ]
+
+  it('every danger form asks or denies (shipped defaults, no grants)', () => {
+    for (const command of DANGER_CORPUS) {
+      const decision = resolvePolicy({ toolName: 'bash', command, config: EMPTY })
+      if (decision.kind === 'allow') throw new Error(`danger form allowed: ${command} (${decision.source})`)
+    }
+  })
+
+  it('every benign form allows (shipped defaults, no grants)', () => {
+    for (const command of BENIGN_CORPUS) {
+      expect(resolvePolicy({ toolName: 'bash', command, config: EMPTY }).kind).toBe('allow')
+    }
+  })
+
+  it('a standing grant never silences a delegated child danger form', () => {
+    // The 2026-10-02 live incident: the global "Allow all rm" proof grant made
+    // a delegated fixer's `rm -f /tmp/enpoi-approval-test` resolve allow with
+    // no ask, so the forwarder never ran. A main session keeps the grant; a
+    // child must surface the ask to the forwarding path.
+    const grants: PermissionPolicyConfig['grants'] = {
+      'g-exact': { id: 'g-exact', tool: 'bash', pattern: 'rm /tmp/opencode/grant-proof-one/victim-1.txt', agent: 'orchestrator', global: true },
+      'g-broad': { id: 'g-broad', tool: 'bash', pattern: 'rm', agent: 'orchestrator', global: true },
+    }
+    const config: PermissionPolicyConfig = { grants }
+    // Main session: the recorded consent still short-circuits.
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm -f /tmp/x', agent: 'orchestrator', config }))
+      .toMatchObject({ kind: 'allow', source: 'grant:pattern:rm' })
+    expect(resolvePolicy({ toolName: 'bash', command: 'rm /tmp/opencode/grant-proof-one/victim-1.txt', agent: 'orchestrator', config }))
+      .toMatchObject({ kind: 'allow', source: 'grant:command' })
+    // Delegated child: the ask must survive for the forwarder (rails first).
+    for (const command of ['rm -f /tmp/enpoi-approval-test', 'rm /tmp/opencode/grant-proof-one/victim-1.txt', 'rm -rf /tmp/x']) {
+      expect(resolvePolicy({ toolName: 'bash', command, agent: 'orchestrator', delegated: true, config }).kind).toBe('ask')
+    }
+    // A safe-verb rule behaves the same way: a child's ask forwards, the
+    // main session's grant still short-circuits.
+    const safeConfig: PermissionPolicyConfig = {
+      bashPatterns: [{ pattern: 'mkdir *', policy: 'ask' }],
+      grants: { g: { id: 'g', tool: 'bash', pattern: 'mkdir *', global: true } },
+    }
+    expect(resolvePolicy({ toolName: 'bash', command: 'mkdir /tmp/x', agent: 'orchestrator', config: safeConfig }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'bash', command: 'mkdir /tmp/x', agent: 'orchestrator', delegated: true, config: safeConfig }).kind).toBe('ask')
+  })
+
+  it('a tool-level grant never silences a delegated child ask either', () => {
+    const config: PermissionPolicyConfig = {
+      tools: { whiteboard_write: 'ask' },
+      defaults: { unknownTools: 'ask' },
+      grants: { g: { id: 'g', tool: 'whiteboard_write' } },
+    }
+    expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', config }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'whiteboard_write', agent: 'orchestrator', delegated: true, config }).kind).toBe('ask')
+    const unknown: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' }, grants: { g: { id: 'g', tool: 'brand_new_tool' } } }
+    expect(resolvePolicy({ toolName: 'brand_new_tool', agent: 'orchestrator', config: unknown }).kind).toBe('allow')
+    expect(resolvePolicy({ toolName: 'brand_new_tool', agent: 'orchestrator', delegated: true, config: unknown }).kind).toBe('ask')
   })
 })
 

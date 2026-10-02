@@ -339,24 +339,37 @@ export function stripEnvPrefixes(subCommand: string): string {
   return i > 0 ? tokens.slice(i).join(' ') : subCommand.trim()
 }
 
+/** A shell word's version stem (`mkfs.ext4` → `mkfs`; `rm` → `rm`). */
+function versionStem(word: string): string {
+  return word.includes('.') ? word.slice(0, word.indexOf('.')) : word
+}
+
 /**
  * One pattern against ONE (env-stripped) sub-command:
- * - bare token (`rm`, no space, no star): argv0 exact match
+ * - bare token (`rm`, no space, no star): the command word matches exactly,
+ *   compared by basename for a path-less pattern (`/bin/rm` is the `rm` rule)
  * - trailing star binds to ARGUMENTS, never the argv0 prefix (`rm*` ≡ `rm`;
- *   `rmdir` stays a separate token — matching the OpenCode list semantics)
- * - pattern containing a space: glob over the full sub-command string
+ *   `rmdir` stays a separate token — matching the OpenCode list semantics) and
+ *   a version suffix normalizes for membership (`mkfs*` catches `mkfs.ext4`)
+ * - pattern containing a space: glob over the full sub-command string, the
+ *   command word compared by basename for a path-less pattern
+ * - a pattern that names a path (`/usr/bin/rm`) keeps literal matching
  */
 export function matchBashPattern(pattern: string, subCommand: string): boolean {
   const p = pattern.trim()
   if (p === '*') return true
   const tokens = subCommand.split(/\s+/)
   const argv0 = tokens[0] ?? ''
-  if (!p.includes(' ') && !p.includes('*')) return argv0 === p
+  const patternWord = p.split(/\s+/)[0] ?? ''
+  const commandWord = patternWord.includes('/') ? argv0 : baseName(argv0)
+  const normalized = commandWord === argv0 ? subCommand : `${commandWord}${subCommand.slice(argv0.length)}`
+  if (!p.includes(' ') && !p.includes('*')) return commandWord === p
   if (p.endsWith('*') && !p.slice(0, -1).includes(' ')) {
-    return argv0 === p.slice(0, -1)
+    const stem = p.slice(0, -1)
+    return commandWord === stem || versionStem(commandWord) === versionStem(stem)
   }
   const rx = new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, ch => (ch === '*' ? '[\\s\\S]*' : `\\${ch}`))}$`)
-  return rx.test(subCommand)
+  return rx.test(normalized)
 }
 
 function policyToDecision(policy: PermissionPolicy, subject: string, source: string): PolicyDecision {
@@ -853,6 +866,15 @@ export interface PolicyResolutionInput {
    * children can only be identified through their subagent descriptor.
    */
   reviewer?: boolean
+  /**
+   * Whether the caller is a delegated child session (a persisted
+   * `parentSession`). A child's ask must reach the parent-forwarding path —
+   * rails, then the parent's own policy or the card — so a config standing
+   * grant never short-circuits it silently; the forwarder owns the child's
+   * grant scope. The parent's own resolution (the rail ceiling) keeps
+   * consulting grants.
+   */
+  delegated?: boolean
   config: PermissionPolicyConfig
   /** Effective sandbox mode; 'read-only' vetoes mutations. */
   sandboxMode?: string
@@ -1049,20 +1071,25 @@ export function evaluateCommandPolicy(command: string, input: PolicyResolutionIn
   }
   if (sawAsk !== null) {
     const who = input.agent
-    if (sawAsk.grantTier === 'pattern' && sawAsk.pattern !== undefined) {
-      // A danger-list ask's default "always allow" pins the exact raw command
-      // (broadAllow present); that exact pin re-allows exactly this command.
-      if (sawAsk.broadAllow !== undefined
-        && grantsShortCircuit(input.toolName, who, input.config.grants, 'pattern', command)) {
-        return { kind: 'allow', source: 'grant:command' }
+    // A delegated child's ask is never absorbed by a config standing grant: it
+    // must surface to the forwarder, which applies the rails and the parent's
+    // own policy or card. A main session keeps the grant short-circuit.
+    if (input.delegated !== true) {
+      if (sawAsk.grantTier === 'pattern' && sawAsk.pattern !== undefined) {
+        // A danger-list ask's default "always allow" pins the exact raw command
+        // (broadAllow present); that exact pin re-allows exactly this command.
+        if (sawAsk.broadAllow !== undefined
+          && grantsShortCircuit(input.toolName, who, input.config.grants, 'pattern', command)) {
+          return { kind: 'allow', source: 'grant:command' }
+        }
+        // The explicit broad action pins the rule-level pattern.
+        if (grantsShortCircuit(input.toolName, who, input.config.grants, 'pattern', sawAsk.pattern)) {
+          return { kind: 'allow', source: `grant:pattern:${sawAsk.pattern}` }
+        }
       }
-      // The explicit broad action pins the rule-level pattern.
-      if (grantsShortCircuit(input.toolName, who, input.config.grants, 'pattern', sawAsk.pattern)) {
-        return { kind: 'allow', source: `grant:pattern:${sawAsk.pattern}` }
+      if (sawAsk.grantTier === 'tool' && grantsShortCircuit(input.toolName, who, input.config.grants, 'tool', undefined)) {
+        return { kind: 'allow', source: 'grant:tool' }
       }
-    }
-    if (sawAsk.grantTier === 'tool' && grantsShortCircuit(input.toolName, who, input.config.grants, 'tool', undefined)) {
-      return { kind: 'allow', source: 'grant:tool' }
     }
     return sawAsk
   }
@@ -1083,7 +1110,7 @@ export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput
   if (agentPolicy !== undefined) {
     if (agentPolicy === 'deny') return { kind: 'deny', reason: `agent policy denies ${toolName}`, source: `agent:${agent}` }
     if (agentPolicy === 'ask') {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
+      if (input.delegated !== true && grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
         return { kind: 'allow', source: 'grant:tool' }
       }
       return { kind: 'ask', reason: `agent policy asks for ${toolName}`, source: `agent:${agent}`, grantTier: 'tool' }
@@ -1094,7 +1121,7 @@ export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput
   if (globalPolicy !== undefined) {
     if (globalPolicy === 'deny') return { kind: 'deny', reason: `operator policy denies ${toolName}`, source: 'matrix:global' }
     if (globalPolicy === 'ask') {
-      if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
+      if (input.delegated !== true && grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
         return { kind: 'allow', source: 'grant:tool' }
       }
       return { kind: 'ask', reason: `operator policy asks for ${toolName}`, source: 'matrix:global', grantTier: 'tool' }
@@ -1109,7 +1136,7 @@ export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput
   const fallback: PermissionPolicy = input.config.defaults?.unknownTools ?? 'ask'
   if (fallback === 'deny') return { kind: 'deny', reason: `unconfigured tool ${toolName} denied by default`, source: 'defaults' }
   if (fallback === 'ask') {
-    if (grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
+    if (input.delegated !== true && grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
       return { kind: 'allow', source: 'grant:tool' }
     }
     return { kind: 'ask', reason: `unconfigured tool ${toolName} requires approval (default)`, source: 'defaults', grantTier: 'tool' }

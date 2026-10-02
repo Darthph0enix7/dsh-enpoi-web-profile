@@ -1484,6 +1484,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       ? (ctx.get('customToolCommands') as { render?: (name: string, args: unknown) => { command?: string } | undefined } | undefined)
         ?.render?.(exec.name, exec.arguments)?.command
       : undefined
+    // A delegated child is identified once per call: its policy resolution
+    // must not consume a config standing grant, because the ask has to reach
+    // the parent-forwarding path (rails, parent policy, or card) rather than
+    // run silently on a grant the main session recorded.
+    const delegated = delegatedChildOf(exec.agent as ChildAgentLike | undefined)
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
@@ -1494,6 +1499,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // Computed only for the gated tool: the descriptor scan is unnecessary
       // work for every other call.
       reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
+      delegated: delegated !== undefined,
       config,
       sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? [],
@@ -1511,7 +1517,6 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // the parent's existing machinery. The child suspends on this await and a
       // rejection returns as its corrective tool error; rails and standing
       // consent are decided in forwarding.ts, never here.
-      const delegated = delegatedChildOf(exec.agent as ChildAgentLike | undefined)
       if (delegated !== undefined) {
         const resolution = await approvalForwarding.forward({
           agent: exec.agent as ChildAgentLike | undefined,

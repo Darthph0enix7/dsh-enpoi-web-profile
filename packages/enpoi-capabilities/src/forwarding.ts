@@ -363,9 +363,14 @@ function isOutsideWorkspace(path: string, cwd: string | undefined): boolean {
   return rel === '..' || rel.startsWith(`..${'/'}`) || isAbsolute(rel)
 }
 
+/** The basename of one shell word (`/usr/bin/rm` → `rm`). */
+function baseName(word: string): string {
+  return word.slice(word.lastIndexOf('/') + 1)
+}
+
 /** Whether one `rm`/`rmdir` invocation is recursive or forced. */
 function isRecursiveDelete(argv: readonly string[]): boolean {
-  const argv0 = argv[0]
+  const argv0 = baseName(argv[0] ?? '')
   if (argv0 === 'rmdir') return true
   return argv.slice(1).some((token) => {
     if (token === '--') return false
@@ -408,6 +413,9 @@ function railOfBash(command: string): RailHit | undefined {
     const sub = stripEnvPrefixes(rawSub).trim()
     if (sub === '') continue
     const argv = sub.split(/\s+/)
+    // Classify by the command word's basename: `/bin/rm` is the `rm` rail,
+    // `/usr/bin/sudo` is the privilege-escalation rail.
+    if (argv.length > 0) argv[0] = baseName(argv[0] ?? '')
     const argv0 = argv[0] ?? ''
     if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: 'privilege-escalation', evidence: sub }
     if ((argv0 === 'rm' || argv0 === 'rmdir') && isRecursiveDelete(argv)) return { rail: 'recursive-delete', evidence: sub }

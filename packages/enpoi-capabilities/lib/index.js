@@ -160,17 +160,24 @@ function stripEnvPrefixes(subCommand) {
   while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? "")) i += 1;
   return i > 0 ? tokens.slice(i).join(" ") : subCommand.trim();
 }
+function versionStem(word) {
+  return word.includes(".") ? word.slice(0, word.indexOf(".")) : word;
+}
 function matchBashPattern(pattern, subCommand) {
   const p = pattern.trim();
   if (p === "*") return true;
   const tokens = subCommand.split(/\s+/);
   const argv0 = tokens[0] ?? "";
-  if (!p.includes(" ") && !p.includes("*")) return argv0 === p;
+  const patternWord = p.split(/\s+/)[0] ?? "";
+  const commandWord = patternWord.includes("/") ? argv0 : baseName(argv0);
+  const normalized = commandWord === argv0 ? subCommand : `${commandWord}${subCommand.slice(argv0.length)}`;
+  if (!p.includes(" ") && !p.includes("*")) return commandWord === p;
   if (p.endsWith("*") && !p.slice(0, -1).includes(" ")) {
-    return argv0 === p.slice(0, -1);
+    const stem = p.slice(0, -1);
+    return commandWord === stem || versionStem(commandWord) === versionStem(stem);
   }
   const rx = new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, (ch) => ch === "*" ? "[\\s\\S]*" : `\\${ch}`)}$`);
-  return rx.test(subCommand);
+  return rx.test(normalized);
 }
 function mcpServerNameOf(id, def) {
   return typeof def?.serverName === "string" && def.serverName !== "" ? def.serverName : id.replace(/-mcp$/, "");
@@ -541,16 +548,18 @@ function evaluateCommandPolicy(command, input2) {
   }
   if (sawAsk !== null) {
     const who = input2.agent;
-    if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0) {
-      if (sawAsk.broadAllow !== void 0 && grantsShortCircuit(input2.toolName, who, input2.config.grants, "pattern", command)) {
-        return { kind: "allow", source: "grant:command" };
+    if (input2.delegated !== true) {
+      if (sawAsk.grantTier === "pattern" && sawAsk.pattern !== void 0) {
+        if (sawAsk.broadAllow !== void 0 && grantsShortCircuit(input2.toolName, who, input2.config.grants, "pattern", command)) {
+          return { kind: "allow", source: "grant:command" };
+        }
+        if (grantsShortCircuit(input2.toolName, who, input2.config.grants, "pattern", sawAsk.pattern)) {
+          return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
+        }
       }
-      if (grantsShortCircuit(input2.toolName, who, input2.config.grants, "pattern", sawAsk.pattern)) {
-        return { kind: "allow", source: `grant:pattern:${sawAsk.pattern}` };
+      if (sawAsk.grantTier === "tool" && grantsShortCircuit(input2.toolName, who, input2.config.grants, "tool", void 0)) {
+        return { kind: "allow", source: "grant:tool" };
       }
-    }
-    if (sawAsk.grantTier === "tool" && grantsShortCircuit(input2.toolName, who, input2.config.grants, "tool", void 0)) {
-      return { kind: "allow", source: "grant:tool" };
     }
     return sawAsk;
   }
@@ -563,7 +572,7 @@ function resolveToolPolicy(toolName, input2) {
   if (agentPolicy !== void 0) {
     if (agentPolicy === "deny") return { kind: "deny", reason: `agent policy denies ${toolName}`, source: `agent:${agent}` };
     if (agentPolicy === "ask") {
-      if (grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
+      if (input2.delegated !== true && grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
         return { kind: "allow", source: "grant:tool" };
       }
       return { kind: "ask", reason: `agent policy asks for ${toolName}`, source: `agent:${agent}`, grantTier: "tool" };
@@ -574,7 +583,7 @@ function resolveToolPolicy(toolName, input2) {
   if (globalPolicy !== void 0) {
     if (globalPolicy === "deny") return { kind: "deny", reason: `operator policy denies ${toolName}`, source: "matrix:global" };
     if (globalPolicy === "ask") {
-      if (grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
+      if (input2.delegated !== true && grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
         return { kind: "allow", source: "grant:tool" };
       }
       return { kind: "ask", reason: `operator policy asks for ${toolName}`, source: "matrix:global", grantTier: "tool" };
@@ -588,7 +597,7 @@ function resolveToolPolicy(toolName, input2) {
   const fallback = input2.config.defaults?.unknownTools ?? "ask";
   if (fallback === "deny") return { kind: "deny", reason: `unconfigured tool ${toolName} denied by default`, source: "defaults" };
   if (fallback === "ask") {
-    if (grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
+    if (input2.delegated !== true && grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
       return { kind: "allow", source: "grant:tool" };
     }
     return { kind: "ask", reason: `unconfigured tool ${toolName} requires approval (default)`, source: "defaults", grantTier: "tool" };
@@ -755,13 +764,14 @@ var init_policy = __esm({
       // Attach/detach only decide which advertised rows this session MAY call —
       // every row keeps its own policy — and both directions are reversible.
       tool_groups: "allow",
-      // Harness introspection is read-only, but the seat table below keeps
-      // orchestrator and sysadmin out (creator's specialty); this default decides
-      // the creator seat and any future seat that advertises the tools.
+      // Harness introspection is read-only. The creator tool group keeps it off
+      // the orchestrator and sysadmin advertised surfaces; this default decides
+      // the creator seat (and any future seat that advertises the tools).
       cordis_inspect_list: "allow",
       cordis_inspect_query: "allow",
-      // Harness authoring: the seat table already restricts the CALL to the creator
-      // seat (pre-execute denies orchestrator/sysadmin with the seat message). The
+      // Harness authoring: the creator tool group presents it to the creator seat
+      // alone, and the seat table in this file backs that absence at pre-execute
+      // (orchestrator/sysadmin get the seat denial if a call somehow arrives). The
       // creator persona advertises this tool as its specialty; carding the seat
       // whose job is the change itself contradicts self-sufficiency.
       plugin_manager: "allow",
@@ -21456,8 +21466,11 @@ function isOutsideWorkspace(path, cwd) {
   const rel = relative(cwd, absolute);
   return rel === ".." || rel.startsWith(`..${"/"}`) || isAbsolute2(rel);
 }
+function baseName2(word) {
+  return word.slice(word.lastIndexOf("/") + 1);
+}
 function isRecursiveDelete(argv) {
-  const argv0 = argv[0];
+  const argv0 = baseName2(argv[0] ?? "");
   if (argv0 === "rmdir") return true;
   return argv.slice(1).some((token) => {
     if (token === "--") return false;
@@ -21490,6 +21503,7 @@ function railOfBash(command) {
     const sub = stripEnvPrefixes(rawSub).trim();
     if (sub === "") continue;
     const argv = sub.split(/\s+/);
+    if (argv.length > 0) argv[0] = baseName2(argv[0] ?? "");
     const argv0 = argv[0] ?? "";
     if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: "privilege-escalation", evidence: sub };
     if ((argv0 === "rm" || argv0 === "rmdir") && isRecursiveDelete(argv)) return { rail: "recursive-delete", evidence: sub };
@@ -22989,6 +23003,7 @@ ${rows.map(renderMountRow).join("\n")}`;
     const config3 = readPermissionConfig();
     const isBash = exec.name === "bash";
     const customCommand = !isBash && exec.name.startsWith("custom_") ? ctx.get("customToolCommands")?.render?.(exec.name, exec.arguments)?.command : void 0;
+    const delegated = delegatedChildOf(exec.agent);
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
@@ -22999,6 +23014,7 @@ ${rows.map(renderMountRow).join("\n")}`;
       // Computed only for the gated tool: the descriptor scan is unnecessary
       // work for every other call.
       reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
+      delegated: delegated !== void 0,
       config: config3,
       sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? []
@@ -23007,7 +23023,6 @@ ${rows.map(renderMountRow).join("\n")}`;
     if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
     const approvalPolicy = readApprovalPolicy(exec.agent);
     if (approvalPolicy?.policy === "never") {
-      const delegated = delegatedChildOf(exec.agent);
       if (delegated !== void 0) {
         const resolution = await approvalForwarding.forward({
           agent: exec.agent,
