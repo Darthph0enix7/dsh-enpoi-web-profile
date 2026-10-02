@@ -87,10 +87,24 @@ if (free === undefined) {
 }
 
 // The default seat must name a paid route and no chain fallback.
-const seat = blockOf(text, '\n- id: agent-default-model\n', 0)
+let seat = blockOf(text, '\n- id: agent-default-model\n', 0)
 if (seat === undefined) {
-  console.error('disable-free-tier: no agent-default-model row — cannot pin the default seat')
-  process.exit(1)
+  // Repair on write: a settings write can re-serialize the document without
+  // this row (observed 2026-10-02, which blocked the boot). Insert it before
+  // the second top-level row so the seat invariant survives.
+  const secondRow = text.indexOf('\n- id: ', 1)
+  if (secondRow === -1) {
+    console.error('disable-free-tier: no agent-default-model row and no insertion point — cannot pin the default seat')
+    process.exit(1)
+  }
+  const row = `\n- id: agent-default-model\n  name: "@deepseek-ai/dsh-agent-default-model"\n  config:\n    provider: ${PAID.provider}\n    model: ${PAID.model}\n`
+  text = text.slice(0, secondRow) + row + text.slice(secondRow)
+  seat = blockOf(text, '\n- id: agent-default-model\n', 0)
+  if (seat === undefined) {
+    console.error('disable-free-tier: seat row still missing after insertion')
+    process.exit(1)
+  }
+  changed.push('seat: inserted the agent-default-model row')
 }
 let seatBody = text.slice(seat.start + 1, seat.end)
 const beforeSeat = seatBody
