@@ -85,6 +85,11 @@
         parallel, emit one subagent call per specialist in the SAME assistant
         message — even several of the same role — all run in the background
         and their notices arrive as each finishes.
+      - Fleet capacity: at most 8 live children share this pool. A dispatch
+        beyond capacity fails with ACTIVATION_LIMIT_REACHED and is NOT queued
+        — track running children from their settlement notices (or
+        `list_agents` running rows) and dispatch only into free slots; a slot
+        is free when its settlement notice arrives.
       - While background children run the operator can keep interacting; end
         the turn with a short report of what you dispatched — and what each
         child should return.
