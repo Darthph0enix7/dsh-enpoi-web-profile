@@ -88,8 +88,8 @@ function keeperEnabled(ctx) {
   }
 }
 var Config = Schema.object({
-  provider: live(Schema.string().default("freellmapi")),
-  model: live(Schema.string().default("auto")),
+  provider: live(Schema.string().default("kilo")),
+  model: live(Schema.string().default("kilo-auto/free")),
   fallbackProvider: live(Schema.string().default("antigravity")),
   fallbackModel: live(Schema.string().default("gemini-3.7-flash-tiered")),
   leaseMs: live(Schema.number().default(45e3)),
@@ -262,8 +262,8 @@ function resolveKeeperRoute(ctx, config) {
   } catch {
   }
   return {
-    provider: config.provider ?? "freellmapi",
-    model: config.model ?? "auto",
+    provider: config.provider ?? "kilo",
+    model: config.model ?? "kilo-auto/free",
     fallbackProvider,
     fallbackModel
   };
