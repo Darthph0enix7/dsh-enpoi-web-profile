@@ -200,7 +200,53 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   // unattended run must not park on the unknown-tools ask for it. Availability
   // (per-role tools.available / restrict) still gates which agents hold it.
   present: 'allow',
+  // Integrated session/orchestration state (operator decision 2026-10-02):
+  // goals, planning mode, and the delegation drivers act on this session's own
+  // state or on child sessions the same agent already spawns — no filesystem,
+  // network, or fleet effect beyond the integrated loop, so they must not park
+  // an unattended run on an approval card. Observed live: the goal tools
+  // carded the orchestrator for state it owns.
+  create_goal: 'allow', get_goal: 'allow', update_goal: 'allow',
+  exit_plan_mode: 'allow',
+  ralph: 'allow', workflow: 'allow',
+  // On-demand tool groups: list/attach/detach session-scoped tool families.
+  // Attach/detach only decide which advertised rows this session MAY call —
+  // every row keeps its own policy — and both directions are reversible.
+  tool_groups: 'allow',
+  // Harness introspection is read-only, but the seat table below keeps
+  // orchestrator and sysadmin out (creator's specialty); this default decides
+  // the creator seat and any future seat that advertises the tools.
+  cordis_inspect_list: 'allow', cordis_inspect_query: 'allow',
+  // Harness authoring: the seat table already restricts the CALL to the creator
+  // seat (pre-execute denies orchestrator/sysadmin with the seat message). The
+  // creator persona advertises this tool as its specialty; carding the seat
+  // whose job is the change itself contradicts self-sufficiency.
+  plugin_manager: 'allow',
+  // Council registration writes the shared council registry (spawn specs,
+  // personas, routes) — a genuine cross-session mutation, so it stays an
+  // explicit ask instead of silently riding defaults.unknownTools.
+  council_register: 'ask',
 }
+
+/**
+ * Tool-name families deliberately left to `defaults.unknownTools` (shipped
+ * 'ask') instead of an explicit row above. The completeness guard
+ * (`tests/tool-defaults-completeness.spec.ts`) requires every tool in the tool-inventory
+ * fixtures to have an explicit SHIPPED_TOOL_DEFAULTS row OR match one of these
+ * prefixes, so a new first-party or plugin tool cannot silently fall through
+ * unaccounted; adding a tool means deciding its default or documenting a new
+ * family exemption here.
+ */
+export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; reason: string }[] = Object.freeze([
+  {
+    prefix: 'custom_',
+    reason: 'operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate',
+  },
+  {
+    prefix: 'mcp__',
+    reason: 'tools of mounted MCP servers are third-party surface; the MCP wildcard ladder and the unknown-tools ask gate them until the operator trusts a row or a server wildcard',
+  },
+])
 
 export const SHIPPED_BASH_PATTERNS: BashPattern[] = [
   { pattern: 'git *', policy: 'allow' },

@@ -84,10 +84,13 @@ describe('root session in Full access (approval never + danger-full-access)', ()
     }
   })
 
-  it('resolves an unknown introspection tool ask as ALLOWED (cordis_inspect_list)', async () => {
+  it('resolves an unconfigured tool ask as ALLOWED (some_unknown_mutation)', async () => {
+    // cordis_inspect_list used to be the unknown-tool fixture; it now ships an
+    // explicit allow row (operator decision 2026-10-02), so the Full-access
+    // conversion needs a genuinely unknown name to keep testing the ask path.
     const { call } = harness()
     const decision = await call(
-      { name: 'cordis_inspect_list', arguments: {}, agent: agentWith(FULL_ACCESS_EVENTS) },
+      { name: 'some_unknown_mutation', arguments: {}, agent: agentWith(FULL_ACCESS_EVENTS) },
       async () => ({ kind: 'allow' }),
     )
     expect(decision).toEqual({ kind: 'allow', reason: FULL_ACCESS_ASK_REASON })

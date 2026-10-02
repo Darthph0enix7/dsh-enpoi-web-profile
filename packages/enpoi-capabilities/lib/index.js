@@ -640,7 +640,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_TOOL_DEFAULTS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -738,8 +738,48 @@ var init_policy = __esm({
       // Delivery only declares deliverables; no filesystem or network effect. An
       // unattended run must not park on the unknown-tools ask for it. Availability
       // (per-role tools.available / restrict) still gates which agents hold it.
-      present: "allow"
+      present: "allow",
+      // Integrated session/orchestration state (operator decision 2026-10-02):
+      // goals, planning mode, and the delegation drivers act on this session's own
+      // state or on child sessions the same agent already spawns — no filesystem,
+      // network, or fleet effect beyond the integrated loop, so they must not park
+      // an unattended run on an approval card. Observed live: the goal tools
+      // carded the orchestrator for state it owns.
+      create_goal: "allow",
+      get_goal: "allow",
+      update_goal: "allow",
+      exit_plan_mode: "allow",
+      ralph: "allow",
+      workflow: "allow",
+      // On-demand tool groups: list/attach/detach session-scoped tool families.
+      // Attach/detach only decide which advertised rows this session MAY call —
+      // every row keeps its own policy — and both directions are reversible.
+      tool_groups: "allow",
+      // Harness introspection is read-only, but the seat table below keeps
+      // orchestrator and sysadmin out (creator's specialty); this default decides
+      // the creator seat and any future seat that advertises the tools.
+      cordis_inspect_list: "allow",
+      cordis_inspect_query: "allow",
+      // Harness authoring: the seat table already restricts the CALL to the creator
+      // seat (pre-execute denies orchestrator/sysadmin with the seat message). The
+      // creator persona advertises this tool as its specialty; carding the seat
+      // whose job is the change itself contradicts self-sufficiency.
+      plugin_manager: "allow",
+      // Council registration writes the shared council registry (spawn specs,
+      // personas, routes) — a genuine cross-session mutation, so it stays an
+      // explicit ask instead of silently riding defaults.unknownTools.
+      council_register: "ask"
     };
+    SHIPPED_TOOL_DEFAULT_EXEMPTIONS = Object.freeze([
+      {
+        prefix: "custom_",
+        reason: "operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate"
+      },
+      {
+        prefix: "mcp__",
+        reason: "tools of mounted MCP servers are third-party surface; the MCP wildcard ladder and the unknown-tools ask gate them until the operator trusts a row or a server wildcard"
+      }
+    ]);
     SHIPPED_BASH_PATTERNS = [
       { pattern: "git *", policy: "allow" },
       { pattern: "rm", policy: "ask" },
