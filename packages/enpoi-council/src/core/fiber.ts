@@ -107,6 +107,19 @@ export const COUNCIL_DENIED_TOOLS = [
   // Seats request evidence through the epoch broker (NEED_EVIDENCE), not the
   // synchronous request_evidence tool — one evidence ingress per seat.
   'request_evidence',
+  // Harness authoring is the creator seat's own surface, and reviewer-exec is
+  // a reviewer-seat capability: a council child inherits its parent's preset
+  // (the pre-execute seat guard refuses the trio to every orchestrator/
+  // sysadmin parent) and the capabilities advertise filter already strips
+  // `review_run` from every council catalog because the agent role is the
+  // parent preset. Naming all four here keeps the seat catalog honest even
+  // when a seat label resolves to a seat-restricted tool group or a future
+  // advertise pass turns reviewer-aware; a council seat's protocol is
+  // deliberation, not workspace test execution.
+  'plugin_manager',
+  'cordis_inspect_list',
+  'cordis_inspect_query',
+  'review_run',
 ]
 
 // Evidence fencing: deliberation seats additionally lose ALL retrieval tools.

@@ -48,7 +48,14 @@ var ORACLE_TOOL_FILTER = {
     "ask_user_question",
     "send_message",
     "interrupt_agent",
-    "list_agents"
+    "list_agents",
+    // Harness authoring is the creator seat's own surface; the seat guard
+    // refuses it to an orchestrator/sysadmin-parented oracle child. `review_run`
+    // stays available: the Oracle IS a reviewer seat (REVIEW_ROLES /
+    // descriptor persona), and `subagent` stays by design (its own researchers).
+    "plugin_manager",
+    "cordis_inspect_list",
+    "cordis_inspect_query"
   ]
 };
 var EVIDENCE_RESEARCH_PERSONA = [
@@ -805,9 +812,17 @@ var EVIDENCE_CHILD_DENY = [
   "memory_rescind",
   "memory_confirm",
   "interrupt_agent",
-  "list_agents"
+  "list_agents",
+  // Harness authoring (seat guard) and reviewer-exec (the research child is not
+  // a reviewer seat): refused at execution, so absent from the catalog.
+  "plugin_manager",
+  "cordis_inspect_list",
+  "cordis_inspect_query",
+  "review_run"
 ];
 export {
+  EVIDENCE_CHILD_DENY,
+  ORACLE_TOOL_FILTER,
   OracleTimeoutError,
   apply,
   buildInitialPackage,

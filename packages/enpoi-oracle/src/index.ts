@@ -50,7 +50,7 @@ const ORACLE_PERSONA = [
 ].join('\n')
 
 /** Read-only surface for the oracle fiber. */
-const ORACLE_TOOL_FILTER = {
+export const ORACLE_TOOL_FILTER = {
   // Read-only review surface. Passed UNCONDITIONALLY: the fork's
   // `tools.restrict()` skips unknown deny names, while the previous
   // `.filter(name => ctx.tools.get(name) !== undefined)` guard dropped every
@@ -68,6 +68,11 @@ const ORACLE_TOOL_FILTER = {
     'ralph', 'workflow', 'job_output', 'job_list', 'job_kill',
     'ask_user_question',
     'send_message', 'interrupt_agent', 'list_agents',
+    // Harness authoring is the creator seat's own surface; the seat guard
+    // refuses it to an orchestrator/sysadmin-parented oracle child. `review_run`
+    // stays available: the Oracle IS a reviewer seat (REVIEW_ROLES /
+    // descriptor persona), and `subagent` stays by design (its own researchers).
+    'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query',
   ],
 }
 
@@ -1000,11 +1005,14 @@ function registerOracleTools(ctx: Context, root: Context): void {
 }
 
 /** Anti-leak fence for evidence research children (never relay to the parent inbox). */
-const EVIDENCE_CHILD_DENY = [
+export const EVIDENCE_CHILD_DENY = [
   'send_message', 'oracle_review', 'request_evidence', 'dispatch_task', 'subagent', 'subagent_fork',
   'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'council_register',
   'bash', 'edit', 'write', 'str_replace_editor', 'todo_write', 'plan_mode', 'goal',
   'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'workflow', 'ralph',
   'job_output', 'job_list', 'job_kill', 'skill', 'ask_user_question', 'memory_save',
   'memory_search', 'memory_rescind', 'memory_confirm', 'interrupt_agent', 'list_agents',
+  // Harness authoring (seat guard) and reviewer-exec (the research child is not
+  // a reviewer seat): refused at execution, so absent from the catalog.
+  'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query', 'review_run',
 ]

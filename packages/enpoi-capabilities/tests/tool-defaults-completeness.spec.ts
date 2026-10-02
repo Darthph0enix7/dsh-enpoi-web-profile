@@ -154,7 +154,9 @@ describe('tool-defaults completeness guard', () => {
   it('matches the client permissions mirror digest when the harness checkout is present', () => {
     if (!existsSync(CLIENT_MIRROR_FILE)) return
     const mirror = readFileSync(CLIENT_MIRROR_FILE, 'utf8')
-    const embedded = /export const HOST_DEFAULTS_DIGEST = "([0-9a-f]{64})"/.exec(mirror)?.[1]
+    // The generator renders lint-clean single-quoted literals; accept either
+    // quote so a pre-format mirror still parses.
+    const embedded = /export const HOST_DEFAULTS_DIGEST = ['"]([0-9a-f]{64})['"]/.exec(mirror)?.[1]
     expect(embedded, `${CLIENT_MIRROR_FILE} carries no HOST_DEFAULTS_DIGEST`).toBeDefined()
     const defaults: Record<string, string> = {}
     for (const key of Object.keys(SHIPPED_TOOL_DEFAULTS).sort()) {
