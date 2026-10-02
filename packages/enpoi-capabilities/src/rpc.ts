@@ -124,11 +124,13 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   }
 
   /**
-   * The servers one session has mounted (always-on servers included), read
-   * from the session-scoped mount service. Failure posture is fail-open: an
-   * unavailable service answers an empty list.
-   * @param sessionId - the session whose mounts are read.
-   * @returns the mounted rows with tool counts.
+   * The OPERATOR view of one session's MCP rows: every configured server,
+   * switched-off (master-toggle) servers included and marked `enabled:false`,
+   * with the honest mount state. The session header chip filters it to
+   * `mounted`. Failure posture is fail-open: an unavailable service answers an
+   * empty list.
+   * @param sessionId - the session whose rows are read.
+   * @returns the rows with tool counts.
    */
   @Remote
   async mcpMounts(sessionId: string): Promise<{ mounts: Array<{ id: string; serverName: string; toolCount: number }> }> {
@@ -144,9 +146,11 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   }
 
   /**
-   * Mount one server for one session (the operator's enable control on the
-   * session surface). On-demand servers connect on first use; always-on
-   * servers are already connected.
+   * Pull one server into one session (the session-scope enable on the session
+   * surface). Any configured server may be pulled, including one the operator
+   * switched OFF by default — the master switch sets the default world, not a
+   * refusal. On-demand and pulled switched-off servers connect on first use;
+   * default-world always-on servers are already connected.
    * @param sessionId - the session to mount for.
    * @param server - the catalog server id.
    * @returns whether the mount succeeded, with the reason on failure.
@@ -168,9 +172,10 @@ export class EnpoiCapabilitiesService extends TypertRemoteService {
   }
 
   /**
-   * Unmount one server from one session (the operator's close control on the
+   * Release one server from one session (the operator's close control on the
    * session surface). The shared connection is disposed when no session holds
-   * it and the server is on-demand.
+   * it and the server is not in the default world (on-demand or switched off
+   * by default); a default-world always-on server keeps its connection.
    * @param sessionId - the session to unmount from.
    * @param server - the catalog server id.
    * @returns whether the unmount succeeded, with the reason on failure.

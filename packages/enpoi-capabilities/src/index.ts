@@ -39,7 +39,8 @@ import {
 } from './policy'
 import { canFenceMcpWrites, type McpCatalogSettings, type SettingsPathOp } from './mcp-tools'
 import {
-  buildMountRows, isOnDemand, mcpMountsProjection, mcpServerOfToolName, MCP_MOUNTS_EVENT,
+  buildMountRows, mcpDefaultWorldIds, mcpDisabledReason, mcpMountsProjection,
+  mcpServerOfToolName, mcpToolDenyReason, mcpVisibleIds, mcpWorldOf, MCP_MOUNTS_EVENT,
   serverModeOf, serverNameOf,
   type McpMountRow, type McpServerRecord,
 } from './mcp-mounts'
@@ -95,7 +96,8 @@ export interface OrchestrationMcpServer {
   /**
    * `on-demand` servers are never auto-mounted: the agent mounts them for its
    * session with the `mcp` tool (or a skill's `mcp:` hint). Absent = always-on
-   * (the pre-existing behavior).
+   * (the pre-existing behavior). Both modes require the master allow
+   * `capabilities.mcp[id] === true`.
    */
   mode?: 'always-on' | 'on-demand'
 }
@@ -291,9 +293,18 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }).catch(() => {})
 
-  // 1. Invariant B1: Monotonic pre-dispatch tool execution guard
+  // 1. Invariant B1: Monotonic pre-dispatch tool execution guard. The session
+  // level is authoritative (defaults ⊕ its overrides) and a server pulled into
+  // that session's MCP world stays callable even when the master switch is off.
   const disposeGuard = ctx.tools.guard((exec) => {
-    const decision = evaluateToolCall(exec.name, exec.arguments as Record<string, unknown> | undefined, initialCapabilitiesState(getGlobalDefaults()), readMcpCatalogDefs())
+    const guardSession = (exec.agent as { session?: { id?: string } } | undefined)?.session
+    const decision = evaluateToolCall(
+      exec.name,
+      exec.arguments as Record<string, unknown> | undefined,
+      effectiveStateFor(guardSession),
+      readMcpCatalogDefs(),
+      sessionMountsAccess?.world(guardSession),
+    )
     if (!decision.allowed) {
       return decision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.`
     }
@@ -308,9 +319,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
    */
   let sessionMountsAccess: {
     catalog: () => Record<string, McpServerRecord>
-    effectiveMounted: (session: { id: string }) => Set<string>
-    isToolMounted: (session: { id: string }, toolName: string) => boolean
-    list: (session: { id: string }) => McpMountRow[]
+    /** The master switch: global `capabilities.mcp[id] === true`. */
+    masterEnabled: () => Set<string>
+    /** The session's MCP world (`mcpWorldOf`); the default world without one. */
+    world: (session: { id?: string } | undefined) => Set<string>
+    /** The pre-execute denial for one tool name ('' when the call is allowed). */
+    toolDenyReason: (session: { id: string }, toolName: string) => string
+    list: (session: { id: string }, agentFacing: boolean) => McpMountRow[]
     mount: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string; toolCount: number }>
     unmount: (session: { id: string }, id: string) => Promise<{ ok: boolean; reason: string }>
   } | undefined
@@ -348,6 +363,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }
 
+  /**
+   * Late-bound MCP pull/release for a session override write (assigned by the
+   * mcp-client block): the center's "This session" switch on a switched-off
+   * always-on server must mount it, and switching it off must release it.
+   */
+  let syncMcpOverride: ((session: OverrideSessionLike, id: string, value: boolean | null) => void) | undefined
+
   /** The session-scoped override service consumed by the RPC and the filters. */
   const capabilityOverridesService = {
     read: (session: OverrideSessionLike): CapabilityOverrideRecord => readOverrides(session),
@@ -355,6 +377,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       const next = withCapabilityOverride(readOverrides(session), kind, id, value)
       setOverrides(session, next)
       process.stderr.write(`[enpoi-capabilities] capability override: session ${session.id} ${kind}.${id}=${value === null ? 'default' : String(value)}\n`)
+      if (kind === 'mcp') {
+        try {
+          syncMcpOverride?.(session, id, value)
+        } catch (error) {
+          process.stderr.write(`[enpoi-capabilities] mcp override sync failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        }
+      }
       return next
     },
   }
@@ -416,15 +445,18 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       mcpServerNames: readMcpServerNames() ?? [],
     }))
     if (advertise.size < kept.length) kept = kept.filter(tool => advertise.has(tool.name))
-    // 1f. MCP on-demand honesty: an on-demand server's tools are absent from a
-    // session that has not mounted it. Model-visible ⟺ mounted ⟺ logged: the
-    // drop is announced once per surface signature.
+    // 1f. MCP honesty: a server's tools are absent from a session unless the
+    // server is in that session's MCP world — the default world (master-on
+    // always-on) or a pull (skill `mcp:` hint, explicit mount, session switch).
+    // A switched-off server the session has not pulled in is therefore absent
+    // from its surface ("the agent doesn't even see it"). Model-visible ⟺ in
+    // world ⟺ logged: the drop is announced once per surface signature.
     const scopeSession = (scope as { session?: { id?: string } } | undefined)?.session
     if (sessionMountsAccess !== undefined && scopeSession !== undefined && typeof scopeSession.id === 'string') {
-      const mounted = sessionMountsAccess.effectiveMounted(scopeSession as { id: string })
+      const world = sessionMountsAccess.world(scopeSession as { id: string })
       const hidden = new Set(
         Object.entries(sessionMountsAccess.catalog())
-          .filter(([id, def]) => isOnDemand(def) && !mounted.has(id))
+          .filter(([id]) => !world.has(id))
           .map(([id, def]) => serverNameOf(id, def)),
       )
       if (hidden.size > 0) {
@@ -437,7 +469,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           const signature = `session=${scopeSession.id} hidden=[${[...hidden].join(',')}]`
           if (signature !== lastOnDemandSurfaceSignature) {
             lastOnDemandSurfaceSignature = signature
-            process.stderr.write(`[enpoi-capabilities] mcp on-demand surface: ${signature}\n`)
+            process.stderr.write(`[enpoi-capabilities] mcp world surface: ${signature}\n`)
           }
         }
       }
@@ -617,28 +649,39 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       void fiber.dispose().catch(() => {})
     }
 
-    /** The allowed set (`capabilities.mcp[id] === true`). */
-    function allowedServers(): Set<string> {
+    /** The master switch: the operator's global `capabilities.mcp[id] === true`. */
+    function masterEnabledServers(): Set<string> {
       const state = initialCapabilitiesState(getGlobalDefaults())
       return new Set(Object.keys(getServerCatalog()).filter(id => state.mcp[id] === true))
     }
 
-    /** The session's effective mounted set: its own mounts plus every always-on server. */
-    function effectiveMounted(session: SessionLike): Set<string> {
-      const set = mountedSetOf(session)
-      for (const [id, def] of Object.entries(getServerCatalog())) {
-        if (!isOnDemand(def)) set.add(id)
-      }
-      return set
+    /** The default world: every master-on always-on server (no session needed). */
+    function defaultWorldServers(): Set<string> {
+      return mcpDefaultWorldIds(getServerCatalog(), masterEnabledServers())
     }
 
-    /** Mount one server for one session (connect on first use, then record it). */
+    /**
+     * The session's MCP world:
+     * `(session mounts ∪ default-world always-on ∪ session override true) − session override false`.
+     * The master switch sets the DEFAULT world; a pull (skill `mcp:` hint,
+     * explicit mount, or the session switch) brings a switched-off server in
+     * for this session, and a session-off override removes a default-world
+     * server for this session only.
+     */
+    function worldOf(session: SessionLike | undefined): Set<string> {
+      if (session === undefined || typeof session.id !== 'string') return defaultWorldServers()
+      return mcpWorldOf(getServerCatalog(), masterEnabledServers(), mountedSetOf(session), readOverrides(session).mcp)
+    }
+
+    /** Pull one server into one session (connect on first use, then record it). */
     async function mountForSession(session: SessionLike, id: string): Promise<{ ok: boolean; reason: string; toolCount: number }> {
       const def = getServerCatalog()[id]
       if (def === undefined) return { ok: false, reason: `server "${id}" is not in the catalog`, toolCount: 0 }
-      if (!allowedServers().has(id)) return { ok: false, reason: `server "${id}" is not allowed (capabilities.mcp.${id} is not true)`, toolCount: 0 }
       const outcome = await mountServer(id, true)
       if (!outcome.ok) return { ok: false, reason: outcome.reason, toolCount: 0 }
+      // An explicit pull wins over a session-off switch that would filter it.
+      const record = readOverrides(session)
+      if (record.mcp[id] === false) setOverrides(session, withCapabilityOverride(record, 'mcp', id, null))
       const next = mountedSetOf(session)
       next.add(id)
       setMounted(session, next)
@@ -647,24 +690,33 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       return { ok: true, reason: '', toolCount }
     }
 
-    /** Unmount one server from one session; dispose the shared fiber when nobody needs it. */
+    /**
+     * Release one server from one session (durable mount and/or session-on
+     * override). The shared fiber disconnects when the server is not in the
+     * default world and no session holds it; a default-world server keeps it.
+     */
     async function unmountForSession(session: SessionLike, id: string): Promise<{ ok: boolean; reason: string }> {
       const def = getServerCatalog()[id]
       if (def === undefined) return { ok: false, reason: `server "${id}" is not in the catalog` }
+      const record = readOverrides(session)
       const next = mountedSetOf(session)
-      if (!next.delete(id)) return { ok: false, reason: `server "${id}" is not mounted in this session` }
-      setMounted(session, next)
-      if (!isOnDemand(def) || sessionsWithMount(id) === 0) {
-        // Always-on servers keep their fiber; an on-demand server with no
-        // remaining session mount disconnects.
-        if (isOnDemand(def)) disposeServer(id)
-      }
+      const hadMount = next.delete(id)
+      const hadOverride = record.mcp[id] === true
+      if (!hadMount && !hadOverride) return { ok: false, reason: `server "${id}" is not mounted in this session` }
+      if (hadMount) setMounted(session, next)
+      if (hadOverride) setOverrides(session, withCapabilityOverride(record, 'mcp', id, null))
+      if (hadMount && !defaultWorldServers().has(id) && sessionsWithMount(id) === 0) disposeServer(id)
       process.stderr.write(`[enpoi-capabilities] mcp unmount: session ${session.id} unmounted ${id}\n`)
       return { ok: true, reason: '' }
     }
 
-    /** The `mcp list` rows for one session. */
-    function listMounts(session: SessionLike): McpMountRow[] {
+    /**
+     * The `mcp` rows for one session. `agentFacing` keeps only the
+     * agent-visible ids: the session's world plus switched-on pullable
+     * servers. The operator view (RPC) lists every configured server, with a
+     * switched-off, unpulled one marked `disabled`.
+     */
+    function listMounts(session: SessionLike, agentFacing: boolean): McpMountRow[] {
       const catalog = getServerCatalog() as Record<string, McpServerRecord>
       const toolNames = (() => {
         try {
@@ -673,12 +725,17 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           return []
         }
       })()
-      return buildMountRows(catalog, allowedServers(), effectiveMounted(session), mountErrors, toolNames)
+      const master = masterEnabledServers()
+      const world = worldOf(session)
+      if (!agentFacing) return buildMountRows(catalog, master, world, new Set(mounted.keys()), mountErrors, toolNames)
+      const include = mcpVisibleIds(catalog, master, world, readOverrides(session).mcp)
+      return buildMountRows(catalog, master, world, new Set(mounted.keys()), mountErrors, toolNames, { include })
     }
 
     /** The session-scoped mount service consumed by the `mcp` tool, the skill hint, and the RPC. */
     const mcpMountsService = {
-      list: (session: SessionLike): McpMountRow[] => listMounts(session),
+      // The operator/RPC view: every configured server, switched-off included.
+      list: (session: SessionLike): McpMountRow[] => listMounts(session, false),
       mount: (session: SessionLike, id: string) => mountForSession(session, id),
       unmount: (session: SessionLike, id: string) => unmountForSession(session, id),
     }
@@ -689,35 +746,52 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       process.stderr.write(`[enpoi-capabilities] mcp mounts projection registration failed: ${error instanceof Error ? error.message : String(error)}\n`)
     }
 
-    /** Whether one tool's on-demand server is mounted for this session. */
-    function isToolMounted(session: SessionLike, toolName: string): boolean {
-      const server = mcpServerOfToolName(toolName)
-      if (server === undefined) return true
-      const entry = Object.entries(getServerCatalog()).find(([id, def]) => serverNameOf(id, def) === server)
-      if (entry === undefined) return true
-      const [id, def] = entry
-      if (!isOnDemand(def)) return true
-      return effectiveMounted(session).has(id)
+    // The center's session switch is authoritative too: mcp true = pull,
+    // false/null = release (late-bound here so the override service can stay
+    // above the mcp-client import).
+    syncMcpOverride = (session: OverrideSessionLike, id: string, value: boolean | null): void => {
+      const target = session as unknown as SessionLike
+      if (value === true) {
+        void mountForSession(target, id).catch((error: unknown) => {
+          process.stderr.write(`[enpoi-capabilities] mcp override pull failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        })
+      } else {
+        void unmountForSession(target, id).catch((error: unknown) => {
+          process.stderr.write(`[enpoi-capabilities] mcp override release failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        })
+      }
+    }
+
+    /**
+     * The pre-execute denial for one tool name ('' = callable): a switched-off
+     * server not pulled into this session first, then an allowed on-demand
+     * server the session has not mounted, then a default-world server switched
+     * off for this session. Unknown servers stay with the policy ladder.
+     */
+    function toolDenyReason(session: SessionLike, toolName: string): string {
+      return mcpToolDenyReason(getServerCatalog(), masterEnabledServers(), worldOf(session), toolName)
     }
 
     sessionMountsAccess = {
       catalog: getServerCatalog,
-      effectiveMounted: (session: { id: string }) => effectiveMounted(session as SessionLike),
-      isToolMounted: (session: { id: string }, toolName: string) => isToolMounted(session as SessionLike, toolName),
-      list: (session: { id: string }) => listMounts(session as SessionLike),
+      masterEnabled: masterEnabledServers,
+      world: (session: { id?: string } | undefined) => worldOf(session as SessionLike | undefined),
+      toolDenyReason: (session: { id: string }, toolName: string) => toolDenyReason(session as SessionLike, toolName),
+      list: (session: { id: string }, agentFacing: boolean) => listMounts(session as SessionLike, agentFacing),
       mount: (session: { id: string }, id: string) => mountForSession(session as SessionLike, id),
       unmount: (session: { id: string }, id: string) => unmountForSession(session as SessionLike, id),
     }
 
-    // Session end tears the session's mounts down: the durable projection dies
-    // with the session, and an on-demand server nobody else holds disconnects.
+    // Session end tears the session's pulls down: the durable projection dies
+    // with the session, and a server outside the default world that nobody
+    // else holds disconnects.
     ctx.on('session/disposed', ((session: SessionLike) => {
       const set = sessionMounts.get(session.id)
       sessionMounts.delete(session.id)
       if (set === undefined || set.size === 0) return
+      const defaults = defaultWorldServers()
       for (const id of set) {
-        const def = getServerCatalog()[id]
-        if (def !== undefined && isOnDemand(def) && sessionsWithMount(id) === 0) disposeServer(id)
+        if (!defaults.has(id) && sessionsWithMount(id) === 0) disposeServer(id)
       }
       process.stderr.write(`[enpoi-capabilities] mcp teardown: session ${session.id} released [${[...set].join(',')}]\n`)
     }) as (...args: unknown[]) => unknown)
@@ -725,9 +799,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     // ── the `mcp` lifecycle tool ────────────────────────────────────────────
     // One tool, three actions. Permission row: shipped `allow` (see
     // SHIPPED_TOOL_DEFAULTS) — list is read-only, and mount/unmount only touch
-    // servers the operator already configured and allowed, scoped to the
-    // calling session and reversible. The mounted server's OWN tools keep
-    // their own rows (unknownTools = ask), so the dangerous surface still asks.
+    // servers the operator already configured, scoped to the calling session
+    // and reversible (a pull of a switched-off server included: that is the
+    // skill-requirement path). The mounted server's OWN tools keep their own
+    // rows (unknownTools = ask), so the dangerous surface still asks.
     const MCP_TOOL_OUTPUT_SCHEMA = {
       type: 'object',
       additionalProperties: false,
@@ -747,23 +822,27 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       return [{ type: 'text', text: run.text }]
     }
 
-    /** One `mcp list` line. */
+    /** One `mcp list` line: mode, switch, mount state, reason, tool count. */
     function renderMountRow(row: McpMountRow): string {
+      const gate = row.enabled ? 'enabled' : 'default-off'
       const detail = row.state === 'mounted'
         ? `mounted — ${String(row.toolCount)} tools`
         : row.state === 'available'
           ? `available — ${String(row.toolCount)} tools`
-          : `unavailable — ${row.reason}`
-      return `- ${row.id} [${row.mode}] ${detail}`
+          : row.state === 'disabled'
+            ? `disabled — ${row.reason}`
+            : `unavailable — ${row.reason}`
+      return `- ${row.id} [${row.mode}, ${gate}] ${detail}`
     }
 
     ctx.tools.register({
       name: 'mcp',
       description: [
-        'Manage MCP servers for THIS session. Actions:',
-        '"list" shows every configured server with its mode (always-on | on-demand), state (mounted | available | unavailable), reason, and tool count;',
-        '"mount" connects one on-demand server and registers its tools for this session (they stay for continuing work);',
-        "\"unmount\" disconnects this session's mount when the errand is done.",
+        'Manage MCP servers for THIS session. The Capabilities switch sets the DEFAULT world: a switched-off server is absent from the agent surface and from "list" until something pulls it in (a skill\'s mcp: hint, "mount", or the operator\'s session switch).',
+        'Actions:',
+        '"list" shows the servers available to this session with their mode (always-on | on-demand), switch (enabled | default-off), mount state (mounted | available | unavailable), reason, and tool count;',
+        '"mount" connects one server (a switched-off one too — the explicit pull is the point) and registers its tools for this session (they stay for continuing work);',
+        "\"unmount\" releases this session's pull when the errand is done.",
         'Nothing auto-connects: a server that failed once stays down until explicitly mounted.',
       ].join(' '),
       parameters: {
@@ -785,7 +864,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           return { action, server, ok: false, reason: 'mcp requires a live session', text: 'mcp requires a live session' }
         }
         if (action === 'list') {
-          const rows = listMounts(session)
+          const rows = listMounts(session, true)
           const text = rows.length === 0
             ? 'no MCP servers are configured'
             : `mcp servers (session ${session.id}):\n${rows.map(renderMountRow).join('\n')}`
@@ -860,7 +939,8 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       name: 'mcp:lifecycle',
       order: ctx.systemPrompt.getSectionOrder('MCP_SERVERS'),
       text: [
-        'MCP servers are mounted per session. A mount made for continuing work stays mounted;',
+        'MCP servers are switched on and off by the operator in the Capabilities center, but that switch sets the DEFAULT world: a switched-off server is absent from your surface until a skill\'s mcp: hint, an explicit mount, or the operator\'s session switch pulls it in for the session.',
+        'Within a session, always-on servers are in the default world and on-demand servers mount on demand (or via a skill hint). A pull made for continuing work stays;',
         'a one-shot errand unmounts when it is done; when unsure, leave it mounted.',
         'Nothing auto-connects: a server that failed once stays down until you mount it again.',
       ].join(' '),
@@ -868,36 +948,58 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
 
     async function syncMcpMounts(): Promise<void> {
       const catalog = getServerCatalog()
-      const allowed = allowedServers()
-      // On-demand servers are NEVER auto-mounted: only the agent's session
-      // mounts (or an always-on mode) connect them.
-      const want = new Set(Object.keys(catalog).filter(id => allowed.has(id) && !isOnDemand(catalog[id])))
-      // A server that left the catalog (removed) or was toggled off no longer
-      // has a failure to report; drop its error before publishing status.
+      // The default world: master-on always-on servers. Everything else
+      // connects only when a session pulls it (skill hint, explicit mount,
+      // session switch).
+      const defaults = defaultWorldServers()
+      // A server that left the catalog no longer has a failure to report; drop
+      // its error before publishing status. Errors of present servers stay
+      // (they are also the reason a pulled server shows `unavailable`).
       for (const id of [...mountErrors.keys()]) {
-        if (allowed.has(id)) continue
+        if (catalog[id] !== undefined) continue
         mountErrors.delete(id)
         publishedMountErrors.delete(id)
       }
-      if (want.size > 0 || mounted.size > 0) {
-        const signature = `want=[${[...want].join(',')}] mounted=[${[...mounted.keys()].join(',')}]`
+      if (defaults.size > 0 || mounted.size > 0) {
+        const signature = `default=[${[...defaults].join(',')}] mounted=[${[...mounted.keys()].join(',')}]`
         if (signature !== lastSyncSignature) {
           lastSyncSignature = signature
           process.stderr.write(`[enpoi-capabilities] mcp sync: ${signature}\n`)
         }
       }
-      // Unmount disabled / removed servers, and on-demand servers nobody holds.
+      // Unmount removed servers, and servers outside the default world that no
+      // session holds. A pulled switched-off server stays while a session
+      // holds it (the pull is a session-scoped requirement).
       for (const id of [...mounted.keys()]) {
-        const def = catalog[id]
-        const keep = want.has(id) || (def !== undefined && isOnDemand(def) && sessionsWithMount(id) > 0)
+        const keep = defaults.has(id) || sessionsWithMount(id) > 0
         if (!keep) disposeServer(id)
       }
       // Mount newly enabled always-on servers.
-      for (const id of want) {
+      for (const id of defaults) {
         if (mounted.has(id) || mountedPending.has(id)) continue
         await mountServer(id)
       }
     }
+
+    /**
+     * Ensure a live session's pulls have fibers. A resumed session whose
+     * durable mounts point at switched-off servers must reconnect them when
+     * work continues; default-world servers are already handled by
+     * `syncMcpMounts`.
+     */
+    async function reconcileSessionWorld(session: SessionLike): Promise<void> {
+      const defaults = defaultWorldServers()
+      for (const id of worldOf(session)) {
+        if (defaults.has(id) || mounted.has(id) || mountedPending.has(id)) continue
+        await mountServer(id)
+      }
+    }
+    ctx.on('session/event', ((session: SessionLike, event: { type?: string }) => {
+      if (event?.type !== 'turn/start' || typeof session?.id !== 'string') return
+      void reconcileSessionWorld(session).catch((error: unknown) => {
+        process.stderr.write(`[enpoi-capabilities] mcp reconcile failed: ${error instanceof Error ? error.message : String(error)}\n`)
+      })
+    }) as (...args: unknown[]) => unknown)
 
     void syncMcpMounts()
     ctx.setTimeout(() => void syncMcpMounts(), 3000)
@@ -1341,9 +1443,12 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   const disposePolicy = ctx.on('tools/pre-execute', (async (exec: { name: string; arguments?: Record<string, unknown>; callId?: string | number; agent?: AgentLike; signal?: AbortSignal }, next: () => Promise<{ kind: string; reason?: string }>) => {
     // Capability-disabled check FIRST (Oracle 1.2): the registry runs serviceAsk
     // before guardReason, so a disabled tool with an ask policy would otherwise
-    // prompt and then deny after the user clicks allow.
-    const state = effectiveStateFor((exec.agent as { session?: { id?: string } } | undefined)?.session)
-    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs())
+    // prompt and then deny after the user clicks allow. A server PULLED into
+    // this session's MCP world (skill hint, explicit mount, session switch) is
+    // allowed through even when the master switch is off.
+    const capSession = (exec.agent as { session?: { id?: string } } | undefined)?.session
+    const state = effectiveStateFor(capSession)
+    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs(), sessionMountsAccess?.world(capSession))
     if (!capabilityDecision.allowed) {
       return { kind: 'deny', reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` }
     }
@@ -1360,16 +1465,14 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         reason: `${exec.name} is restricted to the creator seat; seat "${agentRole ?? 'unknown'}" may not run it. Switch to the creator agent for harness authoring.`,
       }
     }
-    // On-demand MCP servers: a tool whose server this session has not mounted
-    // is denied at execution time too (the surface filter is the first line;
-    // this is the backstop for in-flight turns and direct calls).
+    // MCP enable/scope gate: a tool of a DISABLED server is denied first (the
+    // master gate), then a tool of an allowed on-demand server this session
+    // has not mounted (the surface filter is the first line; this is the
+    // backstop for in-flight turns and direct calls).
     const execSession = (exec.agent as { session?: { id?: string } } | undefined)?.session
-    if (sessionMountsAccess !== undefined && execSession !== undefined && typeof execSession.id === 'string'
-      && !sessionMountsAccess.isToolMounted(execSession as { id: string }, exec.name)) {
-      return {
-        kind: 'deny',
-        reason: `${exec.name} is not available: its MCP server is on-demand and this session has not mounted it. Use the mcp tool (action "mount") first.`,
-      }
+    if (sessionMountsAccess !== undefined && execSession !== undefined && typeof execSession.id === 'string') {
+      const mcpDenial = sessionMountsAccess.toolDenyReason(execSession as { id: string }, exec.name)
+      if (mcpDenial !== '') return { kind: 'deny', reason: mcpDenial }
     }
     const config = readPermissionConfig()
     const isBash = exec.name === 'bash'

@@ -145,6 +145,24 @@ describe('enpoi-capabilities unit & enforcement suite', () => {
     expect(evaluateToolCall('mcp__ghost__do_thing', {}, initialCapabilitiesState({ mcp: { 'ghost-mcp': true } }), catalog).allowed).toBe(true)
   })
 
+  it('Invariant B1: a server pulled into the session world is callable while the master switch is off', () => {
+    const catalog = { 'plane-mcp': {} }
+    const off = initialCapabilitiesState({ mcp: { 'plane-mcp': false } })
+
+    // Not pulled: the call is refused with the disabled reason (never "unknown").
+    const refused = evaluateToolCall('mcp__plane__list_projects', {}, off, catalog)
+    expect(refused.allowed).toBe(false)
+    expect(refused.syntheticResult).toContain('disabled by the operator')
+
+    // Pulled for THIS session (skill hint / mount / session switch): callable.
+    const pulled = evaluateToolCall('mcp__plane__list_projects', {}, off, catalog, new Set(['plane-mcp']))
+    expect(pulled.allowed).toBe(true)
+
+    // A pull of one server does not open another.
+    const other = evaluateToolCall('mcp__plane__list_projects', {}, off, catalog, new Set(['other-mcp']))
+    expect(other.allowed).toBe(false)
+  })
+
   it('strips disabled skills from catalog text and entries, and drops no-op updates', async () => {
     const { filterSkillCatalogMessages } = await import('../src/catalog.ts')
     const published = new Map<string, string>()

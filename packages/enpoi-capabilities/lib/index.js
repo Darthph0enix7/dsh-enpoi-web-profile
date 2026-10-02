@@ -1126,7 +1126,7 @@ function catalogIdOf(segment, catalog) {
   }
   return void 0;
 }
-function evaluateToolCall(toolName, args, state, mcpCatalog) {
+function evaluateToolCall(toolName, args, state, mcpCatalog, mcpWorld) {
   if (PROTECTED_CAPABILITIES.has(toolName)) {
     return { allowed: true };
   }
@@ -1161,11 +1161,12 @@ function evaluateToolCall(toolName, args, state, mcpCatalog) {
       const toggleKeys = [...new Set(
         [catalogId, `${segment}-mcp`, segment].filter((key) => key !== void 0 && key !== "")
       )];
-      if (toggleKeys.some((key) => state.mcp[key] === false)) {
+      const pulled = catalogId !== void 0 && mcpWorld?.has(catalogId) === true;
+      if (!pulled && !toggleKeys.some((key) => state.mcp[key] === true)) {
         const suite = catalogId ?? `${segment}-mcp`;
         return {
           allowed: false,
-          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`
+          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is disabled by the operator (capabilities.mcp.${suite} is not true). Pull it in for this session with a skill's mcp: hint, an explicit mcp mount, or the session switch. Do not attempt to invoke it in this turn otherwise.`
         };
       }
     }
@@ -20880,20 +20881,86 @@ function mcpServerOfToolName(name2) {
   const separator = rest.indexOf("__");
   return separator <= 0 ? void 0 : rest.slice(0, separator);
 }
-function buildMountRows(catalog, allowed, mounted, errors, toolNames) {
+function mcpDefaultWorldIds(catalog, masterEnabled) {
+  const set2 = /* @__PURE__ */ new Set();
+  for (const [id, def] of Object.entries(catalog)) {
+    if (!isOnDemand(def) && masterEnabled.has(id)) set2.add(id);
+  }
+  return set2;
+}
+function mcpWorldOf(catalog, masterEnabled, sessionMounts, sessionOverrides) {
+  const world = /* @__PURE__ */ new Set();
+  for (const id of sessionMounts) {
+    if (catalog[id] !== void 0) world.add(id);
+  }
+  for (const id of mcpDefaultWorldIds(catalog, masterEnabled)) world.add(id);
+  for (const [id, on] of Object.entries(sessionOverrides)) {
+    if (on === true && catalog[id] !== void 0) world.add(id);
+  }
+  for (const [id, on] of Object.entries(sessionOverrides)) {
+    if (on === false) world.delete(id);
+  }
+  return world;
+}
+function mcpVisibleIds(catalog, masterEnabled, world, sessionOverrides) {
+  const visible = new Set(world);
+  for (const id of masterEnabled) {
+    if (catalog[id] !== void 0 && sessionOverrides[id] !== false) visible.add(id);
+  }
+  return visible;
+}
+function mcpDisabledReason(id) {
+  return `server "${id}" is disabled by the operator (capabilities.mcp.${id} is not true); it is absent by default and returns when a skill's mcp: hint, an explicit mcp mount, or the session switch pulls it in`;
+}
+function mcpToolDenyReason(catalog, masterEnabled, world, toolName) {
+  const server = mcpServerOfToolName(toolName);
+  if (server === void 0) return "";
+  const entry = Object.entries(catalog).find(([id2, def2]) => serverNameOf(id2, def2) === server);
+  if (entry === void 0) return "";
+  const [id, def] = entry;
+  if (world.has(id)) return "";
+  if (!masterEnabled.has(id)) {
+    return `${toolName} is not available: its MCP server "${id}" is disabled by the operator (capabilities.mcp.${id} is not true). Pull it in for this session with a skill's mcp: hint, an explicit mcp mount, or the session switch.`;
+  }
+  if (isOnDemand(def)) {
+    return `${toolName} is not available: its MCP server "${id}" is on-demand and this session has not mounted it. Use the mcp tool (action "mount") first.`;
+  }
+  return `${toolName} is not available: its MCP server "${id}" is switched off for this session (session scope).`;
+}
+function buildMountRows(catalog, masterEnabled, world, connected, errors, toolNames, options) {
   const counts = /* @__PURE__ */ new Map();
   for (const name2 of toolNames) {
     const server = mcpServerOfToolName(name2);
     if (server === void 0) continue;
     counts.set(server, (counts.get(server) ?? 0) + 1);
   }
-  return Object.entries(catalog).map(([id, record2]) => {
+  return Object.entries(catalog).filter(([id]) => options?.include === void 0 || options.include.has(id)).map(([id, record2]) => {
     const serverName = serverNameOf(id, record2);
     const toolCount = counts.get(serverName) ?? 0;
     const error62 = errors.get(id);
-    const state = mounted.has(id) ? "mounted" : !allowed.has(id) ? "unavailable" : record2.url === void 0 || record2.url === "" ? "unavailable" : error62 !== void 0 ? "unavailable" : "available";
-    const reason = mounted.has(id) ? "" : !allowed.has(id) ? "not allowed: capabilities.mcp." + id + " is not true" : record2.url === void 0 || record2.url === "" ? "no url configured" : error62 ?? "";
-    return { id, serverName, mode: serverModeOf(record2), state, reason, toolCount };
+    const enabled = masterEnabled.has(id);
+    const inWorld = world.has(id);
+    const live2 = connected.has(id);
+    let state;
+    let reason = "";
+    if (!enabled && !inWorld) {
+      state = "disabled";
+      reason = mcpDisabledReason(id);
+    } else if (error62 !== void 0) {
+      state = "unavailable";
+      reason = error62;
+    } else if (record2.url === void 0 || record2.url === "") {
+      state = "unavailable";
+      reason = "no url configured";
+    } else if (inWorld && live2) {
+      state = "mounted";
+    } else if (!inWorld) {
+      state = "available";
+    } else {
+      state = "unavailable";
+      reason = "not connected";
+    }
+    return { id, serverName, mode: serverModeOf(record2), enabled, state, reason, toolCount };
   }).sort((left, right) => left.id.localeCompare(right.id));
 }
 
@@ -22125,7 +22192,14 @@ function apply(ctx, config2 = {}) {
   }).catch(() => {
   });
   const disposeGuard = ctx.tools.guard((exec) => {
-    const decision = evaluateToolCall(exec.name, exec.arguments, initialCapabilitiesState(getGlobalDefaults()), readMcpCatalogDefs());
+    const guardSession = exec.agent?.session;
+    const decision = evaluateToolCall(
+      exec.name,
+      exec.arguments,
+      effectiveStateFor(guardSession),
+      readMcpCatalogDefs(),
+      sessionMountsAccess?.world(guardSession)
+    );
     if (!decision.allowed) {
       return decision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.`;
     }
@@ -22152,6 +22226,7 @@ function apply(ctx, config2 = {}) {
 `);
     }
   }
+  let syncMcpOverride;
   const capabilityOverridesService = {
     read: (session) => readOverrides(session),
     set: (session, kind, id, value) => {
@@ -22159,6 +22234,14 @@ function apply(ctx, config2 = {}) {
       setOverrides(session, next);
       process.stderr.write(`[enpoi-capabilities] capability override: session ${session.id} ${kind}.${id}=${value === null ? "default" : String(value)}
 `);
+      if (kind === "mcp") {
+        try {
+          syncMcpOverride?.(session, id, value);
+        } catch (error62) {
+          process.stderr.write(`[enpoi-capabilities] mcp override sync failed: ${error62 instanceof Error ? error62.message : String(error62)}
+`);
+        }
+      }
       return next;
     }
   };
@@ -22194,9 +22277,9 @@ function apply(ctx, config2 = {}) {
     if (advertise.size < kept.length) kept = kept.filter((tool) => advertise.has(tool.name));
     const scopeSession = scope?.session;
     if (sessionMountsAccess !== void 0 && scopeSession !== void 0 && typeof scopeSession.id === "string") {
-      const mounted = sessionMountsAccess.effectiveMounted(scopeSession);
+      const world = sessionMountsAccess.world(scopeSession);
       const hidden = new Set(
-        Object.entries(sessionMountsAccess.catalog()).filter(([id, def]) => isOnDemand(def) && !mounted.has(id)).map(([id, def]) => serverNameOf(id, def))
+        Object.entries(sessionMountsAccess.catalog()).filter(([id]) => !world.has(id)).map(([id, def]) => serverNameOf(id, def))
       );
       if (hidden.size > 0) {
         const before = kept.length;
@@ -22208,7 +22291,7 @@ function apply(ctx, config2 = {}) {
           const signature = `session=${scopeSession.id} hidden=[${[...hidden].join(",")}]`;
           if (signature !== lastOnDemandSurfaceSignature) {
             lastOnDemandSurfaceSignature = signature;
-            process.stderr.write(`[enpoi-capabilities] mcp on-demand surface: ${signature}
+            process.stderr.write(`[enpoi-capabilities] mcp world surface: ${signature}
 `);
           }
         }
@@ -22338,23 +22421,24 @@ function apply(ctx, config2 = {}) {
       void fiber.dispose().catch(() => {
       });
     }
-    function allowedServers() {
+    function masterEnabledServers() {
       const state = initialCapabilitiesState(getGlobalDefaults());
       return new Set(Object.keys(getServerCatalog()).filter((id) => state.mcp[id] === true));
     }
-    function effectiveMounted(session) {
-      const set2 = mountedSetOf(session);
-      for (const [id, def] of Object.entries(getServerCatalog())) {
-        if (!isOnDemand(def)) set2.add(id);
-      }
-      return set2;
+    function defaultWorldServers() {
+      return mcpDefaultWorldIds(getServerCatalog(), masterEnabledServers());
+    }
+    function worldOf(session) {
+      if (session === void 0 || typeof session.id !== "string") return defaultWorldServers();
+      return mcpWorldOf(getServerCatalog(), masterEnabledServers(), mountedSetOf(session), readOverrides(session).mcp);
     }
     async function mountForSession(session, id) {
       const def = getServerCatalog()[id];
       if (def === void 0) return { ok: false, reason: `server "${id}" is not in the catalog`, toolCount: 0 };
-      if (!allowedServers().has(id)) return { ok: false, reason: `server "${id}" is not allowed (capabilities.mcp.${id} is not true)`, toolCount: 0 };
       const outcome = await mountServer(id, true);
       if (!outcome.ok) return { ok: false, reason: outcome.reason, toolCount: 0 };
+      const record2 = readOverrides(session);
+      if (record2.mcp[id] === false) setOverrides(session, withCapabilityOverride(record2, "mcp", id, null));
       const next = mountedSetOf(session);
       next.add(id);
       setMounted(session, next);
@@ -22366,17 +22450,19 @@ function apply(ctx, config2 = {}) {
     async function unmountForSession(session, id) {
       const def = getServerCatalog()[id];
       if (def === void 0) return { ok: false, reason: `server "${id}" is not in the catalog` };
+      const record2 = readOverrides(session);
       const next = mountedSetOf(session);
-      if (!next.delete(id)) return { ok: false, reason: `server "${id}" is not mounted in this session` };
-      setMounted(session, next);
-      if (!isOnDemand(def) || sessionsWithMount(id) === 0) {
-        if (isOnDemand(def)) disposeServer(id);
-      }
+      const hadMount = next.delete(id);
+      const hadOverride = record2.mcp[id] === true;
+      if (!hadMount && !hadOverride) return { ok: false, reason: `server "${id}" is not mounted in this session` };
+      if (hadMount) setMounted(session, next);
+      if (hadOverride) setOverrides(session, withCapabilityOverride(record2, "mcp", id, null));
+      if (hadMount && !defaultWorldServers().has(id) && sessionsWithMount(id) === 0) disposeServer(id);
       process.stderr.write(`[enpoi-capabilities] mcp unmount: session ${session.id} unmounted ${id}
 `);
       return { ok: true, reason: "" };
     }
-    function listMounts(session) {
+    function listMounts(session, agentFacing) {
       const catalog = getServerCatalog();
       const toolNames = (() => {
         try {
@@ -22385,10 +22471,15 @@ function apply(ctx, config2 = {}) {
           return [];
         }
       })();
-      return buildMountRows(catalog, allowedServers(), effectiveMounted(session), mountErrors, toolNames);
+      const master = masterEnabledServers();
+      const world = worldOf(session);
+      if (!agentFacing) return buildMountRows(catalog, master, world, new Set(mounted.keys()), mountErrors, toolNames);
+      const include = mcpVisibleIds(catalog, master, world, readOverrides(session).mcp);
+      return buildMountRows(catalog, master, world, new Set(mounted.keys()), mountErrors, toolNames, { include });
     }
     const mcpMountsService = {
-      list: (session) => listMounts(session),
+      // The operator/RPC view: every configured server, switched-off included.
+      list: (session) => listMounts(session, false),
       mount: (session, id) => mountForSession(session, id),
       unmount: (session, id) => unmountForSession(session, id)
     };
@@ -22400,20 +22491,29 @@ function apply(ctx, config2 = {}) {
       process.stderr.write(`[enpoi-capabilities] mcp mounts projection registration failed: ${error62 instanceof Error ? error62.message : String(error62)}
 `);
     }
-    function isToolMounted(session, toolName) {
-      const server = mcpServerOfToolName(toolName);
-      if (server === void 0) return true;
-      const entry = Object.entries(getServerCatalog()).find(([id2, def2]) => serverNameOf(id2, def2) === server);
-      if (entry === void 0) return true;
-      const [id, def] = entry;
-      if (!isOnDemand(def)) return true;
-      return effectiveMounted(session).has(id);
+    syncMcpOverride = (session, id, value) => {
+      const target = session;
+      if (value === true) {
+        void mountForSession(target, id).catch((error62) => {
+          process.stderr.write(`[enpoi-capabilities] mcp override pull failed: ${error62 instanceof Error ? error62.message : String(error62)}
+`);
+        });
+      } else {
+        void unmountForSession(target, id).catch((error62) => {
+          process.stderr.write(`[enpoi-capabilities] mcp override release failed: ${error62 instanceof Error ? error62.message : String(error62)}
+`);
+        });
+      }
+    };
+    function toolDenyReason(session, toolName) {
+      return mcpToolDenyReason(getServerCatalog(), masterEnabledServers(), worldOf(session), toolName);
     }
     sessionMountsAccess = {
       catalog: getServerCatalog,
-      effectiveMounted: (session) => effectiveMounted(session),
-      isToolMounted: (session, toolName) => isToolMounted(session, toolName),
-      list: (session) => listMounts(session),
+      masterEnabled: masterEnabledServers,
+      world: (session) => worldOf(session),
+      toolDenyReason: (session, toolName) => toolDenyReason(session, toolName),
+      list: (session, agentFacing) => listMounts(session, agentFacing),
       mount: (session, id) => mountForSession(session, id),
       unmount: (session, id) => unmountForSession(session, id)
     };
@@ -22421,9 +22521,9 @@ function apply(ctx, config2 = {}) {
       const set2 = sessionMounts.get(session.id);
       sessionMounts.delete(session.id);
       if (set2 === void 0 || set2.size === 0) return;
+      const defaults = defaultWorldServers();
       for (const id of set2) {
-        const def = getServerCatalog()[id];
-        if (def !== void 0 && isOnDemand(def) && sessionsWithMount(id) === 0) disposeServer(id);
+        if (!defaults.has(id) && sessionsWithMount(id) === 0) disposeServer(id);
       }
       process.stderr.write(`[enpoi-capabilities] mcp teardown: session ${session.id} released [${[...set2].join(",")}]
 `);
@@ -22445,16 +22545,18 @@ function apply(ctx, config2 = {}) {
       return [{ type: "text", text: run.text }];
     }
     function renderMountRow(row) {
-      const detail = row.state === "mounted" ? `mounted \u2014 ${String(row.toolCount)} tools` : row.state === "available" ? `available \u2014 ${String(row.toolCount)} tools` : `unavailable \u2014 ${row.reason}`;
-      return `- ${row.id} [${row.mode}] ${detail}`;
+      const gate = row.enabled ? "enabled" : "default-off";
+      const detail = row.state === "mounted" ? `mounted \u2014 ${String(row.toolCount)} tools` : row.state === "available" ? `available \u2014 ${String(row.toolCount)} tools` : row.state === "disabled" ? `disabled \u2014 ${row.reason}` : `unavailable \u2014 ${row.reason}`;
+      return `- ${row.id} [${row.mode}, ${gate}] ${detail}`;
     }
     ctx.tools.register({
       name: "mcp",
       description: [
-        "Manage MCP servers for THIS session. Actions:",
-        '"list" shows every configured server with its mode (always-on | on-demand), state (mounted | available | unavailable), reason, and tool count;',
-        '"mount" connects one on-demand server and registers its tools for this session (they stay for continuing work);',
-        `"unmount" disconnects this session's mount when the errand is done.`,
+        `Manage MCP servers for THIS session. The Capabilities switch sets the DEFAULT world: a switched-off server is absent from the agent surface and from "list" until something pulls it in (a skill's mcp: hint, "mount", or the operator's session switch).`,
+        "Actions:",
+        '"list" shows the servers available to this session with their mode (always-on | on-demand), switch (enabled | default-off), mount state (mounted | available | unavailable), reason, and tool count;',
+        '"mount" connects one server (a switched-off one too \u2014 the explicit pull is the point) and registers its tools for this session (they stay for continuing work);',
+        `"unmount" releases this session's pull when the errand is done.`,
         "Nothing auto-connects: a server that failed once stays down until explicitly mounted."
       ].join(" "),
       parameters: {
@@ -22476,7 +22578,7 @@ function apply(ctx, config2 = {}) {
           return { action, server, ok: false, reason: "mcp requires a live session", text: "mcp requires a live session" };
         }
         if (action === "list") {
-          const rows = listMounts(session);
+          const rows = listMounts(session, true);
           const text = rows.length === 0 ? "no MCP servers are configured" : `mcp servers (session ${session.id}):
 ${rows.map(renderMountRow).join("\n")}`;
           return { action, server: "", ok: true, reason: "", text };
@@ -22531,22 +22633,22 @@ ${rows.map(renderMountRow).join("\n")}`;
       name: "mcp:lifecycle",
       order: ctx.systemPrompt.getSectionOrder("MCP_SERVERS"),
       text: [
-        "MCP servers are mounted per session. A mount made for continuing work stays mounted;",
+        "MCP servers are switched on and off by the operator in the Capabilities center, but that switch sets the DEFAULT world: a switched-off server is absent from your surface until a skill's mcp: hint, an explicit mount, or the operator's session switch pulls it in for the session.",
+        "Within a session, always-on servers are in the default world and on-demand servers mount on demand (or via a skill hint). A pull made for continuing work stays;",
         "a one-shot errand unmounts when it is done; when unsure, leave it mounted.",
         "Nothing auto-connects: a server that failed once stays down until you mount it again."
       ].join(" ")
     });
     async function syncMcpMounts() {
       const catalog = getServerCatalog();
-      const allowed = allowedServers();
-      const want = new Set(Object.keys(catalog).filter((id) => allowed.has(id) && !isOnDemand(catalog[id])));
+      const defaults = defaultWorldServers();
       for (const id of [...mountErrors.keys()]) {
-        if (allowed.has(id)) continue;
+        if (catalog[id] !== void 0) continue;
         mountErrors.delete(id);
         publishedMountErrors.delete(id);
       }
-      if (want.size > 0 || mounted.size > 0) {
-        const signature = `want=[${[...want].join(",")}] mounted=[${[...mounted.keys()].join(",")}]`;
+      if (defaults.size > 0 || mounted.size > 0) {
+        const signature = `default=[${[...defaults].join(",")}] mounted=[${[...mounted.keys()].join(",")}]`;
         if (signature !== lastSyncSignature) {
           lastSyncSignature = signature;
           process.stderr.write(`[enpoi-capabilities] mcp sync: ${signature}
@@ -22554,15 +22656,28 @@ ${rows.map(renderMountRow).join("\n")}`;
         }
       }
       for (const id of [...mounted.keys()]) {
-        const def = catalog[id];
-        const keep = want.has(id) || def !== void 0 && isOnDemand(def) && sessionsWithMount(id) > 0;
+        const keep = defaults.has(id) || sessionsWithMount(id) > 0;
         if (!keep) disposeServer(id);
       }
-      for (const id of want) {
+      for (const id of defaults) {
         if (mounted.has(id) || mountedPending.has(id)) continue;
         await mountServer(id);
       }
     }
+    async function reconcileSessionWorld(session) {
+      const defaults = defaultWorldServers();
+      for (const id of worldOf(session)) {
+        if (defaults.has(id) || mounted.has(id) || mountedPending.has(id)) continue;
+        await mountServer(id);
+      }
+    }
+    ctx.on("session/event", ((session, event) => {
+      if (event?.type !== "turn/start" || typeof session?.id !== "string") return;
+      void reconcileSessionWorld(session).catch((error62) => {
+        process.stderr.write(`[enpoi-capabilities] mcp reconcile failed: ${error62 instanceof Error ? error62.message : String(error62)}
+`);
+      });
+    }));
     void syncMcpMounts();
     ctx.setTimeout(() => void syncMcpMounts(), 3e3);
     let lastSyncedToggleMap;
@@ -22852,8 +22967,9 @@ ${rows.map(renderMountRow).join("\n")}`;
   });
   ctx.provide("forwardedApprovals", forwardedApprovalsSeam(approvalForwarding));
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
-    const state = effectiveStateFor(exec.agent?.session);
-    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs());
+    const capSession = exec.agent?.session;
+    const state = effectiveStateFor(capSession);
+    const capabilityDecision = evaluateToolCall(exec.name, exec.arguments, state, readMcpCatalogDefs(), sessionMountsAccess?.world(capSession));
     if (!capabilityDecision.allowed) {
       return { kind: "deny", reason: capabilityDecision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.` };
     }
@@ -22866,11 +22982,9 @@ ${rows.map(renderMountRow).join("\n")}`;
       };
     }
     const execSession = exec.agent?.session;
-    if (sessionMountsAccess !== void 0 && execSession !== void 0 && typeof execSession.id === "string" && !sessionMountsAccess.isToolMounted(execSession, exec.name)) {
-      return {
-        kind: "deny",
-        reason: `${exec.name} is not available: its MCP server is on-demand and this session has not mounted it. Use the mcp tool (action "mount") first.`
-      };
+    if (sessionMountsAccess !== void 0 && execSession !== void 0 && typeof execSession.id === "string") {
+      const mcpDenial = sessionMountsAccess.toolDenyReason(execSession, exec.name);
+      if (mcpDenial !== "") return { kind: "deny", reason: mcpDenial };
     }
     const config3 = readPermissionConfig();
     const isBash = exec.name === "bash";

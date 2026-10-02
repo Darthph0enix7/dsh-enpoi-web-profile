@@ -1,12 +1,16 @@
 /**
  * dsh-enpoi-capabilities — MCP on-demand mounting model.
  *
- * Persistent config says what a server IS (configured + allowed + mode);
- * the agent's mounts are SESSION-scoped and durable through the session log:
- * the `mcp/mounts` event carries the complete post-change set and the
+ * Persistent config says what a server IS (configured + mode); the
+ * Capabilities switch sets the DEFAULT world (master-on always-on servers),
+ * and the agent's mounts are SESSION-scoped and durable through the session
+ * log: the `mcp/mounts` event carries the complete post-change set and the
  * `mcpMounts` projection folds it, so a resumed session comes back with
- * exactly the servers it had mounted. Always-on servers are implicitly
- * mounted for every session; on-demand servers are never auto-connected.
+ * exactly the servers it had mounted. A session's world is
+ * `(session mounts ∪ default-world always-on ∪ session override true) −
+ * session override false`; a switched-off server is invisible by default, but
+ * a skill's `mcp:` hint, an explicit mount, or the session switch pulls it in
+ * for that session.
  *
  * @module dsh-enpoi-capabilities/mcp-mounts
  */
@@ -110,31 +114,161 @@ export function mcpServerOfToolName(name: string): string | undefined {
   return separator <= 0 ? undefined : rest.slice(0, separator)
 }
 
+/**
+ * The default world: the servers every session gets without a pull — the
+ * master-on (`capabilities.mcp[id] === true`) always-on servers. A server the
+ * operator switched OFF is in NO session's default world (the agent does not
+ * even see it), but an explicit pull can still bring it into one session's
+ * world for the work at hand.
+ * @param catalog - the configured servers.
+ * @param masterEnabled - ids whose `capabilities.mcp[id]` is true.
+ * @returns a fresh set.
+ */
+export function mcpDefaultWorldIds(
+  catalog: Record<string, McpServerRecord>,
+  masterEnabled: ReadonlySet<string>,
+): Set<string> {
+  const set = new Set<string>()
+  for (const [id, def] of Object.entries(catalog)) {
+    if (!isOnDemand(def) && masterEnabled.has(id)) set.add(id)
+  }
+  return set
+}
+
+/**
+ * The session's world:
+ * `(session mounts ∪ default-world always-on ∪ session override true) − session override false`.
+ * The master switch sets the DEFAULT world; a pull (a durable mount or the
+ * center's "This session" switch) brings a switched-off server in anyway, and
+ * a session-off override removes a default-world server for this session only.
+ * @param catalog - the configured servers.
+ * @param masterEnabled - ids whose `capabilities.mcp[id]` is true.
+ * @param sessionMounts - the session's durable mounts (explicit pulls).
+ * @param sessionOverrides - the session's explicit `capabilities.mcp` overrides.
+ * @returns a fresh world set.
+ */
+export function mcpWorldOf(
+  catalog: Record<string, McpServerRecord>,
+  masterEnabled: ReadonlySet<string>,
+  sessionMounts: ReadonlySet<string>,
+  sessionOverrides: Readonly<Record<string, boolean>>,
+): Set<string> {
+  const world = new Set<string>()
+  for (const id of sessionMounts) {
+    if (catalog[id] !== undefined) world.add(id)
+  }
+  for (const id of mcpDefaultWorldIds(catalog, masterEnabled)) world.add(id)
+  for (const [id, on] of Object.entries(sessionOverrides)) {
+    if (on === true && catalog[id] !== undefined) world.add(id)
+  }
+  for (const [id, on] of Object.entries(sessionOverrides)) {
+    if (on === false) world.delete(id)
+  }
+  return world
+}
+
+/**
+ * The agent-visible ids of one session: the session's world plus the
+ * switched-on servers it may still pull (on-demand, unmounted). A server the
+ * operator switched OFF is invisible until something pulls it in — "the agent
+ * doesn't even see it".
+ * @param catalog - the configured servers.
+ * @param masterEnabled - ids whose `capabilities.mcp[id]` is true.
+ * @param world - the session's world (`mcpWorldOf`).
+ * @param sessionOverrides - the session's explicit `capabilities.mcp` overrides.
+ * @returns a fresh visible set.
+ */
+export function mcpVisibleIds(
+  catalog: Record<string, McpServerRecord>,
+  masterEnabled: ReadonlySet<string>,
+  world: ReadonlySet<string>,
+  sessionOverrides: Readonly<Record<string, boolean>>,
+): Set<string> {
+  const visible = new Set(world)
+  for (const id of masterEnabled) {
+    if (catalog[id] !== undefined && sessionOverrides[id] !== false) visible.add(id)
+  }
+  return visible
+}
+
+/**
+ * The operator-facing reason for a switched-off server that was not pulled in:
+ * the Capabilities center switch is off by default, so the server is absent
+ * from every session's default world until a skill, an explicit mount, or the
+ * session switch pulls it in.
+ */
+export function mcpDisabledReason(id: string): string {
+  return `server "${id}" is disabled by the operator (capabilities.mcp.${id} is not true); it is absent by default and returns when a skill's mcp: hint, an explicit mcp mount, or the session switch pulls it in`
+}
+
+/**
+ * The pre-execute deny reason for one `mcp__<server>__<tool>` name, or `''`
+ * when the call is allowed. A switched-off server that is NOT in the session's
+ * world is denied with the disabled reason (never "unknown"); an on-demand
+ * server the session has not mounted is denied until mounted; a default-world
+ * server switched off for this session is denied as session-scoped.
+ * @param catalog - the configured servers.
+ * @param masterEnabled - ids whose `capabilities.mcp[id]` is true.
+ * @param world - the session's world (`mcpWorldOf`).
+ * @param toolName - the public tool name.
+ * @returns the denial sentence, or an empty string when callable.
+ */
+export function mcpToolDenyReason(
+  catalog: Record<string, McpServerRecord>,
+  masterEnabled: ReadonlySet<string>,
+  world: ReadonlySet<string>,
+  toolName: string,
+): string {
+  const server = mcpServerOfToolName(toolName)
+  if (server === undefined) return ''
+  const entry = Object.entries(catalog).find(([id, def]) => serverNameOf(id, def) === server)
+  if (entry === undefined) return ''
+  const [id, def] = entry
+  if (world.has(id)) return ''
+  if (!masterEnabled.has(id)) {
+    return `${toolName} is not available: its MCP server "${id}" is disabled by the operator (capabilities.mcp.${id} is not true). Pull it in for this session with a skill's mcp: hint, an explicit mcp mount, or the session switch.`
+  }
+  if (isOnDemand(def)) {
+    return `${toolName} is not available: its MCP server "${id}" is on-demand and this session has not mounted it. Use the mcp tool (action "mount") first.`
+  }
+  return `${toolName} is not available: its MCP server "${id}" is switched off for this session (session scope).`
+}
+
 /** One row of the `mcp list` action. */
 export interface McpMountRow {
   id: string
   serverName: string
   mode: McpServerMode
-  state: 'mounted' | 'available' | 'unavailable'
+  /** The master switch: `capabilities.mcp[id] === true`. */
+  enabled: boolean
+  state: 'mounted' | 'available' | 'disabled' | 'unavailable'
   reason: string
   toolCount: number
 }
 
 /**
- * Build the `mcp list` rows.
+ * Build `mcp` rows. The state is honest end to end: `mounted` requires BOTH
+ * the session's world and a live fiber; a failed/pending fiber is
+ * `unavailable` with its reason and its real (usually 0) tool count; a
+ * switched-off server that was not pulled in is `disabled` in the operator
+ * view and is omitted from the agent view via `options.include`.
  * @param catalog - the configured servers.
- * @param allowed - ids whose `capabilities.mcp[id]` is true.
- * @param mounted - ids mounted for this session (always-on servers included).
+ * @param masterEnabled - ids whose `capabilities.mcp[id]` is true.
+ * @param world - the session's world (`mcpWorldOf`).
+ * @param connected - ids with a live mcp-client fiber (globally connected).
  * @param errors - last mount failure per id.
  * @param toolNames - every registered tool name.
- * @returns one row per configured server, sorted by id.
+ * @param options - `include` keeps only those ids (the agent-visible set).
+ * @returns one row per configured server (sorted by id), minus excluded ids.
  */
 export function buildMountRows(
   catalog: Record<string, McpServerRecord>,
-  allowed: ReadonlySet<string>,
-  mounted: ReadonlySet<string>,
+  masterEnabled: ReadonlySet<string>,
+  world: ReadonlySet<string>,
+  connected: ReadonlySet<string>,
   errors: ReadonlyMap<string, string>,
   toolNames: readonly string[],
+  options?: { include?: ReadonlySet<string> },
 ): McpMountRow[] {
   const counts = new Map<string, number>()
   for (const name of toolNames) {
@@ -143,27 +277,34 @@ export function buildMountRows(
     counts.set(server, (counts.get(server) ?? 0) + 1)
   }
   return Object.entries(catalog)
+    .filter(([id]) => options?.include === undefined || options.include.has(id))
     .map(([id, record]) => {
       const serverName = serverNameOf(id, record)
       const toolCount = counts.get(serverName) ?? 0
       const error = errors.get(id)
-      const state: McpMountRow['state'] = mounted.has(id)
-        ? 'mounted'
-        : !allowed.has(id)
-          ? 'unavailable'
-          : record.url === undefined || record.url === ''
-            ? 'unavailable'
-            : error !== undefined
-              ? 'unavailable'
-              : 'available'
-      const reason = mounted.has(id)
-        ? ''
-        : !allowed.has(id)
-          ? 'not allowed: capabilities.mcp.' + id + ' is not true'
-          : record.url === undefined || record.url === ''
-            ? 'no url configured'
-            : error ?? ''
-      return { id, serverName, mode: serverModeOf(record), state, reason, toolCount }
+      const enabled = masterEnabled.has(id)
+      const inWorld = world.has(id)
+      const live = connected.has(id)
+      let state: McpMountRow['state']
+      let reason = ''
+      if (!enabled && !inWorld) {
+        state = 'disabled'
+        reason = mcpDisabledReason(id)
+      } else if (error !== undefined) {
+        state = 'unavailable'
+        reason = error
+      } else if (record.url === undefined || record.url === '') {
+        state = 'unavailable'
+        reason = 'no url configured'
+      } else if (inWorld && live) {
+        state = 'mounted'
+      } else if (!inWorld) {
+        state = 'available'
+      } else {
+        state = 'unavailable'
+        reason = 'not connected'
+      }
+      return { id, serverName, mode: serverModeOf(record), enabled, state, reason, toolCount }
     })
     .sort((left, right) => left.id.localeCompare(right.id))
 }

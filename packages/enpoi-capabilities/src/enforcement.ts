@@ -35,15 +35,18 @@ function catalogIdOf(segment: string, catalog: McpCatalogDefs | undefined): stri
  * Enforces denial at the execution boundary (Invariant B1).
  * @param toolName - public tool name (native or `mcp__<server>__<tool>`).
  * @param args - call arguments (subagent_type / skill name dispatches).
- * @param state - resolved capability state.
+ * @param state - resolved capability state (the session's effective state).
  * @param mcpCatalog - live `mcpServers` catalog; resolves a tool-name server
  *   segment back to the catalog id `capabilities.mcp[...]` is keyed by.
+ * @param mcpWorld - the session's MCP world (`mcpWorldOf`); a server pulled in
+ *   for this session is callable even when the master switch is off.
  */
 export function evaluateToolCall(
   toolName: string,
   args: Record<string, unknown> | undefined,
   state: CapabilitiesState,
   mcpCatalog?: McpCatalogDefs,
+  mcpWorld?: ReadonlySet<string>,
 ): PreDispatchDecision {
   // Invariant I15: Protected infrastructure always allowed
   if (PROTECTED_CAPABILITIES.has(toolName)) {
@@ -86,6 +89,11 @@ export function evaluateToolCall(
   // resolves whole), then the mounted name maps back to its catalog id — the
   // key `capabilities.mcp[...]` is written under. An unknown server keeps the
   // historical `__`-split / `-mcp` fallback.
+  //
+  // The master switch OFF is the DEFAULT world, not a refusal: a server pulled
+  // into this session (skill `mcp:` hint, explicit mount, session switch) is
+  // callable even when its toggle is not true; a switched-off server that was
+  // NOT pulled in is denied with the disabled reason (never "unknown").
   if (toolName.startsWith('mcp__')) {
     const segment = mcpServerSegment(toolName, mountedServerNames(mcpCatalog))
     if (segment !== undefined) {
@@ -93,11 +101,12 @@ export function evaluateToolCall(
       const toggleKeys = [...new Set(
         [catalogId, `${segment}-mcp`, segment].filter((key): key is string => key !== undefined && key !== ''),
       )]
-      if (toggleKeys.some(key => state.mcp[key] === false)) {
+      const pulled = catalogId !== undefined && mcpWorld?.has(catalogId) === true
+      if (!pulled && !toggleKeys.some(key => state.mcp[key] === true)) {
         const suite = catalogId ?? `${segment}-mcp`
         return {
           allowed: false,
-          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is currently disabled by operator preference for this query. Do not attempt to invoke it in this turn.`,
+          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is disabled by the operator (capabilities.mcp.${suite} is not true). Pull it in for this session with a skill's mcp: hint, an explicit mcp mount, or the session switch. Do not attempt to invoke it in this turn otherwise.`,
         }
       }
     }
