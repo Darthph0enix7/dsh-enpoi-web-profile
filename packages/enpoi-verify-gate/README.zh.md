@@ -17,8 +17,13 @@
 - 任何携带结构化事实的工具结果：工具自有的 `meta.exitCode`（bash/pwsh 的
   `ShellOutcomeMeta`）或结构化 `error` 身份。
 
+编排/调度控制面工具（`subagent`、`task`、goal 工具、`send_message`、
+`interrupt_agent`、`list_agents`）不计入：容量拒绝或审批不可用属于编排事实，而
+不是被验证工作的失败。它们的结果既不会触发也不会清除验证门。
+
 「失败」包括：`meta.exitCode` 存在且不为 `0`（`null` 表示被信号杀死）、存在结构化
-`error`、工具结果块 `isError === true`，或识别出失败文本（`[exit code: N]`、
+`error`、工具角色消息的 `isError === true`（原生 session-format V4 —— 不再读取已
+弃用的 V3 嵌套 `tool-result` 包装），或识别出失败文本（`[exit code: N]`、
 `FAILED`、`AssertionError`、`Traceback …`、`… ERR!`、`command not found`）。
 同一回合内后续的通过验证会清除先前的失败；非验证类结果（如 `read`）不影响判定。
 

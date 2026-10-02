@@ -7,6 +7,16 @@ import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 var VERIFY_UNMET_EVENT = "verify/unmet";
 var DEFAULT_GATE_CONFIG = Object.freeze({ mode: "record", promptOnce: false });
 var VERIFICATION_TOOLS = /* @__PURE__ */ new Set(["bash", "pwsh", "str_replace_editor"]);
+var CONTROL_PLANE_TOOLS = /* @__PURE__ */ new Set([
+  "subagent",
+  "task",
+  "create_goal",
+  "get_goal",
+  "update_goal",
+  "send_message",
+  "interrupt_agent",
+  "list_agents"
+]);
 var PREVIEW_CHARS = 200;
 var FAILURE_TEXT_PATTERN = /\[exit code:\s*[1-9][0-9]*\]|\bFAILED\b|AssertionError|Traceback \(most recent call last\)|\b(?:npm|pnpm|yarn) ERR!|\bcommand not found\b|^\s*Error:/;
 var ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
@@ -31,6 +41,7 @@ function previewFailureText(text, max = PREVIEW_CHARS) {
 function observeToolResult(facts) {
   const tool = typeof facts.tool === "string" && facts.tool !== "" ? facts.tool : "unknown";
   const turn = typeof facts.turn === "number" && Number.isFinite(facts.turn) ? Math.trunc(facts.turn) : 0;
+  if (CONTROL_PLANE_TOOLS.has(tool)) return void 0;
   const exitCode = readExitCode(facts.meta);
   const errorRecord = asRecord(facts.error);
   const structuredError = errorRecord !== void 0;
@@ -209,21 +220,15 @@ function resolveGateConfig(ctx, config = {}) {
 function extractToolResultFacts(data) {
   const message = asRecord2(data.message);
   const source = asRecord2(message?.source);
-  const callIdRaw = typeof data.callId === "string" ? data.callId : source?.callId;
+  const callIdRaw = typeof data.callId === "string" ? data.callId : typeof message?.toolCallId === "string" ? message.toolCallId : source?.callId;
   const callId = typeof callIdRaw === "string" && callIdRaw !== "" ? callIdRaw : void 0;
   const turn = typeof data.turn === "number" && Number.isFinite(data.turn) ? Math.trunc(data.turn) : void 0;
-  let isError;
+  const isError = typeof message?.isError === "boolean" ? message.isError : void 0;
   const texts = [];
   const content = Array.isArray(message?.content) ? message.content : [];
   for (const blockRaw of content) {
     const block = asRecord2(blockRaw);
-    if (block === void 0 || block.type !== "tool-result") continue;
-    if (typeof block.isError === "boolean") isError = block.isError;
-    const inner = Array.isArray(block.content) ? block.content : [];
-    for (const partRaw of inner) {
-      const part = asRecord2(partRaw);
-      if (part?.type === "text" && typeof part.text === "string") texts.push(part.text);
-    }
+    if (block?.type === "text" && typeof block.text === "string") texts.push(block.text);
   }
   return {
     ...turn === void 0 ? {} : { turn },
@@ -382,6 +387,7 @@ function apply(ctx, config = {}, options = {}) {
   }
 }
 export {
+  CONTROL_PLANE_TOOLS,
   Config,
   DEFAULT_GATE_CONFIG,
   FAILURE_TEXT_PATTERN,

@@ -10,6 +10,11 @@
  * - any tool result carrying structured facts: a tool-owned `meta.exitCode`
  *   (bash/pwsh's `ShellOutcomeMeta`) or a structured `error` identity.
  *
+ * What never counts: results of orchestration control-plane tools
+ * ({@link CONTROL_PLANE_TOOLS}) — child dispatch, goal, and inter-agent
+ * message tools. A capacity rejection or an unavailable approval is a
+ * dispatch/control fact, not a failure of the work the turn is verifying.
+ *
  * What counts as a failure:
  * - `meta.exitCode` present and not 0 (null means signal-killed), or
  * - a structured `error` (name/code/reason), or
@@ -41,6 +46,26 @@ export const DEFAULT_GATE_CONFIG: GateConfig = Object.freeze({ mode: 'record', p
 /** Tools whose results are verification-ish even without structured facts. */
 export const VERIFICATION_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh', 'str_replace_editor'])
 
+/**
+ * Orchestration/dispatch-plane tools. A result from one of these tools is a
+ * control-flow fact (child admitted or rejected, goal read, message delivered,
+ * agent interrupted) and never evidence about the state of the work the turn is
+ * verifying. Their results are excluded from the gate entirely — even a
+ * structured `error` such as `ACTIVATION_LIMIT_REACHED` or a `message.isError`
+ * approval failure. Only failures of the verified work count; a dispatch error
+ * is classified as control-plane, not as a failed verification.
+ */
+export const CONTROL_PLANE_TOOLS: ReadonlySet<string> = new Set([
+  'subagent',
+  'task',
+  'create_goal',
+  'get_goal',
+  'update_goal',
+  'send_message',
+  'interrupt_agent',
+  'list_agents',
+])
+
 /** Why one tool result is classified as a verification failure. */
 export type VerifyFailureReason = 'exit-code' | 'tool-error' | 'is-error' | 'failure-text'
 
@@ -56,9 +81,9 @@ export interface ToolResultFacts {
   readonly error?: unknown
   /** Tool-private metadata (`data.meta`); bash/pwsh carry `exitCode` here. */
   readonly meta?: unknown
-  /** Tool-result block error flag. */
+  /** Native V4 `message.isError` flag on the tool-role message. */
   readonly isError?: boolean | undefined
-  /** Rendered model-facing text (all text blocks joined). */
+  /** Rendered model-facing text (all top-level text blocks joined). */
   readonly text?: string | undefined
 }
 
@@ -155,6 +180,9 @@ export function previewFailureText(text: string | undefined, max: number = PREVI
 export function observeToolResult(facts: ToolResultFacts): VerifyObservation | undefined {
   const tool = typeof facts.tool === 'string' && facts.tool !== '' ? facts.tool : 'unknown'
   const turn = typeof facts.turn === 'number' && Number.isFinite(facts.turn) ? Math.trunc(facts.turn) : 0
+  // Control/dispatch-plane results never participate: they neither fail nor
+  // clear a verification (D3). A rejected dispatch is not a failed check.
+  if (CONTROL_PLANE_TOOLS.has(tool)) return undefined
   const exitCode = readExitCode(facts.meta)
   const errorRecord = asRecord(facts.error)
   const structuredError = errorRecord !== undefined

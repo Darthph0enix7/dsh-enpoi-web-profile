@@ -19,9 +19,15 @@ ended **unverified** when both hold:
 - any tool result carrying structured facts: a tool-owned `meta.exitCode`
   (bash/pwsh's `ShellOutcomeMeta`) or a structured `error` identity.
 
+Control/dispatch-plane tools (`subagent`, `task`, goal tools, `send_message`,
+`interrupt_agent`, `list_agents`) never count: a capacity rejection or an
+unavailable approval is an orchestration fact, not a failed verification of the
+work. Their results neither open nor clear the gate.
+
 "Failed" is: `meta.exitCode` present and not `0` (`null` = signal-killed), or a
-structured `error`, or the tool-result block's `isError === true`, or a
-recognised failure text (`[exit code: N]`, `FAILED`, `AssertionError`,
+structured `error`, or the tool-role message's `isError === true` (native
+session-format V4 — the retired V3 nested `tool-result` wrapper is not read), or
+a recognised failure text (`[exit code: N]`, `FAILED`, `AssertionError`,
 `Traceback …`, `… ERR!`, `command not found`). A later passing verification
 clears an earlier failure in the same turn; non-verification results (e.g.
 `read`) do not.

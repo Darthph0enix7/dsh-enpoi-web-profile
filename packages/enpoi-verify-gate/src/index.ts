@@ -138,25 +138,38 @@ export function resolveGateConfig(ctx: Context, config: Config = {}): GateConfig
   }
 }
 
-/** Structural `tool/result` payload facts (plugin events are read by name). */
+/**
+ * Structural `tool/result` payload facts (plugin events are read by name).
+ *
+ * The live shape is native session-format V4: the event carries
+ * `data.message = { role: 'tool', source: { kind: 'tool', callId }, toolCallId,
+ * content: [{ type: 'text', text }], isError?, id }`, with `data.turn`,
+ * `data.meta` and `data.error` alongside. There is no nested `tool-result`
+ * wrapper any more: session-format-v3-to-v4 lifts the wrapper's `content` and
+ * `isError` onto the tool-role message, and the session core rejects the
+ * retired wrapper at the seed/load boundary (`assertCurrentLlmShape` requires
+ * `message.toolCallId === message.source.callId`), so no live stream emits it.
+ * The V3 nested branch is deliberately not kept: reading it was dead code and
+ * let V3-shaped test fixtures mask a production regression.
+ * @param data - one `tool/result` event payload.
+ * @returns the structural facts the decision core classifies.
+ */
 export function extractToolResultFacts(data: Record<string, unknown>): ToolResultFacts & { turn?: number } {
   const message = asRecord(data.message)
   const source = asRecord(message?.source)
-  const callIdRaw = typeof data.callId === 'string' ? data.callId : source?.callId
+  const callIdRaw = typeof data.callId === 'string'
+    ? data.callId
+    : typeof message?.toolCallId === 'string'
+      ? message.toolCallId
+      : source?.callId
   const callId = typeof callIdRaw === 'string' && callIdRaw !== '' ? callIdRaw : undefined
   const turn = typeof data.turn === 'number' && Number.isFinite(data.turn) ? Math.trunc(data.turn) : undefined
-  let isError: boolean | undefined
+  const isError = typeof message?.isError === 'boolean' ? message.isError : undefined
   const texts: string[] = []
   const content = Array.isArray(message?.content) ? message.content : []
   for (const blockRaw of content) {
     const block = asRecord(blockRaw)
-    if (block === undefined || block.type !== 'tool-result') continue
-    if (typeof block.isError === 'boolean') isError = block.isError
-    const inner = Array.isArray(block.content) ? block.content : []
-    for (const partRaw of inner) {
-      const part = asRecord(partRaw)
-      if (part?.type === 'text' && typeof part.text === 'string') texts.push(part.text)
-    }
+    if (block?.type === 'text' && typeof block.text === 'string') texts.push(block.text)
   }
   return {
     ...(turn === undefined ? {} : { turn }),
@@ -348,6 +361,7 @@ export {
   previewFailureText,
   readExitCode,
   VerifyGateTracker,
+  CONTROL_PLANE_TOOLS,
   DEFAULT_GATE_CONFIG,
   FAILURE_TEXT_PATTERN,
   MAX_TRACKED_SESSIONS,
