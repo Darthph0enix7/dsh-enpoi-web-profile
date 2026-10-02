@@ -29,7 +29,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
-  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel,
+  denyNames, groupVisibleTo, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel,
   type ResolvedToolGroups,
 } from './catalog.js'
 import { toolGroupsProjection, type ToolGroupsProjectionState } from './projection.js'
@@ -404,7 +404,10 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
       // never has to reconcile the tool result with the catalog.
       const durable = state === undefined ? null : plannedAttached(state.agent, groups)
       const pending = durable?.filter(groupId => !appliedSet.has(groupId)) ?? []
-      return renderMenuText(groups, appliedSet, pending)
+      // The seat filter keeps a seat-restricted group (the creator's authoring
+      // tools) out of every other seat's menu: no agent reads a family it can
+      // never attach.
+      return renderMenuText(groups, appliedSet, pending, seatOfAgent(context.scope as Agent))
     },
   })
 
@@ -443,8 +446,9 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
       // append), so two attaches in one turn compose instead of overwriting.
       const durable = plannedAttached(agent, groups)
       const attached = durable ?? applied
+      const seat = seatOfAgent(agent)
       const rows: GroupRow[] = groups.groups
-        .filter(group => group.mode === 'on-demand' && group.enabled)
+        .filter(group => group.mode === 'on-demand' && group.enabled && groupVisibleTo(group, seat))
         .map(group => ({
           id: group.id,
           label: group.label,
@@ -461,7 +465,7 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
       if (durable === null) {
         return empty(action, groupId, 'tool groups are unavailable in this session (the presentation filter is failing open)')
       }
-      const planned = planGroupAction(groups, new Set(durable), action, groupId)
+      const planned = planGroupAction(groups, new Set(durable), action, groupId, seat)
       if (!planned.ok) return empty(action, groupId, planned.reason)
       agent.session.append(CHANGE_EVENT, { attached: [...planned.attached] }, { ignorable: true })
       return { ok: true, action, group: groupId, attached: [...planned.attached], groups: rows, reason: '' }
@@ -582,6 +586,6 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   })
 }
 
-export { resolveToolGroups, denyNames, planGroupAction, preAttachFor, renderMenuText, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS } from './catalog.js'
+export { resolveToolGroups, denyNames, groupVisibleTo, planGroupAction, preAttachFor, renderMenuText, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS } from './catalog.js'
 export { toolGroupsProjection, applyToolGroupsProjection } from './projection.js'
 export type { ResolvedToolGroups, ToolGroupDefinition, ToolGroupMode } from './catalog.js'

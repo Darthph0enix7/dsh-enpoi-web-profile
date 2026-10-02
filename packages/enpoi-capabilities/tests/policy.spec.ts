@@ -629,7 +629,7 @@ describe('mcp lifecycle tool default', () => {
   })
 })
 
-describe('per-seat execution restrictions (cache-neutral canonical shape)', () => {
+describe('per-seat execution restrictions (backstop behind the creator tool group)', () => {
   it('denies the harness-authoring surface for orchestrator and sysadmin only', () => {
     expect(SHIPPED_SEAT_TOOL_DENY.orchestrator).toEqual(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query'])
     expect(SHIPPED_SEAT_TOOL_DENY.sysadmin).toEqual(SHIPPED_SEAT_TOOL_DENY.orchestrator)

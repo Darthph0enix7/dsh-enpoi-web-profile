@@ -4,8 +4,9 @@
  * action planner behind the `tool_groups` meta-tool.
  *
  * Groups are data. The defaults below are derived from the live wire registry
- * (`deepseek-harness/scripts/tool-inventory/roster-baseline.json`, 51/50/40 @
- * 2026-09-26) and frozen here; the operator document
+ * (`deepseek-harness/scripts/tool-inventory/roster-baseline.json`,
+ * 50/50/53 @ 2026-10-02: orchestrator and sysadmin drop the Creator group's
+ * three harness-authoring tools) and frozen here; the operator document
  * `enpoi-orchestration.toolGroups` overrides `enabled` per group and
  * `preAttach` per seat. Everything not named by a group is never denied — the
  * presentation filter fails open.
@@ -30,6 +31,12 @@ export interface ToolGroupDefinition {
   readonly mode: ToolGroupMode
   /** Seat ids that start with this group attached (group-level default). */
   readonly preAttach: readonly string[]
+  /**
+   * When present, the group belongs to these seats ALONE: every other seat's
+   * prompt menu and meta-tool listing omit it, and an attach that names it is
+   * refused. `preAttach` still decides which listed seat starts attached.
+   */
+  readonly seats?: readonly string[]
   /** Operator switch; `false` means never present and never attachable. */
   readonly enabled: boolean
 }
@@ -148,19 +155,34 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     label: 'Debug & observability',
     purpose: 'session log, event trace, and diagnostics inspection',
     mode: 'on-demand',
-    // Every main-agent seat pre-attaches the debug group: the presented tool
-    // array must be byte-identical across an agent switch (the provider caches
-    // the prompt prefix and the tool block sits before the conversation), so a
-    // seat-specific attached set is a cache invalidation. The Creator and the
+    // Every main-agent seat pre-attaches the debug group. The Creator and the
     // council broker advertise self-diagnosis in their personas; orchestrator
-    // and sysadmin now carry the same read-only diagnostics surface. An
-    // operator seat override in the document still wins.
+    // and sysadmin carry the same read-only diagnostics surface. An operator
+    // seat override in the document still wins.
     preAttach: ['orchestrator', 'sysadmin', 'creator', 'broker'],
     enabled: true,
     members: [
       'diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search',
       'session_event_trace', 'session_search', 'session_trace',
     ],
+  },
+  {
+    id: 'creator',
+    label: 'Creator (harness authoring)',
+    purpose: 'inspect and manage the harness plugin composition',
+    mode: 'on-demand',
+    // Only the Creator seat pre-attaches, and only the Creator seat can see or
+    // attach the group at all (`seats`): harness authoring is its specialty, so
+    // orchestrator and sysadmin never SEE the tools — the group's deny filter
+    // removes them from the advertised surface and this group is absent from
+    // their menu and meta-tool listing (the seat guard in `enpoi-capabilities`
+    // stays as the execution backstop). This is a deliberate break of the
+    // byte-identical main-agent tool block: a cross-agent switch rebuilds the
+    // provider's prompt prefix once; turns within one seat keep the prefix.
+    preAttach: ['creator'],
+    seats: ['creator'],
+    enabled: true,
+    members: ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager'],
   },
 ])
 
@@ -227,7 +249,22 @@ export function preAttachFor(catalog: ResolvedToolGroups, seat: string): string[
   const candidates = override ?? catalog.groups
     .filter(group => group.preAttach.includes(seat))
     .map(group => group.id)
-  return sortGroupIds(candidates.filter(id => catalog.byId.get(id)?.enabled === true))
+  return sortGroupIds(candidates.filter((id) => {
+    const group = catalog.byId.get(id)
+    return group !== undefined && group.enabled && groupVisibleTo(group, seat)
+  }))
+}
+
+/**
+ * Whether one group belongs to one seat. A group without `seats` is shared;
+ * a group with `seats` is invisible and unattachable everywhere else.
+ * @param group - one catalog group.
+ * @param seat - the asking seat id, or undefined for no known seat.
+ * @returns true when the seat may see and attach the group.
+ */
+export function groupVisibleTo(group: ToolGroupDefinition, seat: string | undefined): boolean {
+  if (group.seats === undefined) return true
+  return seat !== undefined && group.seats.includes(seat)
 }
 
 /** Sort group ids by the stable catalog order (unknown ids last, lexical). */
@@ -321,6 +358,7 @@ export type GroupActionPlan =
  * @param attached - applied attached group ids.
  * @param action - `attach` or `detach`.
  * @param groupId - the group the action names.
+ * @param seat - the asking seat id; a seat-restricted group refuses other seats.
  * @returns the post-action attached set, or a refusal reason.
  */
 export function planGroupAction(
@@ -328,11 +366,15 @@ export function planGroupAction(
   attached: ReadonlySet<string>,
   action: 'attach' | 'detach',
   groupId: string,
+  seat?: string,
 ): GroupActionPlan {
   const group = catalog.byId.get(groupId)
   if (group === undefined) {
     const known = catalog.groups.map(candidate => candidate.id).join(', ')
     return { ok: false, reason: `unknown tool group "${groupId}" (known: ${known})` }
+  }
+  if (!groupVisibleTo(group, seat)) {
+    return { ok: false, reason: `tool group "${groupId}" is reserved for the ${(group.seats ?? []).join('/')} seat` }
   }
   if (!group.enabled) {
     return { ok: false, reason: `tool group "${groupId}" is disabled by the operator` }
@@ -349,22 +391,26 @@ export function planGroupAction(
 }
 
 /**
- * Render the model-facing menu for the enabled on-demand groups. Static groups
- * are always present and need no menu entry; disabled groups are not offered.
+ * Render the model-facing menu for the enabled on-demand groups the seat can
+ * see. Static groups are always present and need no menu entry; disabled and
+ * seat-restricted-out groups are not offered.
  * @param catalog - the resolved catalog.
  * @param attached - the attached group ids the current tool block reflects.
  * @param pending - attached group ids whose change lands at the next turn.
+ * @param seat - the seat the menu renders for; omitted means an unknown seat,
+ *   which sees only unrestricted groups.
  * @returns the menu section text (empty when no on-demand group is available).
  */
 export function renderMenuText(
   catalog: ResolvedToolGroups,
   attached: ReadonlySet<string>,
   pending: readonly string[] = [],
+  seat?: string,
 ): string {
   const pendingSet = new Set(pending)
   const lines: string[] = []
   for (const group of catalog.groups) {
-    if (group.mode !== 'on-demand' || !group.enabled) continue
+    if (group.mode !== 'on-demand' || !group.enabled || !groupVisibleTo(group, seat)) continue
     const state = pendingSet.has(group.id)
       ? 'attached — applies from the next turn'
       : attached.has(group.id) ? 'attached' : 'not attached'

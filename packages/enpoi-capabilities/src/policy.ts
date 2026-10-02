@@ -120,14 +120,19 @@ const REVIEW_CHILD_PERSONA = /^you are the (?:oracle|reviewer|critic|referee|cha
 /**
  * Tools a seat may never CALL, enforced at the pre-execute boundary.
  *
- * The advertised tool array must stay byte-identical across every main-agent
- * preset (the provider caches the prompt prefix, and the tool declarations sit
- * before the conversation), so a per-seat restriction can no longer be tool
- * ABSENCE: the rows mount everywhere and this table denies the call. The
- * harness-authoring surface is the creator's specialty; orchestrator and
- * sysadmin keep it advertised but cannot run it. A seat absent from the table
- * is unrestricted; the orchestration document's `seatToolDeny` record replaces
- * a seat's shipped list when it names one.
+ * The presentation layer is the primary mechanism: the `creator` tool group in
+ * the `enpoi-tool-groups` catalog pre-attaches only to the Creator seat, so
+ * orchestrator and sysadmin never SEE `plugin_manager` or the two
+ * `cordis_inspect_*` tools (their group's deny filter removes them from the
+ * advertised surface; `denyNames` in `enpoi-tool-groups/catalog`). This table
+ * is the EXECUTION backstop behind that structural absence — a call that
+ * reaches the pre-execute boundary anyway (a stale composition, a direct
+ * invocation path) is denied with the seat message. The cost is accepted and
+ * documented: the creator tool group makes the main-agent tool arrays differ,
+ * so a cross-agent switch rebuilds the provider's prompt prefix once; turns
+ * within one seat keep the cached prefix. A seat absent from the table is
+ * unrestricted; the orchestration document's `seatToolDeny` record replaces a
+ * seat's shipped list when it names one.
  */
 export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
   orchestrator: Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
@@ -213,12 +218,13 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   // Attach/detach only decide which advertised rows this session MAY call —
   // every row keeps its own policy — and both directions are reversible.
   tool_groups: 'allow',
-  // Harness introspection is read-only, but the seat table below keeps
-  // orchestrator and sysadmin out (creator's specialty); this default decides
-  // the creator seat and any future seat that advertises the tools.
+  // Harness introspection is read-only. The creator tool group keeps it off
+  // the orchestrator and sysadmin advertised surfaces; this default decides
+  // the creator seat (and any future seat that advertises the tools).
   cordis_inspect_list: 'allow', cordis_inspect_query: 'allow',
-  // Harness authoring: the seat table already restricts the CALL to the creator
-  // seat (pre-execute denies orchestrator/sysadmin with the seat message). The
+  // Harness authoring: the creator tool group presents it to the creator seat
+  // alone, and the seat table in this file backs that absence at pre-execute
+  // (orchestrator/sysadmin get the seat denial if a call somehow arrives). The
   // creator persona advertises this tool as its specialty; carding the seat
   // whose job is the change itself contradicts self-sufficiency.
   plugin_manager: 'allow',
