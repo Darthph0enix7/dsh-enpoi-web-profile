@@ -66,6 +66,7 @@
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import {
   dangerVerbInText,
+  effectiveCommandText,
   grantProposalFor,
   grantProposalForOutcome,
   splitCompoundCommand,
@@ -245,6 +246,16 @@ export interface ForwardingDeps {
   report(line: string): void
   /** The deployment's delegation depth cap (`ctx.subagents.resolveMaxDepth`). */
   depthCap(): number
+  /**
+   * Whether the root session currently sits outside any open turn. The host
+   * supplies the harness's own open-turn fold; absent keeps the immediate card
+   * path, so the park failsafe is opt-in and never guessed.
+   */
+  isRootIdle?(root: RootHandle): boolean
+  /** Durable park journal; absent keeps parked records live in memory only. */
+  parkJournal?: ParkJournal
+  /** Park window override; default {@link DEFAULT_PARK_TTL_MS}. */
+  parkTtlMs?(): number
 }
 
 /** One delegated child ask entering the forwarder. */
@@ -263,6 +274,24 @@ export type ChildAskResolution =
   | { readonly kind: 'allow'; readonly reason: string }
   | { readonly kind: 'deny'; readonly reason: string }
 
+/** In-process parked ask: the durable record plus the waiting child's resolution. */
+interface ParkedEntry {
+  readonly record: ParkedAskRecord
+  readonly input: ChildAskInput
+  readonly root: RootHandle
+  readonly origin: ForwardingOrigin
+  readonly proposal: GrantProposal
+  readonly rail: RailHit | undefined
+  resolve: (resolution: ChildAskResolution) => void
+  timer?: ReturnType<typeof setTimeout> | undefined
+  removeAbort?: (() => void) | undefined
+  settled: boolean
+}
+
+/** The root's turn closed between replay and dispatch: keep the ask parked. */
+const REPARK = Symbol('approval-repark')
+type CardResolution = ChildAskResolution | typeof REPARK
+
 /**
  * Marker embedded in every forwarded ask reason. The allow-always grant writer
  * recognises it and skips its global persistence path: a forwarded grant is
@@ -276,6 +305,74 @@ export const FORWARDED_ASK_MARKER = '[forwarded child ask]'
  * with a named reason instead of queueing judgements forever.
  */
 export const PARENT_JUDGEMENT_BUDGET_PER_TURN = 8
+
+/**
+ * Default window one forwarded ask may stay parked while its root session sits
+ * between turns. Long enough that an operator finishing the current task and
+ * starting the next root turn can still answer it, short enough that a child
+ * whose root never returns is denied well before a full work session is lost.
+ * The window bounds the wait FOR THE ROOT only: once the root's turn opens,
+ * the card's own answer timeout bounds the answer.
+ */
+export const DEFAULT_PARK_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Most forwarded asks one process keeps parked at once. Beyond the cap a new
+ * idle-root ask fails closed with a named reason instead of growing the queue
+ * without bound; a flood of asks is still bounded and still answered.
+ */
+export const MAX_PARKED_ASKS = 32
+
+/** Settled park records a journal keeps for audit; the oldest are pruned first. */
+export const PARK_JOURNAL_SETTLED_KEEP = 50
+
+/** Lifecycle state of one parked forwarded ask. */
+export type ParkState = 'parked' | 'resolved' | 'expired' | 'cancelled'
+
+/** How a parked ask left the queue: the resolver and whether it was a decision. */
+export type ParkSettlement = 'full-access' | 'card' | 'expired' | 'cancelled' | 'unavailable' | 'restart'
+
+/**
+ * One durably recorded parked forwarded ask: the root sat between turns when
+ * the ask arrived, so no card could be audited or answered. Identity fields
+ * survive in a {@link ParkJournal}; the waiting child's promise is
+ * process-local, so a restart expires restored records rather than replaying a
+ * card no live child is waiting for.
+ */
+export interface ParkedAskRecord {
+  readonly id: string
+  /** Monotonic park order within the origin process; replay is FIFO by this. */
+  readonly seq: number
+  /** The delegated child that produced the ask. */
+  readonly childSessionId: string
+  /** The child's descriptor label, for the audit line. */
+  readonly childLabel: string
+  /** Delegation depth from the root. */
+  readonly depth: number
+  /** The root session whose next turn start resolves the ask. */
+  readonly rootSessionId: string
+  readonly toolName: string
+  /** The bash command (or equivalent action identity), when the tool has one. */
+  readonly command?: string
+  /** Why the child's policy required approval. */
+  readonly reason: string
+  readonly parkedAt: number
+  readonly expiresAt: number
+  /** Transition fields; the journal durably records each settled state. */
+  state: ParkState
+  settledAt?: number
+  settledVia?: ParkSettlement
+  /** The resolved tool-call decision: `allow` proceeds, `deny` is corrective. */
+  settledWith?: 'allow' | 'deny'
+}
+
+/** Durable journal of parked asks: load at boot, upsert one record per transition. */
+export interface ParkJournal {
+  /** Every record from the previous process, newest state each. */
+  load(): readonly ParkedAskRecord[]
+  /** Insert or replace one record by id. */
+  append(record: ParkedAskRecord): void
+}
 
 /** Path-argument keys scanned for credential and boundary rails. */
 const PATH_ARG_KEYS: readonly string[] = [
@@ -302,6 +399,11 @@ const FS_PATH_TOOLS: ReadonlySet<string> = new Set([
 /** Truncated session id used in human-facing provenance text. */
 function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id
+}
+
+/** Audit-friendly park window: seconds once at least a second, else milliseconds. */
+function windowText(ms: number): string {
+  return ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${ms}ms`
 }
 
 /**
@@ -412,15 +514,20 @@ function railOfBash(command: string): RailHit | undefined {
   for (const rawSub of splitCompoundCommand(command)) {
     const sub = stripEnvPrefixes(rawSub).trim()
     if (sub === '') continue
-    const argv = sub.split(/\s+/)
     // Classify by the command word's basename: `/bin/rm` is the `rm` rail,
     // `/usr/bin/sudo` is the privilege-escalation rail.
+    const rawArgv0 = baseName(sub.split(/\s+/)[0] ?? '')
+    if (PRIVILEGE_ESCALATORS.has(rawArgv0)) return { rail: 'privilege-escalation', evidence: sub }
+    // See through the same transparent command wrappers the policy evaluator
+    // strips, so a `nice`/`env`/`timeout`/`command` prefix cannot hide a rail.
+    const effective = effectiveCommandText(sub)
+    const argv = effective.split(/\s+/)
     if (argv.length > 0) argv[0] = baseName(argv[0] ?? '')
     const argv0 = argv[0] ?? ''
     if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: 'privilege-escalation', evidence: sub }
     if ((argv0 === 'rm' || argv0 === 'rmdir') && isRecursiveDelete(argv)) return { rail: 'recursive-delete', evidence: sub }
-    if (argv0 === 'find' && /(?:^|\s)(?:-delete|-exec\s+rm\b)/.test(sub)) return { rail: 'recursive-delete', evidence: sub }
-    if (argv0 === 'rsync' && /(?:^|\s)--delete\b/.test(sub)) return { rail: 'recursive-delete', evidence: sub }
+    if (argv0 === 'find' && /(?:^|\s)(?:-delete|-exec(?:dir)?\s+rm\b)/.test(effective)) return { rail: 'recursive-delete', evidence: sub }
+    if (argv0 === 'rsync' && /(?:^|\s)--delete\b/.test(effective)) return { rail: 'recursive-delete', evidence: sub }
     if (argv0 === 'git' && isHistoryRewrite(argv)) return { rail: 'history-rewrite', evidence: sub }
     if (EXFILTRATORS.has(argv0)) return { rail: 'exfiltration', evidence: sub }
     if (argv0 === 'rsync' && argv.slice(1).some(isRemoteTarget)) return { rail: 'exfiltration', evidence: sub }
@@ -609,8 +716,18 @@ export class ChildApprovalForwarder {
   private readonly allowedCalls = new Map<string, Map<string, string>>()
   /** Per-root judgement budget: the turn it counts against and how much it spent. */
   private readonly judgementBudget = new Map<string, { turn: string; count: number }>()
+  /** Parked asks by park id; Map order is park order. */
+  private readonly parked = new Map<string, ParkedEntry>()
+  /** Park order counter; restored records advance it past their own seq. */
+  private parkSeq = 0
+  /** Replays in flight per root session, plus one queued follow-up pass each. */
+  private readonly replays = new Map<string, Promise<void>>()
+  private readonly replayQueued = new Set<string>()
+  private disposed = false
 
-  constructor(private readonly deps: ForwardingDeps) {}
+  constructor(private readonly deps: ForwardingDeps) {
+    this.restoreParked()
+  }
 
   /**
    * Resolve one child ask through the parent. Rails run first and are never
@@ -717,12 +834,23 @@ export class ChildApprovalForwarder {
     const batchKey = `${child.childSessionId}\u0000${input.toolName}\u0000${command ?? stableJson(input.args)}`
     const inFlight = this.pending.get(batchKey)
     if (inFlight !== undefined) return await inFlight
-    const run = mode === 'full-access'
-      ? this.fullAccessDecision(input, root, origin, rail)
-      : this.askThroughCard(input, root, origin, proposal, rail)
-    this.pending.set(batchKey, run)
+    // Idle-parent failsafe: a card cannot be audited or answered while the root
+    // sits between turns, so the ask parks and replays at the root's next turn
+    // start (or expires with a bounded denial). Full access parks too: the
+    // parent policy decides at the root's next turn, not in the idle gap.
+    const run = (this.deps.isRootIdle?.(root) ?? false)
+      ? this.parkAsk(input, root, origin, mode, proposal, rail)
+      : mode === 'full-access'
+        ? this.fullAccessDecision(input, root, origin, rail)
+        : this.askThroughCard(input, root, origin, proposal, rail)
+    // The immediate paths can never return REPARK (only replay asks for it);
+    // normalize defensively so the pending map stays a closed resolution type.
+    const settled: Promise<ChildAskResolution> = run.then(result => result === REPARK
+      ? this.failClosed(child.childSessionId, input.toolName, "the root's turn closed while the ask was being delivered")
+      : result)
+    this.pending.set(batchKey, settled)
     try {
-      return await run
+      return await settled
     } finally {
       this.pending.delete(batchKey)
     }
@@ -916,14 +1044,19 @@ export class ChildApprovalForwarder {
     }
   }
 
-  /** Forward the ask as one root-session card and map its outcome. */
+  /**
+   * Forward the ask as one root-session card and map its outcome. During a
+   * park replay (`reparkOnIdle`) a card that reaches a root whose turn closed
+   * in the meantime re-parks instead of denying an ask the operator never saw.
+   */
   private async askThroughCard(
     input: ChildAskInput,
     root: RootHandle,
     origin: ForwardingOrigin,
     proposal: GrantProposal,
     rail: RailHit | undefined,
-  ): Promise<ChildAskResolution> {
+    reparkOnIdle = false,
+  ): Promise<CardResolution> {
     const recommendation = await this.cardRecommendation(input, root, origin, rail)
     const reason = forwardedAskReason(origin, input.decision, recommendation)
     let outcome: ApprovalOutcome
@@ -939,10 +1072,14 @@ export class ChildApprovalForwarder {
         origin,
       })
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // A replay dispatched exactly as the root's turn closed: park again
+      // rather than deny a card the operator never saw.
+      if (reparkOnIdle && message.includes('outside an open turn')) return REPARK
       return this.failClosed(
         origin.childSessionId,
         input.toolName,
-        `the forwarded ask could not be delivered: ${error instanceof Error ? error.message : String(error)}`,
+        `the forwarded ask could not be delivered: ${message}`,
       )
     }
     switch (outcome) {
@@ -1028,6 +1165,309 @@ export class ChildApprovalForwarder {
     if (!grants.some(grant => grant.proposal.tool === proposal.tool && grant.proposal.pattern === proposal.pattern)) {
       grants.push({ proposal, admittedAt: Date.now() })
       this.grants.set(childSessionId, grants)
+    }
+  }
+
+  // ── idle-parent park-and-replay (doc 04 §6, doc 11 troubleshooting) ────────
+  // A forwarded ask whose root sits between turns cannot dispatch a card: the
+  // harness's approval audit must be turn-enclosed, so `approval.request()`
+  // rejects outside an open turn. Parking records the ask (reason, child,
+  // tool/command, deadline), waits for the root's next `turn/start`, and
+  // replays it in FIFO order under the root's policy at that moment. Every
+  // exit — resolve, expire, abort, session end, dispose — settles the waiting
+  // child and the durable journal; nothing hangs and no card outlives its ask.
+
+  /** Window one ask may wait for its root's next turn; see {@link DEFAULT_PARK_TTL_MS}. */
+  private parkTtlMs(): number {
+    const configured = this.deps.parkTtlMs?.()
+    return configured !== undefined && configured > 0 ? configured : DEFAULT_PARK_TTL_MS
+  }
+
+  /**
+   * Park one ask whose root sits between turns. Records it durably, reports
+   * the park, and returns a promise settled by {@link replayParked} at the
+   * root's next turn start, by the park window's expiry, by the ask's abort
+   * signal, or by {@link releaseSession}/{@link dispose}. Identical concurrent
+   * asks share one entry through {@link resolveAsk}'s pending batch.
+   */
+  private parkAsk(
+    input: ChildAskInput,
+    root: RootHandle,
+    origin: ForwardingOrigin,
+    mode: RootMode,
+    proposal: GrantProposal,
+    rail: RailHit | undefined,
+  ): Promise<ChildAskResolution> {
+    if (this.disposed) {
+      return Promise.resolve(this.failClosed(
+        origin.childSessionId, input.toolName, 'the approval forwarder is disposed',
+      ))
+    }
+    if (this.parked.size >= MAX_PARKED_ASKS) {
+      return Promise.resolve(this.failClosed(
+        origin.childSessionId,
+        input.toolName,
+        `too many forwarded asks are already parked (${MAX_PARKED_ASKS}); the root session has not returned to open a turn`,
+      ))
+    }
+    const now = Date.now()
+    const ttl = this.parkTtlMs()
+    this.parkSeq += 1
+    const command = input.toolName === 'bash' && typeof input.args?.command === 'string' ? input.args.command : undefined
+    const record: ParkedAskRecord = {
+      id: `park-${now.toString(36)}-${this.parkSeq.toString(36)}`,
+      seq: this.parkSeq,
+      childSessionId: origin.childSessionId,
+      childLabel: origin.label,
+      depth: origin.depth,
+      rootSessionId: root.id,
+      toolName: input.toolName,
+      ...command !== undefined ? { command } : {},
+      reason: input.decision.reason,
+      parkedAt: now,
+      expiresAt: now + ttl,
+      state: 'parked',
+    }
+    let resolveEntry!: (resolution: ChildAskResolution) => void
+    const promise = new Promise<ChildAskResolution>((resolve) => { resolveEntry = resolve })
+    const entry: ParkedEntry = { record, input, root, origin, proposal, rail, resolve: resolveEntry, settled: false }
+    this.parked.set(record.id, entry)
+    this.appendJournal(record)
+    this.deps.report(
+      `park: ${input.toolName} from child ${shortId(origin.childSessionId)} (${origin.label}, depth ${origin.depth}) for root `
+      + `${shortId(root.id)} while it sits between turns — ${input.decision.reason} (replays at the root's next turn as `
+      + `${mode === 'full-access' ? 'a parent judgement, no card' : "the operator's card"}, expires in ${windowText(ttl)})`,
+    )
+    entry.timer = setTimeout(() => { this.expireParked(entry) }, ttl)
+    ;(entry.timer as { unref?: () => void }).unref?.()
+    if (input.signal !== undefined) {
+      if (input.signal.aborted) {
+        this.settleParked(entry, 'cancelled', 'cancelled', {
+          kind: 'deny',
+          reason: `approval for ${input.toolName} was cancelled before it was parked`,
+        })
+      } else {
+        const onAbort = (): void => {
+          this.deps.report(`cancel: ${input.toolName} from child ${shortId(origin.childSessionId)} — the asking turn was aborted while parked`)
+          this.settleParked(entry, 'cancelled', 'cancelled', {
+            kind: 'deny',
+            reason: `approval for ${input.toolName} was cancelled: the asking turn was aborted while the ask was parked`,
+          })
+        }
+        input.signal.addEventListener('abort', onAbort, { once: true })
+        entry.removeAbort = () => input.signal?.removeEventListener('abort', onAbort)
+      }
+    }
+    return promise
+  }
+
+  /**
+   * Resolve every ask parked for one root at its turn start, in FIFO park
+   * order, one at a time. Full access applies the parent judgement (audit
+   * line, no card); every other resolvable mode dispatches the operator's
+   * card. A replay that races the turn's end re-parks and stops; the remaining
+   * asks stay parked for the next turn start.
+   * @param rootSessionId - the root session whose turn just opened.
+   */
+  replayParked(rootSessionId: string): void {
+    if (this.disposed) return
+    if (![...this.parked.values()].some(entry => entry.record.rootSessionId === rootSessionId)) return
+    if (this.replays.has(rootSessionId)) {
+      // A turn started while a previous replay is mid-card; run one more pass
+      // after it settles so asks parked since are not stranded.
+      this.replayQueued.add(rootSessionId)
+      return
+    }
+    const replay = this.replayEntries(rootSessionId)
+      .catch((error: unknown) => {
+        this.deps.report(`replay: root ${shortId(rootSessionId)} replay failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      .finally(() => {
+        this.replays.delete(rootSessionId)
+        if (this.replayQueued.delete(rootSessionId)) this.replayParked(rootSessionId)
+      })
+    this.replays.set(rootSessionId, replay)
+  }
+
+  /** One FIFO pass over a root's parked asks; see {@link replayParked}. */
+  private async replayEntries(rootSessionId: string): Promise<void> {
+    const entries = [...this.parked.values()]
+      .filter(entry => entry.record.rootSessionId === rootSessionId && !entry.settled)
+      .sort((a, b) => a.record.seq - b.record.seq)
+    // The root returned, so the park window has done its job; suspend every
+    // bound up front so a later entry cannot expire while an earlier card is
+    // answered. A reparked entry re-arms its remaining window.
+    for (const entry of entries) this.suspendTimer(entry)
+    for (const entry of entries) {
+      if (this.disposed) return
+      if (entry.settled) continue
+      const root = this.deps.findRoot(entry.record.childSessionId)
+      if (root === undefined) {
+        this.deps.report(`replay: no live root for parked ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)}; failing closed`)
+        this.settleParked(entry, 'resolved', 'unavailable', this.failClosed(
+          entry.record.childSessionId, entry.record.toolName, 'no live parent session to forward to',
+        ))
+        continue
+      }
+      if (this.deps.isRootIdle?.(root) ?? false) {
+        // The root's turn closed before this entry's turn; leave this and every
+        // later entry parked for the next turn start.
+        for (const rest of entries) this.resumeTimer(rest)
+        return
+      }
+      const mode = this.deps.modeOf(root)
+      let resolution: CardResolution
+      if (mode === 'full-access') {
+        resolution = await this.fullAccessDecision(entry.input, root, entry.origin, entry.rail)
+      } else if (mode === 'interactive') {
+        resolution = await this.askThroughCard(entry.input, root, entry.origin, entry.proposal, entry.rail, true)
+      } else {
+        resolution = this.failClosed(
+          entry.record.childSessionId,
+          entry.record.toolName,
+          mode === undefined ? 'parent session mode is unknown' : 'parent runs unattended with approval prompts disabled',
+        )
+      }
+      if (resolution === REPARK) {
+        this.deps.report(`replay: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} re-parks — the root's turn closed before the card was dispatched`)
+        for (const rest of entries) this.resumeTimer(rest)
+        return
+      }
+      // A release (session end/dispose) can land while the card is pending;
+      // that settlement already answered the child, so do not restate it.
+      if (entry.settled) continue
+      this.deps.report(
+        `resolve: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} — `
+        + `${resolution.kind === 'allow' ? 'allowed' : 'denied'} via ${mode === 'full-access' ? 'the parent policy (Full access, no card)' : "the operator's forwarded card"}`,
+      )
+      this.settleParked(entry, 'resolved', mode === 'full-access' ? 'full-access' : 'card', resolution)
+    }
+  }
+
+  /**
+   * Release every ask parked for a session that ended (the asking child or the
+   * root): a wait must not outlive its participants.
+   * @param sessionId - the ended session (child or root).
+   * @param why - the audit reason, carried into the child's corrective denial.
+   */
+  releaseSession(sessionId: string, why: string): void {
+    for (const entry of [...this.parked.values()]) {
+      if (entry.record.childSessionId !== sessionId && entry.record.rootSessionId !== sessionId) continue
+      this.deps.report(`cancel: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} — ${why}`)
+      this.settleParked(entry, 'cancelled', 'cancelled', {
+        kind: 'deny',
+        reason: `approval for ${entry.record.toolName} was cancelled: ${why}. The call was not approved.`,
+      })
+    }
+  }
+
+  /** Release every parked ask when the plugin is disposed; nothing may hang. */
+  dispose(): void {
+    this.disposed = true
+    for (const entry of [...this.parked.values()]) {
+      this.deps.report(`cancel: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} — the approval forwarder was disposed`)
+      this.settleParked(entry, 'cancelled', 'cancelled', {
+        kind: 'deny',
+        reason: `approval for ${entry.record.toolName} was cancelled: the approval forwarder was disposed before the root's next turn. The call was not approved.`,
+      })
+    }
+    this.replayQueued.clear()
+  }
+
+  /**
+   * Expire records left parked by a previous process. The waiting child's
+   * promise died with that process, so replaying a restored record would mint
+   * a card nobody is waiting for; expiring it keeps a restart safe and the
+   * audit trail honest. New parks sort after every restored seq.
+   */
+  private restoreParked(): void {
+    const journal = this.deps.parkJournal
+    if (journal === undefined) return
+    let loaded: readonly ParkedAskRecord[]
+    try {
+      loaded = journal.load()
+    } catch (error) {
+      this.deps.report(`journal: failed to load parked asks: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    for (const record of loaded) {
+      if (record.seq > this.parkSeq) this.parkSeq = record.seq
+      if (record.state !== 'parked') continue
+      record.state = 'expired'
+      record.settledAt = Date.now()
+      record.settledVia = 'restart'
+      record.settledWith = 'deny'
+      this.deps.report(
+        `restore: parked ${record.toolName} from child ${shortId(record.childSessionId)} did not survive the approval `
+        + 'forwarder restart; expiring it (the waiting child ended with the previous process)',
+      )
+      this.appendJournal(record)
+    }
+  }
+
+  /** The park window elapsed with no root turn: deny with the named reason. */
+  private expireParked(entry: ParkedEntry): void {
+    if (entry.settled) return
+    const window = windowText(entry.record.expiresAt - entry.record.parkedAt)
+    this.deps.report(
+      `expire: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} — approval was not resolved in `
+      + `time (root ${shortId(entry.record.rootSessionId)} stayed between turns for the ${window} park window)`,
+    )
+    this.settleParked(entry, 'expired', 'expired', {
+      kind: 'deny',
+      reason: `approval was not resolved in time for ${entry.record.toolName}: the root session `
+        + `${shortId(entry.record.rootSessionId)} stayed between turns for the ${window} park window. Ask again while `
+        + 'the root is active, or run the action from the root session.',
+    })
+  }
+
+  /** Leave the parked queue exactly once: clear bounds, journal, resolve. */
+  private settleParked(
+    entry: ParkedEntry,
+    state: ParkState,
+    via: ParkSettlement,
+    resolution: ChildAskResolution,
+  ): void {
+    if (entry.settled) return
+    entry.settled = true
+    this.suspendTimer(entry)
+    entry.removeAbort?.()
+    this.parked.delete(entry.record.id)
+    entry.record.state = state
+    entry.record.settledAt = Date.now()
+    entry.record.settledVia = via
+    entry.record.settledWith = resolution.kind === 'allow' ? 'allow' : 'deny'
+    this.appendJournal(entry.record)
+    entry.resolve(resolution)
+  }
+
+  private suspendTimer(entry: ParkedEntry): void {
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer)
+      entry.timer = undefined
+    }
+  }
+
+  /** Re-arm a park whose replay had to stop, preserving the original window. */
+  private resumeTimer(entry: ParkedEntry): void {
+    if (entry.settled || entry.timer !== undefined) return
+    const remaining = entry.record.expiresAt - Date.now()
+    if (remaining <= 0) {
+      this.expireParked(entry)
+      return
+    }
+    entry.timer = setTimeout(() => { this.expireParked(entry) }, remaining)
+    ;(entry.timer as { unref?: () => void }).unref?.()
+  }
+
+  /** Best-effort durable upsert; a failing journal never blocks the decision. */
+  private appendJournal(record: ParkedAskRecord): void {
+    const journal = this.deps.parkJournal
+    if (journal === undefined) return
+    try {
+      journal.append(record)
+    } catch (error) {
+      this.deps.report(`journal: failed to record parked ask ${record.id}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 }

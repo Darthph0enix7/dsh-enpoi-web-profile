@@ -443,7 +443,8 @@ describe('danger-list always-allow pins the exact command', () => {
 
 describe('guard regression corpus (2026-10-02): danger vocabulary × forms', () => {
   // The shipped danger rules crossed with the forms an operator can write:
-  // bare, flags, absolute path, wrapper shell, expansion, xargs, assignment.
+  // bare, flags, absolute path, wrapper shell, expansion, xargs, assignment,
+  // and command prefixes (`sudo`/`doas`/`nice`/`env`/`command`/`timeout`).
   // Every one must ask or deny — never fall through to the catch-all.
   const DANGER_CORPUS: readonly string[] = [
     'rm /tmp/x',
@@ -485,10 +486,41 @@ describe('guard regression corpus (2026-10-02): danger vocabulary × forms', () 
     '/bin/chmod -R 777 /tmp/x',
     'chown -R adam /tmp/x',
     '/bin/chown -R adam /tmp/x',
+    // Irreversible vocabulary (2026-10-02 lane): secure erase, truncation, and
+    // find's own destructive forms.
+    'shred /tmp/x',
+    'shred -u /tmp/x',
+    '/usr/bin/shred -u /tmp/x',
+    'truncate -s 0 /tmp/x',
+    '/usr/bin/truncate -s 0 /tmp/x',
+    'find /tmp -delete',
+    "find /tmp -name '*.tmp' -delete",
+    'find /tmp -exec rm -f {} +',
+    "find /tmp -exec rm -f {} \\;",
+    'find /tmp -execdir rm -f {} +',
+    'find /tmp -exec /bin/rm -f {} \\;',
+    // Command-prefix transparency: the danger scan sees the command that runs.
+    'sudo rm -f /tmp/x',
+    '/usr/bin/sudo rm -f /tmp/x',
+    'doas rm -f /tmp/x',
+    'nice rm -f /tmp/x',
+    'nice -n 10 rm -rf /tmp/x',
+    'env FOO=1 rm -f /tmp/x',
+    'command rm -f /tmp/x',
+    'timeout 30 rm -f /tmp/x',
+    'sudo -u root rm -f /tmp/x',
+    'sudo bash -c "rm -f /tmp/x"',
+    'sudo shred -u /tmp/x',
+    'nice truncate -s 0 /tmp/x',
+    'sudo find /tmp -delete',
+    'sudo find /tmp -execdir rm -f {} +',
+    'sudo -i',
+    'doas -s',
   ]
 
   // The benign shapes the guard-relax pass (2026-09-30) must keep allowing:
-  // unreadable-file probes, --version invocations, and read-only bash -c probes.
+  // unreadable-file probes, --version invocations, read-only bash -c probes,
+  // and the wrappers' own non-executing forms.
   const BENIGN_CORPUS: readonly string[] = [
     'fish --version',
     'bash --version',
@@ -503,6 +535,22 @@ describe('guard regression corpus (2026-10-02): danger vocabulary × forms', () 
     '. /etc/os-release',
     'git status',
     'grep -rn "rm " /tmp/x',
+    // Prefix transparency must not turn benign wrapper probes into asks.
+    'command -v rm',
+    'command -V ls',
+    'command -v sudo',
+    'nice --version',
+    'sudo --version',
+    'sudo ls /tmp',
+    'sudo -n true',
+    'env FOO=1 ls',
+    'timeout 30 ls',
+    'nice -n 10 ls',
+    'env',
+    'find /tmp -name "*.tmp"',
+    'find /tmp -type f',
+    'grep -rn "shred" /tmp/x',
+    'echo truncate',
   ]
 
   it('every danger form asks or denies (shipped defaults, no grants)', () => {
@@ -516,6 +564,48 @@ describe('guard regression corpus (2026-10-02): danger vocabulary × forms', () 
     for (const command of BENIGN_CORPUS) {
       expect(resolvePolicy({ toolName: 'bash', command, config: EMPTY }).kind).toBe('allow')
     }
+  })
+
+  it('sees through command wrappers and names the danger rule', () => {
+    for (const command of [
+      'sudo rm -f /tmp/x',
+      'doas rm -f /tmp/x',
+      'nice -n 10 rm -rf /tmp/x',
+      'env FOO=1 rm -f /tmp/x',
+      'command rm -f /tmp/x',
+      'timeout 30 rm -f /tmp/x',
+      'sudo -u root rm -f /tmp/x',
+    ]) {
+      expect(resolvePolicy({ toolName: 'bash', command, config: EMPTY })).toMatchObject({ kind: 'ask', pattern: 'rm' })
+    }
+    // A `command -v`/`-V` query reports a path; it never runs the operand.
+    expect(resolvePolicy({ toolName: 'bash', command: 'command -v rm', config: EMPTY }))
+      .toMatchObject({ kind: 'allow', source: 'scan:command-query' })
+    // A privilege wrapper with no command word is an interactive root shell.
+    expect(resolvePolicy({ toolName: 'bash', command: 'sudo -i', config: EMPTY }))
+      .toMatchObject({ kind: 'ask', source: 'scan:privileged-shell' })
+    expect(resolvePolicy({ toolName: 'bash', command: 'sudo --version', config: EMPTY }).kind).toBe('allow')
+  })
+
+  it('asks for the irreversible vocabulary and labels its broad action', () => {
+    for (const command of [
+      'shred -u /tmp/x',
+      'truncate -s 0 /tmp/x',
+      'find /tmp -delete',
+      "find /tmp -name '*.tmp' -delete",
+      'find /tmp -exec rm -f {} +',
+      'find /tmp -execdir rm -f {} +',
+    ]) {
+      expect(resolvePolicy({ toolName: 'bash', command, config: EMPTY }).kind).toBe('ask')
+    }
+    // shred/truncate are danger-list verbs: the card offers the broad action.
+    expect(resolvePolicy({ toolName: 'bash', command: 'shred -u /tmp/x', config: EMPTY }))
+      .toMatchObject({ broadAllow: { label: 'shred' } })
+    expect(resolvePolicy({ toolName: 'bash', command: 'truncate -s 0 /tmp/x', config: EMPTY }))
+      .toMatchObject({ broadAllow: { label: 'truncate' } })
+    // find is an ordinary rule: its default always-allow pins the rule pattern.
+    expect(resolvePolicy({ toolName: 'bash', command: 'find /tmp -delete', config: EMPTY }))
+      .toMatchObject({ pattern: 'find * -delete*' })
   })
 
   it('a standing grant never silences a delegated child danger form', () => {

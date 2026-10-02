@@ -18,6 +18,7 @@
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type { ContextFormed, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { hasOpenTurn } from '@deepseek-ai/dsh-user-approval'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -52,6 +53,7 @@ import {
 import { stripUnavailableToolGuidance } from './prompt-honesty'
 import { installSearchNudge } from './search-nudge'
 import { installReviewRunTool } from './review-run'
+import { createApprovalParkJournal } from './approval-parks'
 import {
   ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam,
   type ApprovalOutcome, type ChildAgentLike, type ModelRecommendation, type ParentRailQuery,
@@ -1404,21 +1406,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // Per-turn judgement budget (Full access, doc 82 item 8): the forwarder caps
   // how many parent judgements one root turn may spend. `turn/start` bumps the
   // root session's turn identity; the forwarder resets its budget on the bump.
+  // The same event drives the idle-parent park failsafe (doc 04 §6, doc 11):
+  // asks parked while the root sat between turns replay here, in FIFO order,
+  // under the root's policy at that moment.
   const rootTurns = new Map<string, number>()
-  ctx.effect(() => {
-    const disposeTurn = ctx.on('session/event', ((session: { id?: string }, event: { type?: string }) => {
-      if (event?.type !== 'turn/start' || typeof session?.id !== 'string' || session.id === '') return undefined
-      rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1)
-      return undefined
-    }) as never)
-    const disposeDisposed = ctx.on('session/disposed', ((session: { id?: string }) => {
-      if (typeof session?.id === 'string') rootTurns.delete(session.id)
-    }) as never)
-    return () => {
-      disposeTurn()
-      disposeDisposed()
-    }
-  }, 'enpoi-capabilities: forwarded-ask turn budget')
+  const approvalParks = createApprovalParkJournal()
 
   const approvalForwarding = new ChildApprovalForwarder({
     findRoot: liveRootOf,
@@ -1427,6 +1419,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     askRoot: requestRootApproval,
     recommendation: forwardedRecommendation,
     turnOf: (root: RootHandle) => String(rootTurns.get(root.id) ?? 0),
+    isRootIdle: (root: RootHandle) => {
+      const agent = root.agent as { session?: Parameters<typeof hasOpenTurn>[0] | undefined } | undefined
+      return agent?.session === undefined ? false : !hasOpenTurn(agent.session)
+    },
+    parkJournal: approvalParks,
     report: (line: string) => process.stderr.write(`[enpoi-capabilities] ${line}\n`),
     depthCap: () => {
       const subagents = ctx.get('subagents') as { resolveMaxDepth?: (configured?: unknown) => number | undefined } | undefined
@@ -1434,6 +1431,29 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       return typeof depth === 'number' && Number.isSafeInteger(depth) && depth >= 0 ? depth : 1
     },
   })
+  ctx.effect(() => {
+    const disposeTurn = ctx.on('session/event', ((session: { id?: string }, event: { type?: string }) => {
+      if (typeof session?.id !== 'string' || session.id === '') return undefined
+      if (event?.type === 'turn/start') {
+        rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1)
+        // The root returned: replay every ask parked while it sat between turns.
+        approvalForwarding.replayParked(session.id)
+      }
+      return undefined
+    }) as never)
+    const disposeDisposed = ctx.on('session/disposed', ((session: { id?: string }) => {
+      if (typeof session?.id !== 'string') return
+      rootTurns.delete(session.id)
+      // A parked ask must not outlive the child or root session it belongs to.
+      approvalForwarding.releaseSession(session.id, 'the session ended before the ask was resolved')
+    }) as never)
+    return () => {
+      disposeTurn()
+      disposeDisposed()
+      // Plugin disposal releases every parked child with a corrective denial.
+      approvalForwarding.dispose()
+    }
+  }, 'enpoi-capabilities: forwarded-ask turn budget + park replay')
   // Finality seam (doc 55): the core tool registry's ask path reads
   // `forwardedApprovals` so an outer ask or a reviewer denial cannot re-open a
   // call a forwarded child ask already allowed. Keyed by the requester's

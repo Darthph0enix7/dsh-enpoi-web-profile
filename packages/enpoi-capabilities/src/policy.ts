@@ -276,6 +276,17 @@ export const SHIPPED_BASH_PATTERNS: BashPattern[] = [
   { pattern: 'halt', policy: 'ask' },
   { pattern: 'chmod -R *', policy: 'ask' },
   { pattern: 'chown -R *', policy: 'ask' },
+  // Irreversible destruction (2026-10-02): secure erase, in-place truncation,
+  // and find's own delete/exec forms. `shred` and `truncate` are danger-list
+  // verbs, so their cards name the verb's broad action; the find forms are
+  // ordinary rules because find itself is a read-only walker.
+  { pattern: 'shred', policy: 'ask' },
+  { pattern: 'shred *', policy: 'ask' },
+  { pattern: 'truncate', policy: 'ask' },
+  { pattern: 'truncate *', policy: 'ask' },
+  { pattern: 'find * -delete*', policy: 'ask' },
+  { pattern: 'find * -exec rm*', policy: 'ask' },
+  { pattern: 'find * -execdir rm*', policy: 'ask' },
   // The OpenCode catch-all: every command not explicitly listed runs free.
   // Only the dangerous list above asks.
   { pattern: '*', policy: 'allow' },
@@ -465,7 +476,7 @@ export function grantsShortCircuit(
  * command substitution, backticks, wrapper shells, eval, xargs, find -exec,
  * process substitution, heredocs.
  */
-const HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</
+const HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec(?:dir)?\b|<\(|<</
 
 /**
  * Dangerous verbs in raw text, used ONLY when a hidden surface is present — a
@@ -660,51 +671,80 @@ function shellWords(sub: string): string[] {
   return words
 }
 
+/** Wrapper flags whose following word is a value, not the command. */
+const WRAPPER_VALUE_FLAGS: Readonly<Record<string, ReadonlySet<string>>> = {
+  timeout: new Set(['-k', '--kill-after', '-s', '--signal']),
+  env: new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']),
+  sudo: new Set(['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-h', '--host', '-R', '--role', '-T', '--type', '-t', '--type']),
+  doas: new Set(['-u', '--user', '-C', '--config']),
+  nice: new Set(['-n', '--adjustment']),
+}
+
+/** Command prefixes the evaluator and the child rails see through. */
+const COMMAND_WRAPPERS: ReadonlySet<string> = new Set(['timeout', 'env', 'sudo', 'doas', 'nice', 'command'])
+
+/** The command word index plus the wrappers consumed to reach it. */
+interface WrapperPrefix {
+  /** Index of the effective command word (`words.length` when no command remains). */
+  readonly end: number
+  /** Wrapper command names consumed, in order (`sudo`, `env`, …). */
+  readonly wrappers: readonly string[]
+  /** True when the prefix is a `command -v`/`-V` query, which reports but never executes. */
+  readonly query: boolean
+}
+
 /**
- * Index of the effective command word in a wrapper-prefixed word list: a
- * leading `timeout [flags] <duration>` or `env [flags] [KEY=VALUE]…` prefix is
- * skipped. Option values that take an argument (`timeout -k/--kill-after/
- * -s/--signal`, `env -u/--unset/-C/--chdir/-S/--split-string`) are skipped with
- * it; an unparsable prefix stops where it stands, which keeps the ask for the
+ * Index of the effective command word in a wrapper-prefixed word list and the
+ * wrappers consumed. A leading `timeout [flags] <duration>`, `env [flags]
+ * [KEY=VALUE]…`, or `sudo`/`doas`/`nice`/`command` prefix is skipped; the
+ * value-taking flags of each wrapper are skipped with their argument, and an
+ * unparsable prefix stops where it stands, which keeps the ask for the
  * unrecognized form.
  * @param words - the sub-command's shell words.
- * @returns the index of the command word (0 when there is no prefix).
+ * @param stopAtPrivilege - keep `sudo`/`doas` and everything after them (the child rails name the privilege class).
+ * @returns the command-word index, consumed wrapper names, and query marker.
  */
-function wrapperPrefixEnd(words: string[]): number {
+function scanWrapperPrefix(words: string[], stopAtPrivilege = false): WrapperPrefix {
+  const wrappers: string[] = []
+  let query = false
   let i = 0
   while (i < words.length) {
     const argv0 = baseName(words[i] ?? '')
-    if (argv0 === 'timeout') {
-      i += 1
-      while (i < words.length && (words[i] ?? '').startsWith('-')) {
-        const flag = words[i] ?? ''
+    if (!COMMAND_WRAPPERS.has(argv0)) break
+    if (stopAtPrivilege && (argv0 === 'sudo' || argv0 === 'doas')) break
+    wrappers.push(argv0)
+    i += 1
+    const valueFlags = WRAPPER_VALUE_FLAGS[argv0]
+    while (i < words.length) {
+      const word = words[i] ?? ''
+      if (argv0 === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
         i += 1
-        if (flag === '-k' || flag === '--kill-after' || flag === '-s' || flag === '--signal') i += 1
+        continue
       }
-      if (i < words.length) i += 1
-      continue
-    }
-    if (argv0 === 'env') {
+      if (!word.startsWith('-')) break
       i += 1
-      while (i < words.length) {
-        const word = words[i] ?? ''
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
-          i += 1
-          continue
-        }
-        if (word.startsWith('-')) {
-          i += 1
-          if (word === '-u' || word === '--unset' || word === '-C' || word === '--chdir'
-            || word === '-S' || word === '--split-string') i += 1
-          continue
-        }
-        break
-      }
-      continue
+      if (!word.includes('=') && (valueFlags?.has(word) ?? false)) i += 1
+      if (argv0 === 'command' && (word === '-v' || word === '-V')) query = true
     }
-    break
+    if (argv0 === 'timeout' && i < words.length) i += 1
   }
-  return i
+  return { end: i, wrappers, query }
+}
+
+/**
+ * One sub-command with leading environment assignments and the transparent
+ * command wrappers (`timeout`, `env`, `nice`, `command`) removed, so a scan sees
+ * the command that will run. Privilege wrappers (`sudo`, `doas`) and everything
+ * after them are kept: the child rails classify them as privilege-escalation
+ * before any other class. The input is returned unchanged when no wrapper is
+ * present.
+ * @param sub - one env-stripped sub-command.
+ * @returns the effective command text.
+ */
+export function effectiveCommandText(sub: string): string {
+  const words = shellWords(sub)
+  const prefix = scanWrapperPrefix(words, true)
+  return prefix.end > 0 && prefix.end < words.length ? words.slice(prefix.end).join(' ') : sub
 }
 
 /** Whether one word is a pure expansion (`$CMD`, `${CMD}`, `$(cmd)`, `` `cmd` ``). */
@@ -774,9 +814,23 @@ function hiddenDangerAsk(ctx: BashEvaluationContext): PolicyDecision {
   }
 }
 
+/** A wrapper-only privilege escalation ask (`sudo -i`, `doas -s`) pinned to the full raw command. */
+function privilegedShellAsk(ctx: BashEvaluationContext): PolicyDecision {
+  return {
+    kind: 'ask',
+    reason: 'command opens a privileged shell through sudo/doas with no command word — approve explicitly',
+    source: 'scan:privileged-shell',
+    grantTier: 'pattern',
+    pattern: ctx.rawCommand,
+  }
+}
+
 /**
  * One sub-command's decision, including wrapper recursion. Rules first (agent
- * and global patterns), then: an expansion as the command word asks (opaque
+ * and global patterns) — a command wrapper (`timeout`, `env`, `sudo`, `doas`,
+ * `nice`, `command`) is seen through, so the rules evaluate the command that
+ * will actually run; a `command -v`/`-V` query reports a path and never
+ * executes its operand. Then: an expansion as the command word asks (opaque
  * execution); a shell wrapper `<interp> -c '<inner>'` is split and evaluated by
  * the same rules (bounded by {@link MAX_WRAPPER_DEPTH}) and asks only when that
  * inner evaluation asks; a wrapper whose inner cannot be extracted statically
@@ -791,10 +845,27 @@ function hiddenDangerAsk(ctx: BashEvaluationContext): PolicyDecision {
  * @returns the sub-command's decision.
  */
 function evaluateSubCommand(sub: string, depth: number, ctx: BashEvaluationContext): PolicyDecision {
-  const rules = decideSubCommand(sub, ctx.config, ctx.agent)
-  if (rules.kind !== 'allow') return rules
   const words = shellWords(sub)
-  const commandIndex = wrapperPrefixEnd(words)
+  const prefix = scanWrapperPrefix(words)
+  // `command -v`/`-V` only reports the operand's path; it never executes it.
+  if (prefix.query) return { kind: 'allow', source: 'scan:command-query' }
+  const rules = decideSubCommand(sub, ctx.config, ctx.agent)
+  if (rules.kind === 'deny') return rules
+  const effective = prefix.end > 0 && prefix.end < words.length ? words.slice(prefix.end).join(' ') : sub
+  if (effective !== sub) {
+    const wrapped = decideSubCommand(effective, ctx.config, ctx.agent)
+    if (wrapped.kind === 'deny') return wrapped
+    if (wrapped.kind === 'ask') return wrapped
+  }
+  if (rules.kind === 'ask') return rules
+  // A privilege wrapper with no command word left (`sudo -i`, `doas -s`) opens
+  // an interactive privileged shell; only a version/help probe is exempt.
+  if (prefix.end >= words.length
+    && prefix.wrappers.some(wrapper => wrapper === 'sudo' || wrapper === 'doas')
+    && !words.some(word => VERSION_HELP_FLAGS.has(word))) {
+    return privilegedShellAsk(ctx)
+  }
+  const commandIndex = prefix.end
   const argv0 = baseName(words[commandIndex] ?? '')
   if (isExpansionWord(words[commandIndex])) return opaqueExpansionAsk(ctx)
   if (SHELL_INTERPRETERS.has(argv0)) {

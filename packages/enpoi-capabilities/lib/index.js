@@ -338,40 +338,36 @@ function shellWords(sub) {
   if (current !== "") words.push(current);
   return words;
 }
-function wrapperPrefixEnd(words) {
+function scanWrapperPrefix(words, stopAtPrivilege = false) {
+  const wrappers = [];
+  let query = false;
   let i = 0;
   while (i < words.length) {
     const argv0 = baseName(words[i] ?? "");
-    if (argv0 === "timeout") {
-      i += 1;
-      while (i < words.length && (words[i] ?? "").startsWith("-")) {
-        const flag = words[i] ?? "";
+    if (!COMMAND_WRAPPERS.has(argv0)) break;
+    if (stopAtPrivilege && (argv0 === "sudo" || argv0 === "doas")) break;
+    wrappers.push(argv0);
+    i += 1;
+    const valueFlags = WRAPPER_VALUE_FLAGS[argv0];
+    while (i < words.length) {
+      const word = words[i] ?? "";
+      if (argv0 === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
         i += 1;
-        if (flag === "-k" || flag === "--kill-after" || flag === "-s" || flag === "--signal") i += 1;
+        continue;
       }
-      if (i < words.length) i += 1;
-      continue;
-    }
-    if (argv0 === "env") {
+      if (!word.startsWith("-")) break;
       i += 1;
-      while (i < words.length) {
-        const word = words[i] ?? "";
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
-          i += 1;
-          continue;
-        }
-        if (word.startsWith("-")) {
-          i += 1;
-          if (word === "-u" || word === "--unset" || word === "-C" || word === "--chdir" || word === "-S" || word === "--split-string") i += 1;
-          continue;
-        }
-        break;
-      }
-      continue;
+      if (!word.includes("=") && (valueFlags?.has(word) ?? false)) i += 1;
+      if (argv0 === "command" && (word === "-v" || word === "-V")) query = true;
     }
-    break;
+    if (argv0 === "timeout" && i < words.length) i += 1;
   }
-  return i;
+  return { end: i, wrappers, query };
+}
+function effectiveCommandText(sub) {
+  const words = shellWords(sub);
+  const prefix = scanWrapperPrefix(words, true);
+  return prefix.end > 0 && prefix.end < words.length ? words.slice(prefix.end).join(" ") : sub;
 }
 function isExpansionWord(word) {
   return word !== void 0 && /^[$`]/.test(word);
@@ -410,11 +406,32 @@ function hiddenDangerAsk(ctx) {
     pattern: ctx.rawCommand
   };
 }
+function privilegedShellAsk(ctx) {
+  return {
+    kind: "ask",
+    reason: "command opens a privileged shell through sudo/doas with no command word \u2014 approve explicitly",
+    source: "scan:privileged-shell",
+    grantTier: "pattern",
+    pattern: ctx.rawCommand
+  };
+}
 function evaluateSubCommand(sub, depth, ctx) {
-  const rules = decideSubCommand(sub, ctx.config, ctx.agent);
-  if (rules.kind !== "allow") return rules;
   const words = shellWords(sub);
-  const commandIndex = wrapperPrefixEnd(words);
+  const prefix = scanWrapperPrefix(words);
+  if (prefix.query) return { kind: "allow", source: "scan:command-query" };
+  const rules = decideSubCommand(sub, ctx.config, ctx.agent);
+  if (rules.kind === "deny") return rules;
+  const effective = prefix.end > 0 && prefix.end < words.length ? words.slice(prefix.end).join(" ") : sub;
+  if (effective !== sub) {
+    const wrapped = decideSubCommand(effective, ctx.config, ctx.agent);
+    if (wrapped.kind === "deny") return wrapped;
+    if (wrapped.kind === "ask") return wrapped;
+  }
+  if (rules.kind === "ask") return rules;
+  if (prefix.end >= words.length && prefix.wrappers.some((wrapper) => wrapper === "sudo" || wrapper === "doas") && !words.some((word) => VERSION_HELP_FLAGS.has(word))) {
+    return privilegedShellAsk(ctx);
+  }
+  const commandIndex = prefix.end;
   const argv0 = baseName(words[commandIndex] ?? "");
   if (isExpansionWord(words[commandIndex])) return opaqueExpansionAsk(ctx);
   if (SHELL_INTERPRETERS.has(argv0)) {
@@ -649,7 +666,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -812,11 +829,22 @@ var init_policy = __esm({
       { pattern: "halt", policy: "ask" },
       { pattern: "chmod -R *", policy: "ask" },
       { pattern: "chown -R *", policy: "ask" },
+      // Irreversible destruction (2026-10-02): secure erase, in-place truncation,
+      // and find's own delete/exec forms. `shred` and `truncate` are danger-list
+      // verbs, so their cards name the verb's broad action; the find forms are
+      // ordinary rules because find itself is a read-only walker.
+      { pattern: "shred", policy: "ask" },
+      { pattern: "shred *", policy: "ask" },
+      { pattern: "truncate", policy: "ask" },
+      { pattern: "truncate *", policy: "ask" },
+      { pattern: "find * -delete*", policy: "ask" },
+      { pattern: "find * -exec rm*", policy: "ask" },
+      { pattern: "find * -execdir rm*", policy: "ask" },
       // The OpenCode catch-all: every command not explicitly listed runs free.
       // Only the dangerous list above asks.
       { pattern: "*", policy: "allow" }
     ];
-    HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec\b|<\(|<</;
+    HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec(?:dir)?\b|<\(|<</;
     DANGER_VERB_SET = /* @__PURE__ */ new Set([
       "rm",
       "rmdir",
@@ -847,6 +875,14 @@ var init_policy = __esm({
     OPAQUE_EXECUTORS = /* @__PURE__ */ new Set([...SHELL_INTERPRETERS, "eval", "source", "."]);
     VERSION_HELP_FLAGS = /* @__PURE__ */ new Set(["--version", "-V", "--help", "-h"]);
     MAX_WRAPPER_DEPTH = 3;
+    WRAPPER_VALUE_FLAGS = {
+      timeout: /* @__PURE__ */ new Set(["-k", "--kill-after", "-s", "--signal"]),
+      env: /* @__PURE__ */ new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]),
+      sudo: /* @__PURE__ */ new Set(["-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from", "-h", "--host", "-R", "--role", "-T", "--type", "-t", "--type"]),
+      doas: /* @__PURE__ */ new Set(["-u", "--user", "-C", "--config"]),
+      nice: /* @__PURE__ */ new Set(["-n", "--adjustment"])
+    };
+    COMMAND_WRAPPERS = /* @__PURE__ */ new Set(["timeout", "env", "sudo", "doas", "nice", "command"]);
   }
 });
 
@@ -1018,6 +1054,7 @@ var init_rpc = __esm({
 
 // src/index.ts
 import { createUserMessage as createUserMessage2 } from "@deepseek-ai/dsh-llm";
+import { hasOpenTurn } from "@deepseek-ai/dsh-user-approval";
 import Schema from "@deepseek-ai/schemastery";
 import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 
@@ -21391,11 +21428,20 @@ function installReviewRunTool(ctx) {
   });
 }
 
+// src/approval-parks.ts
+import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join as join2 } from "node:path";
+
 // src/forwarding.ts
 init_policy();
 import { isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "node:path";
+var REPARK = Symbol("approval-repark");
 var FORWARDED_ASK_MARKER = "[forwarded child ask]";
 var PARENT_JUDGEMENT_BUDGET_PER_TURN = 8;
+var DEFAULT_PARK_TTL_MS = 10 * 60 * 1e3;
+var MAX_PARKED_ASKS = 32;
+var PARK_JOURNAL_SETTLED_KEEP = 50;
 var PATH_ARG_KEYS = [
   "file_path",
   "filePath",
@@ -21425,6 +21471,9 @@ var FS_PATH_TOOLS = /* @__PURE__ */ new Set([
 ]);
 function shortId(id) {
   return id.length > 8 ? id.slice(0, 8) : id;
+}
+function windowText(ms) {
+  return ms >= 1e3 ? `${Math.round(ms / 1e3)}s` : `${ms}ms`;
 }
 function delegatedChildOf(agent) {
   const header = agent?.session?.header;
@@ -21502,13 +21551,16 @@ function railOfBash(command) {
   for (const rawSub of splitCompoundCommand(command)) {
     const sub = stripEnvPrefixes(rawSub).trim();
     if (sub === "") continue;
-    const argv = sub.split(/\s+/);
+    const rawArgv0 = baseName2(sub.split(/\s+/)[0] ?? "");
+    if (PRIVILEGE_ESCALATORS.has(rawArgv0)) return { rail: "privilege-escalation", evidence: sub };
+    const effective = effectiveCommandText(sub);
+    const argv = effective.split(/\s+/);
     if (argv.length > 0) argv[0] = baseName2(argv[0] ?? "");
     const argv0 = argv[0] ?? "";
     if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: "privilege-escalation", evidence: sub };
     if ((argv0 === "rm" || argv0 === "rmdir") && isRecursiveDelete(argv)) return { rail: "recursive-delete", evidence: sub };
-    if (argv0 === "find" && /(?:^|\s)(?:-delete|-exec\s+rm\b)/.test(sub)) return { rail: "recursive-delete", evidence: sub };
-    if (argv0 === "rsync" && /(?:^|\s)--delete\b/.test(sub)) return { rail: "recursive-delete", evidence: sub };
+    if (argv0 === "find" && /(?:^|\s)(?:-delete|-exec(?:dir)?\s+rm\b)/.test(effective)) return { rail: "recursive-delete", evidence: sub };
+    if (argv0 === "rsync" && /(?:^|\s)--delete\b/.test(effective)) return { rail: "recursive-delete", evidence: sub };
     if (argv0 === "git" && isHistoryRewrite(argv)) return { rail: "history-rewrite", evidence: sub };
     if (EXFILTRATORS.has(argv0)) return { rail: "exfiltration", evidence: sub };
     if (argv0 === "rsync" && argv.slice(1).some(isRemoteTarget)) return { rail: "exfiltration", evidence: sub };
@@ -21595,6 +21647,7 @@ function forwardedAskDisplayReason(origin, decision) {
 var ChildApprovalForwarder = class {
   constructor(deps) {
     this.deps = deps;
+    this.restoreParked();
   }
   grants = /* @__PURE__ */ new Map();
   pending = /* @__PURE__ */ new Map();
@@ -21602,6 +21655,14 @@ var ChildApprovalForwarder = class {
   allowedCalls = /* @__PURE__ */ new Map();
   /** Per-root judgement budget: the turn it counts against and how much it spent. */
   judgementBudget = /* @__PURE__ */ new Map();
+  /** Parked asks by park id; Map order is park order. */
+  parked = /* @__PURE__ */ new Map();
+  /** Park order counter; restored records advance it past their own seq. */
+  parkSeq = 0;
+  /** Replays in flight per root session, plus one queued follow-up pass each. */
+  replays = /* @__PURE__ */ new Map();
+  replayQueued = /* @__PURE__ */ new Set();
+  disposed = false;
   /**
    * Resolve one child ask through the parent. Rails run first and are never
    * card-approvable; then an existing subtree grant; then the root's mode:
@@ -21695,10 +21756,11 @@ var ChildApprovalForwarder = class {
     const batchKey = `${child.childSessionId}\0${input2.toolName}\0${command ?? stableJson(input2.args)}`;
     const inFlight = this.pending.get(batchKey);
     if (inFlight !== void 0) return await inFlight;
-    const run = mode === "full-access" ? this.fullAccessDecision(input2, root, origin, rail) : this.askThroughCard(input2, root, origin, proposal, rail);
-    this.pending.set(batchKey, run);
+    const run = this.deps.isRootIdle?.(root) ?? false ? this.parkAsk(input2, root, origin, mode, proposal, rail) : mode === "full-access" ? this.fullAccessDecision(input2, root, origin, rail) : this.askThroughCard(input2, root, origin, proposal, rail);
+    const settled = run.then((result) => result === REPARK ? this.failClosed(child.childSessionId, input2.toolName, "the root's turn closed while the ask was being delivered") : result);
+    this.pending.set(batchKey, settled);
     try {
-      return await run;
+      return await settled;
     } finally {
       this.pending.delete(batchKey);
     }
@@ -21856,8 +21918,12 @@ var ChildApprovalForwarder = class {
       return derived2;
     }
   }
-  /** Forward the ask as one root-session card and map its outcome. */
-  async askThroughCard(input2, root, origin, proposal, rail) {
+  /**
+   * Forward the ask as one root-session card and map its outcome. During a
+   * park replay (`reparkOnIdle`) a card that reaches a root whose turn closed
+   * in the meantime re-parks instead of denying an ask the operator never saw.
+   */
+  async askThroughCard(input2, root, origin, proposal, rail, reparkOnIdle = false) {
     const recommendation = await this.cardRecommendation(input2, root, origin, rail);
     const reason = forwardedAskReason(origin, input2.decision, recommendation);
     let outcome;
@@ -21873,10 +21939,12 @@ var ChildApprovalForwarder = class {
         origin
       });
     } catch (error62) {
+      const message = error62 instanceof Error ? error62.message : String(error62);
+      if (reparkOnIdle && message.includes("outside an open turn")) return REPARK;
       return this.failClosed(
         origin.childSessionId,
         input2.toolName,
-        `the forwarded ask could not be delivered: ${error62 instanceof Error ? error62.message : String(error62)}`
+        `the forwarded ask could not be delivered: ${message}`
       );
     }
     switch (outcome) {
@@ -21960,6 +22028,274 @@ var ChildApprovalForwarder = class {
       this.grants.set(childSessionId, grants);
     }
   }
+  // ── idle-parent park-and-replay (doc 04 §6, doc 11 troubleshooting) ────────
+  // A forwarded ask whose root sits between turns cannot dispatch a card: the
+  // harness's approval audit must be turn-enclosed, so `approval.request()`
+  // rejects outside an open turn. Parking records the ask (reason, child,
+  // tool/command, deadline), waits for the root's next `turn/start`, and
+  // replays it in FIFO order under the root's policy at that moment. Every
+  // exit — resolve, expire, abort, session end, dispose — settles the waiting
+  // child and the durable journal; nothing hangs and no card outlives its ask.
+  /** Window one ask may wait for its root's next turn; see {@link DEFAULT_PARK_TTL_MS}. */
+  parkTtlMs() {
+    const configured = this.deps.parkTtlMs?.();
+    return configured !== void 0 && configured > 0 ? configured : DEFAULT_PARK_TTL_MS;
+  }
+  /**
+   * Park one ask whose root sits between turns. Records it durably, reports
+   * the park, and returns a promise settled by {@link replayParked} at the
+   * root's next turn start, by the park window's expiry, by the ask's abort
+   * signal, or by {@link releaseSession}/{@link dispose}. Identical concurrent
+   * asks share one entry through {@link resolveAsk}'s pending batch.
+   */
+  parkAsk(input2, root, origin, mode, proposal, rail) {
+    if (this.disposed) {
+      return Promise.resolve(this.failClosed(
+        origin.childSessionId,
+        input2.toolName,
+        "the approval forwarder is disposed"
+      ));
+    }
+    if (this.parked.size >= MAX_PARKED_ASKS) {
+      return Promise.resolve(this.failClosed(
+        origin.childSessionId,
+        input2.toolName,
+        `too many forwarded asks are already parked (${MAX_PARKED_ASKS}); the root session has not returned to open a turn`
+      ));
+    }
+    const now = Date.now();
+    const ttl = this.parkTtlMs();
+    this.parkSeq += 1;
+    const command = input2.toolName === "bash" && typeof input2.args?.command === "string" ? input2.args.command : void 0;
+    const record2 = {
+      id: `park-${now.toString(36)}-${this.parkSeq.toString(36)}`,
+      seq: this.parkSeq,
+      childSessionId: origin.childSessionId,
+      childLabel: origin.label,
+      depth: origin.depth,
+      rootSessionId: root.id,
+      toolName: input2.toolName,
+      ...command !== void 0 ? { command } : {},
+      reason: input2.decision.reason,
+      parkedAt: now,
+      expiresAt: now + ttl,
+      state: "parked"
+    };
+    let resolveEntry;
+    const promise2 = new Promise((resolve) => {
+      resolveEntry = resolve;
+    });
+    const entry = { record: record2, input: input2, root, origin, proposal, rail, resolve: resolveEntry, settled: false };
+    this.parked.set(record2.id, entry);
+    this.appendJournal(record2);
+    this.deps.report(
+      `park: ${input2.toolName} from child ${shortId(origin.childSessionId)} (${origin.label}, depth ${origin.depth}) for root ${shortId(root.id)} while it sits between turns \u2014 ${input2.decision.reason} (replays at the root's next turn as ${mode === "full-access" ? "a parent judgement, no card" : "the operator's card"}, expires in ${windowText(ttl)})`
+    );
+    entry.timer = setTimeout(() => {
+      this.expireParked(entry);
+    }, ttl);
+    entry.timer.unref?.();
+    if (input2.signal !== void 0) {
+      if (input2.signal.aborted) {
+        this.settleParked(entry, "cancelled", "cancelled", {
+          kind: "deny",
+          reason: `approval for ${input2.toolName} was cancelled before it was parked`
+        });
+      } else {
+        const onAbort = () => {
+          this.deps.report(`cancel: ${input2.toolName} from child ${shortId(origin.childSessionId)} \u2014 the asking turn was aborted while parked`);
+          this.settleParked(entry, "cancelled", "cancelled", {
+            kind: "deny",
+            reason: `approval for ${input2.toolName} was cancelled: the asking turn was aborted while the ask was parked`
+          });
+        };
+        input2.signal.addEventListener("abort", onAbort, { once: true });
+        entry.removeAbort = () => input2.signal?.removeEventListener("abort", onAbort);
+      }
+    }
+    return promise2;
+  }
+  /**
+   * Resolve every ask parked for one root at its turn start, in FIFO park
+   * order, one at a time. Full access applies the parent judgement (audit
+   * line, no card); every other resolvable mode dispatches the operator's
+   * card. A replay that races the turn's end re-parks and stops; the remaining
+   * asks stay parked for the next turn start.
+   * @param rootSessionId - the root session whose turn just opened.
+   */
+  replayParked(rootSessionId) {
+    if (this.disposed) return;
+    if (![...this.parked.values()].some((entry) => entry.record.rootSessionId === rootSessionId)) return;
+    if (this.replays.has(rootSessionId)) {
+      this.replayQueued.add(rootSessionId);
+      return;
+    }
+    const replay = this.replayEntries(rootSessionId).catch((error62) => {
+      this.deps.report(`replay: root ${shortId(rootSessionId)} replay failed: ${error62 instanceof Error ? error62.message : String(error62)}`);
+    }).finally(() => {
+      this.replays.delete(rootSessionId);
+      if (this.replayQueued.delete(rootSessionId)) this.replayParked(rootSessionId);
+    });
+    this.replays.set(rootSessionId, replay);
+  }
+  /** One FIFO pass over a root's parked asks; see {@link replayParked}. */
+  async replayEntries(rootSessionId) {
+    const entries = [...this.parked.values()].filter((entry) => entry.record.rootSessionId === rootSessionId && !entry.settled).sort((a, b) => a.record.seq - b.record.seq);
+    for (const entry of entries) this.suspendTimer(entry);
+    for (const entry of entries) {
+      if (this.disposed) return;
+      if (entry.settled) continue;
+      const root = this.deps.findRoot(entry.record.childSessionId);
+      if (root === void 0) {
+        this.deps.report(`replay: no live root for parked ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)}; failing closed`);
+        this.settleParked(entry, "resolved", "unavailable", this.failClosed(
+          entry.record.childSessionId,
+          entry.record.toolName,
+          "no live parent session to forward to"
+        ));
+        continue;
+      }
+      if (this.deps.isRootIdle?.(root) ?? false) {
+        for (const rest of entries) this.resumeTimer(rest);
+        return;
+      }
+      const mode = this.deps.modeOf(root);
+      let resolution;
+      if (mode === "full-access") {
+        resolution = await this.fullAccessDecision(entry.input, root, entry.origin, entry.rail);
+      } else if (mode === "interactive") {
+        resolution = await this.askThroughCard(entry.input, root, entry.origin, entry.proposal, entry.rail, true);
+      } else {
+        resolution = this.failClosed(
+          entry.record.childSessionId,
+          entry.record.toolName,
+          mode === void 0 ? "parent session mode is unknown" : "parent runs unattended with approval prompts disabled"
+        );
+      }
+      if (resolution === REPARK) {
+        this.deps.report(`replay: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} re-parks \u2014 the root's turn closed before the card was dispatched`);
+        for (const rest of entries) this.resumeTimer(rest);
+        return;
+      }
+      if (entry.settled) continue;
+      this.deps.report(
+        `resolve: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} \u2014 ${resolution.kind === "allow" ? "allowed" : "denied"} via ${mode === "full-access" ? "the parent policy (Full access, no card)" : "the operator's forwarded card"}`
+      );
+      this.settleParked(entry, "resolved", mode === "full-access" ? "full-access" : "card", resolution);
+    }
+  }
+  /**
+   * Release every ask parked for a session that ended (the asking child or the
+   * root): a wait must not outlive its participants.
+   * @param sessionId - the ended session (child or root).
+   * @param why - the audit reason, carried into the child's corrective denial.
+   */
+  releaseSession(sessionId, why) {
+    for (const entry of [...this.parked.values()]) {
+      if (entry.record.childSessionId !== sessionId && entry.record.rootSessionId !== sessionId) continue;
+      this.deps.report(`cancel: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} \u2014 ${why}`);
+      this.settleParked(entry, "cancelled", "cancelled", {
+        kind: "deny",
+        reason: `approval for ${entry.record.toolName} was cancelled: ${why}. The call was not approved.`
+      });
+    }
+  }
+  /** Release every parked ask when the plugin is disposed; nothing may hang. */
+  dispose() {
+    this.disposed = true;
+    for (const entry of [...this.parked.values()]) {
+      this.deps.report(`cancel: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} \u2014 the approval forwarder was disposed`);
+      this.settleParked(entry, "cancelled", "cancelled", {
+        kind: "deny",
+        reason: `approval for ${entry.record.toolName} was cancelled: the approval forwarder was disposed before the root's next turn. The call was not approved.`
+      });
+    }
+    this.replayQueued.clear();
+  }
+  /**
+   * Expire records left parked by a previous process. The waiting child's
+   * promise died with that process, so replaying a restored record would mint
+   * a card nobody is waiting for; expiring it keeps a restart safe and the
+   * audit trail honest. New parks sort after every restored seq.
+   */
+  restoreParked() {
+    const journal = this.deps.parkJournal;
+    if (journal === void 0) return;
+    let loaded;
+    try {
+      loaded = journal.load();
+    } catch (error62) {
+      this.deps.report(`journal: failed to load parked asks: ${error62 instanceof Error ? error62.message : String(error62)}`);
+      return;
+    }
+    for (const record2 of loaded) {
+      if (record2.seq > this.parkSeq) this.parkSeq = record2.seq;
+      if (record2.state !== "parked") continue;
+      record2.state = "expired";
+      record2.settledAt = Date.now();
+      record2.settledVia = "restart";
+      record2.settledWith = "deny";
+      this.deps.report(
+        `restore: parked ${record2.toolName} from child ${shortId(record2.childSessionId)} did not survive the approval forwarder restart; expiring it (the waiting child ended with the previous process)`
+      );
+      this.appendJournal(record2);
+    }
+  }
+  /** The park window elapsed with no root turn: deny with the named reason. */
+  expireParked(entry) {
+    if (entry.settled) return;
+    const window = windowText(entry.record.expiresAt - entry.record.parkedAt);
+    this.deps.report(
+      `expire: ${entry.record.toolName} from child ${shortId(entry.record.childSessionId)} \u2014 approval was not resolved in time (root ${shortId(entry.record.rootSessionId)} stayed between turns for the ${window} park window)`
+    );
+    this.settleParked(entry, "expired", "expired", {
+      kind: "deny",
+      reason: `approval was not resolved in time for ${entry.record.toolName}: the root session ${shortId(entry.record.rootSessionId)} stayed between turns for the ${window} park window. Ask again while the root is active, or run the action from the root session.`
+    });
+  }
+  /** Leave the parked queue exactly once: clear bounds, journal, resolve. */
+  settleParked(entry, state, via, resolution) {
+    if (entry.settled) return;
+    entry.settled = true;
+    this.suspendTimer(entry);
+    entry.removeAbort?.();
+    this.parked.delete(entry.record.id);
+    entry.record.state = state;
+    entry.record.settledAt = Date.now();
+    entry.record.settledVia = via;
+    entry.record.settledWith = resolution.kind === "allow" ? "allow" : "deny";
+    this.appendJournal(entry.record);
+    entry.resolve(resolution);
+  }
+  suspendTimer(entry) {
+    if (entry.timer !== void 0) {
+      clearTimeout(entry.timer);
+      entry.timer = void 0;
+    }
+  }
+  /** Re-arm a park whose replay had to stop, preserving the original window. */
+  resumeTimer(entry) {
+    if (entry.settled || entry.timer !== void 0) return;
+    const remaining = entry.record.expiresAt - Date.now();
+    if (remaining <= 0) {
+      this.expireParked(entry);
+      return;
+    }
+    entry.timer = setTimeout(() => {
+      this.expireParked(entry);
+    }, remaining);
+    entry.timer.unref?.();
+  }
+  /** Best-effort durable upsert; a failing journal never blocks the decision. */
+  appendJournal(record2) {
+    const journal = this.deps.parkJournal;
+    if (journal === void 0) return;
+    try {
+      journal.append(record2);
+    } catch (error62) {
+      this.deps.report(`journal: failed to record parked ask ${record2.id}: ${error62 instanceof Error ? error62.message : String(error62)}`);
+    }
+  }
 };
 function sessionIdOf2(session) {
   const header = session?.header;
@@ -21979,6 +22315,60 @@ function stableJson(value) {
   } catch {
     return "<unserializable>";
   }
+}
+
+// src/approval-parks.ts
+var DEFAULT_APPROVAL_PARK_JOURNAL_PATH = join2(homedir(), ".dsh", "cache", "approval-parks.json");
+function readDocument(path) {
+  let raw;
+  try {
+    raw = readFileSync2(path, "utf8");
+  } catch {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.records) ? parsed.records.filter(isParkedAskRecord) : [];
+  } catch {
+    return [];
+  }
+}
+function isParkedAskRecord(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const record2 = value;
+  return typeof record2["id"] === "string" && typeof record2["childSessionId"] === "string" && typeof record2["rootSessionId"] === "string" && typeof record2["toolName"] === "string" && typeof record2["state"] === "string" && typeof record2["seq"] === "number" && typeof record2["expiresAt"] === "number";
+}
+function prune(records) {
+  const settled = records.filter((record2) => record2.state !== "parked");
+  const excess = settled.length - PARK_JOURNAL_SETTLED_KEEP;
+  if (excess <= 0) return;
+  const dropped = new Set(settled.slice(0, excess).map((record2) => record2.id));
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const id = records[index]?.id;
+    if (id !== void 0 && dropped.has(id)) records.splice(index, 1);
+  }
+}
+function createApprovalParkJournal(path = DEFAULT_APPROVAL_PARK_JOURNAL_PATH) {
+  let records;
+  const current = () => records ??= readDocument(path);
+  return {
+    load: () => [...current()],
+    append: (record2) => {
+      const all = current();
+      const existing = all.findIndex((entry) => entry.id === record2.id);
+      if (existing >= 0) all[existing] = record2;
+      else all.push(record2);
+      prune(all);
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+        const temporary = `${path}.tmp`;
+        writeFileSync(temporary, `${JSON.stringify({ version: 1, records: all }, null, 2)}
+`);
+        renameSync(temporary, path);
+      } catch {
+      }
+    }
+  };
 }
 
 // src/recommendation.ts
@@ -22950,20 +23340,7 @@ ${rows.map(renderMountRow).join("\n")}`;
     );
   }
   const rootTurns = /* @__PURE__ */ new Map();
-  ctx.effect(() => {
-    const disposeTurn = ctx.on("session/event", ((session, event) => {
-      if (event?.type !== "turn/start" || typeof session?.id !== "string" || session.id === "") return void 0;
-      rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1);
-      return void 0;
-    }));
-    const disposeDisposed = ctx.on("session/disposed", ((session) => {
-      if (typeof session?.id === "string") rootTurns.delete(session.id);
-    }));
-    return () => {
-      disposeTurn();
-      disposeDisposed();
-    };
-  }, "enpoi-capabilities: forwarded-ask turn budget");
+  const approvalParks = createApprovalParkJournal();
   const approvalForwarding = new ChildApprovalForwarder({
     findRoot: liveRootOf,
     modeOf: rootModeOf,
@@ -22971,6 +23348,11 @@ ${rows.map(renderMountRow).join("\n")}`;
     askRoot: requestRootApproval,
     recommendation: forwardedRecommendation,
     turnOf: (root) => String(rootTurns.get(root.id) ?? 0),
+    isRootIdle: (root) => {
+      const agent = root.agent;
+      return agent?.session === void 0 ? false : !hasOpenTurn(agent.session);
+    },
+    parkJournal: approvalParks,
     report: (line) => process.stderr.write(`[enpoi-capabilities] ${line}
 `),
     depthCap: () => {
@@ -22979,6 +23361,26 @@ ${rows.map(renderMountRow).join("\n")}`;
       return typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : 1;
     }
   });
+  ctx.effect(() => {
+    const disposeTurn = ctx.on("session/event", ((session, event) => {
+      if (typeof session?.id !== "string" || session.id === "") return void 0;
+      if (event?.type === "turn/start") {
+        rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1);
+        approvalForwarding.replayParked(session.id);
+      }
+      return void 0;
+    }));
+    const disposeDisposed = ctx.on("session/disposed", ((session) => {
+      if (typeof session?.id !== "string") return;
+      rootTurns.delete(session.id);
+      approvalForwarding.releaseSession(session.id, "the session ended before the ask was resolved");
+    }));
+    return () => {
+      disposeTurn();
+      disposeDisposed();
+      approvalForwarding.dispose();
+    };
+  }, "enpoi-capabilities: forwarded-ask turn budget + park replay");
   ctx.provide("forwardedApprovals", forwardedApprovalsSeam(approvalForwarding));
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
     const capSession = exec.agent?.session;
