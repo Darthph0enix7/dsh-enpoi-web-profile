@@ -235,6 +235,10 @@
   --aion-overlay-shadow: 0 12px 32px rgba(0, 7, 18, 0.4);
 
   /* ── Shared finish tokens ────────────────────────────────────────────────── */
+  /* The focus ring is a theme hook, not a per-component override: components
+     that own their ring read this token, and patches.css only supplies the
+     zero-specificity default paint for everything else. */
+  --dsw-focus-ring-color: rgba(103, 220, 231, 0.7);
   /* Plugins reference a mono stack under this name (the theme's own stack
      token is --ds-font-family-code); with it unset their var() fallback sheds
      the CJK-safe tail. */

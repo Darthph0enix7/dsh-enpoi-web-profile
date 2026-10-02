@@ -22,7 +22,7 @@ secondary `#C0CAD5`, dim `#8997A7`; ice cyan `#67DCE7`, rose `#DD8FAC`, amber
 
 ## Frozen (2026-09-27)
 
-This skin is **frozen at `1.0.0-frozen`**: it is the shipped default, and
+This skin is **frozen at `1.0.1-frozen`**: it is the shipped default, and
 changes to it must be deliberate, never incidental. Two guards gate it and
 must stay green:
 

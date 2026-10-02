@@ -20,9 +20,18 @@
   background: none !important;
 }
 
-:focus-visible {
-  outline: 2px solid rgba(103, 220, 231, 0.7);
-  outline-offset: 2px;
+/* The skin's ring is a default, never an override. The skin-center force-scopes
+   every patches selector under html[data-dsh-skin="…"] (specificity 0-1-1), so
+   :where() alone cannot yield to a component's single-class `outline: none`.
+   A cascade layer does: every unlayered base and component rule outranks a
+   layered rule regardless of specificity, while a focused element with no
+   component rule still takes the skin's ring. The colour rides the shared
+   --dsw-focus-ring-color hook set in skin.css. */
+@layer dsh-skin-default {
+  :where(:focus-visible) {
+    outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+    outline-offset: 2px;
+  }
 }
 
 a {
@@ -39,12 +48,21 @@ a:visited {
 }
 
 /* Floating glass surfaces: frosted blur, inner highlight, diffuse shadow.
-   `-webkit-backdrop-filter` is deliberately absent: lightningcss dedupes it
-   against the standard property and emits only the prefixed one, which
-   Chromium then ignores (all blur lost). */
-[role="dialog"],
-[role="menu"],
-[role="listbox"],
+   Decoration lands on the rounded surface, never on a role container nested
+   inside one: a role="dialog"/"menu"/"listbox" that sits inside a
+   `[data-dsh-list-surface]` box (a menu's scrolling viewport, the clock columns, a
+   sheet's option list, the move-to-folder list) is an inset scroll region —
+   the surface that carries the radius owns the glass. The shared surfaces
+   mark themselves with data-dsh-list-surface (MenuSurface, Sheet, Modal, the
+   schedule picker) and share the concentric radius contract in ui-theme's
+   base.css, so any surface the base adds later is covered without this file
+   learning its class names. `-webkit-backdrop-filter` is deliberately
+   absent: lightningcss dedupes it against the standard property and emits
+   only the prefixed one, which Chromium then ignores (all blur lost). */
+[role="dialog"]:not([data-dsh-list-surface] *),
+[role="menu"]:not([data-dsh-list-surface] *),
+[role="listbox"]:not([data-dsh-list-surface] *),
+[data-dsh-list-surface],
 [data-gitgraph-dialog] {
   backdrop-filter: blur(30px) saturate(145%);
   box-shadow:
