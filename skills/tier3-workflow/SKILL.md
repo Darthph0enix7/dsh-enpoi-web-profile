@@ -12,8 +12,14 @@ Tier 3 is the highest level of execution for massive, complex, and highly ambigu
 ## Core Contract
 - **State Management:** Author the tier state on the whiteboard with `whiteboard_write` (kinds: path, rule, fact, task; stable ids so `replace` can update them) and pin the brief with `whiteboard_pin` or `pinned: true` — pinned context is injected for the session and visible to the fleet. Keep the `todo_write` list synced with the current phase.
 - **Continuous Supervision:** Work with the Oracle through `oracle_review` for continuous, strict supervision. Ask for reviews not just at the beginning and end, but during major implementation milestones; the Oracle remembers prior consultations within the request, so later calls send concise deltas.
-- **MANDATORY Ambiguity Resolution:** If, during implementation, the task has multiple perspectives, unexpected roadblocks, or it is not clearly decidable what the best course of action is, you MUST invoke the \`roundtable\` tool (`roundtable({ query: "..." })`) to decide the path forward.
-- **Full Agent Utilization:** Offload parallel bounded tasks with the `subagent` tool, role `fixer`. Use `subagent` role `designer` for all UI. Aggressively use `subagent` roles `explorer` and `librarian`. Every dispatch is a fresh session; include the whiteboard brief in each dispatch.
+- **MANDATORY Ambiguity Resolution:** If, during implementation, the task has multiple perspectives, unexpected roadblocks, or it is not clearly decidable what the best course of action is, you MUST invoke the `roundtable` tool (`roundtable({ query: "..." })`) to decide the path forward.
+
+## Delegation & Offload
+- **Keep this session lean.** The roundtable, the technical translation, the Oracle dialogue, and the final synthesis stay here; bounded work goes to the fleet. A worker is cheaper than your context.
+- **Role map:** `fixer` — bounded, clearly implementable work (scoped edits, builds, tests); `explorer` — codebase mapping and recon, reporting `file:line`; `librarian` — anything needing the live web, dispatched with a research dial (see below); `designer` — all UI work.
+- **Research:** for news, pricing, docs, comparisons, releases, or any "what is the latest…" question, dispatch ONE `librarian` with the question and a dial — `lookup` | `quick` | `standard` (default) | `deep` | `exhaustive`. It runs the `research` skill end-to-end (archived sources, anchored claims, mechanical verification) and returns the cited answer. Never fetch, save, or extract web material in this session.
+- **Full-context dispatch law:** every dispatch is a fresh, self-contained session. Describe everything it needs — objective, scope, constraints, expected output, budget, and all relevant context (paths, findings so far, what "done" looks like). Never assume it knows what you know; include the whiteboard brief.
+- **Dispatch readily:** if you notice you are ten calls deep in recon or implementation a worker could own, stop and dispatch now.
 
 ## Whiteboard Layout
 The pinned board entries for the task MUST follow this standard structure:

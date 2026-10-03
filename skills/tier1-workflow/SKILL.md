@@ -15,6 +15,13 @@ Tier 1 is for non-trivial tasks where quality and correctness take precedence ov
 - **Implementation:** Implement the work yourself, or dispatch parallel bounded tasks with the `subagent` tool, role `fixer`. Every dispatch is a fresh session; include the whiteboard brief in the dispatch. A fixer reports potential bugs at the end of its output — have it return those to you.
 - **Mandatory Final Consensus:** After implementation, you MUST consult the Oracle again with `oracle_review` for a final review of the code — bugs, race conditions, and logical errors — and reach consensus with the Oracle before shipping. Fix actionable issues first, then re-review. Record the final verdict.
 
+## Delegation & Offload
+- **Keep this session lean.** Only the complex reasoning, planning, Oracle dialogue, and final synthesis stay here; bounded work goes to the fleet. A worker is cheaper than your context.
+- **Role map:** `fixer` — bounded, clearly implementable work (scoped edits, builds, tests); `explorer` — codebase mapping and recon, reporting `file:line`; `librarian` — anything needing the live web, dispatched with a research dial (see below); `designer` — all UI work.
+- **Research:** for news, pricing, docs, comparisons, releases, or any "what is the latest…" question, dispatch ONE `librarian` with the question and a dial — `lookup` | `quick` | `standard` (default) | `deep` | `exhaustive`. It runs the `research` skill end-to-end (archived sources, anchored claims, mechanical verification) and returns the cited answer. Never fetch, save, or extract web material in this session.
+- **Full-context dispatch law:** every dispatch is a fresh, self-contained session. Describe everything it needs — objective, scope, constraints, expected output, budget, and all relevant context (paths, findings so far, what "done" looks like). Never assume it knows what you know; include the whiteboard brief.
+- **Dispatch readily:** if you notice you are ten calls deep in recon or implementation a worker could own, stop and dispatch now.
+
 ## Whiteboard Layout
 The pinned board entries for the task MUST follow this standard structure:
 
