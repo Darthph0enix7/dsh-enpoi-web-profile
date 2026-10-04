@@ -49,6 +49,9 @@ function makeHarness(initial: unknown): Harness {
           },
         }
       }
+      if (name === 'shellEnv') {
+        return { collect: () => ({ DSH_HOME: '/tmp/dsh-home', DSH_PROFILE_DIR: '/tmp/dsh-home/profiles/web' }) }
+      }
       if (name === 'sandboxPolicy') return { resolve: () => ({ mode: 'workspace-write', workspaceRoot: '/tmp/ws' }) }
       return undefined
     },
@@ -140,6 +143,10 @@ describe('execution', () => {
     const value = await tool.execute({ message: 'hello world' }, { agent: { session: {} }, signal: undefined }) as Record<string, unknown>
     expect(harness.shellCalls[0]).toMatchObject({ command: "echo 'hello world'", description: 'Echo Tool' })
     expect(harness.shellCalls[0]?.sandboxPolicy).toMatchObject({ mode: 'workspace-write' })
+    // The trusted DSH_* overlay rides with the spec, exactly like tool-bash, so
+    // a template may reference $DSH_HOME / $DSH_PROFILE_DIR instead of a
+    // machine-absolute path (the subprocess scrub strips DSH_* otherwise).
+    expect(harness.shellCalls[0]?.dshEnv).toEqual({ DSH_HOME: '/tmp/dsh-home', DSH_PROFILE_DIR: '/tmp/dsh-home/profiles/web' })
     expect(value).toMatchObject({ command: "echo 'hello world'", exitCode: 3, stdout: 'out\n', stderr: 'err\n', error: '' })
     const rendered = tool.output.render({}, value)
     expect(rendered[0]?.text).toContain('out')

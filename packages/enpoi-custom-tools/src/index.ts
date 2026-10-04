@@ -6,7 +6,11 @@
  * `custom_<id>`, hot-applied on `settings/document-updated` like the other
  * enpoi plugins. Execution renders the command template with every parameter
  * POSIX single-quoted (never raw interpolation) and runs it through the
- * harness shell service under the session's standing sandbox policy.
+ * harness shell service under the session's standing sandbox policy. The
+ * trusted `DSH_*` overlay (`shellEnv.collect`) rides with the spec exactly like
+ * `tool-bash` does, so a portable command template can reference `$DSH_HOME` /
+ * `$DSH_PROFILE_DIR` instead of an absolute machine path; the subprocess scrub
+ * otherwise strips every `DSH_*` name.
  *
  * Security: the plugin also provides the `customToolCommands` seam, which the
  * enpoi-capabilities `tools/pre-execute` listener uses to feed the rendered
@@ -31,7 +35,7 @@ import {
 } from './render.js'
 
 export const name = 'enpoi-custom-tools'
-export const inject = ['tools', 'settings', 'shell']
+export const inject = ['tools', 'settings', 'shell', 'shellEnv']
 
 export const Config = Schema.object({})
 
@@ -57,6 +61,11 @@ interface ShellExecutorLike {
 /** Structural view of the sandbox policy service. */
 interface SandboxPolicyLike {
   resolve(request?: { session?: unknown }): Record<string, unknown>
+}
+
+/** Structural view of the shell-env registry's trusted `DSH_*` overlay. */
+interface ShellEnvLike {
+  collect(execution: unknown): Record<string, string>
 }
 
 /** Structural view of one tool execution context. */
@@ -184,12 +193,14 @@ export function apply(ctx: Context, _config: unknown): void {
             ? undefined
             : ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
           const policy = policyService?.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
+          const dshEnv = (ctx.get('shellEnv') as ShellEnvLike | undefined)?.collect(exec)
           const spec = executor.resolve({
             command: rendered.command,
             description: record.name,
             timeoutMs: DEFAULT_TIMEOUT_MS,
             ...exec.signal === undefined ? {} : { signal: exec.signal },
             ...policy === undefined ? {} : { sandboxPolicy: policy },
+            ...dshEnv === undefined ? {} : { dshEnv },
           })
           const execution = await executor.execute(spec)
           const result = await execution.result()

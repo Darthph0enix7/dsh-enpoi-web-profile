@@ -104,7 +104,7 @@ function recordFingerprint(record) {
 
 // src/index.ts
 var name = "enpoi-custom-tools";
-var inject = ["tools", "settings", "shell"];
+var inject = ["tools", "settings", "shell", "shellEnv"];
 var Config = Schema.object({});
 var DEFAULT_TIMEOUT_MS = 12e4;
 var OUTPUT_SCHEMA = {
@@ -195,12 +195,14 @@ function apply(ctx, _config) {
         try {
           const policyService = executor.sandboxMode === void 0 ? void 0 : ctx.get("sandboxPolicy");
           const policy = policyService?.resolve(exec.agent === void 0 ? {} : { session: exec.agent.session });
+          const dshEnv = ctx.get("shellEnv")?.collect(exec);
           const spec = executor.resolve({
             command: rendered.command,
             description: record.name,
             timeoutMs: DEFAULT_TIMEOUT_MS,
             ...exec.signal === void 0 ? {} : { signal: exec.signal },
-            ...policy === void 0 ? {} : { sandboxPolicy: policy }
+            ...policy === void 0 ? {} : { sandboxPolicy: policy },
+            ...dshEnv === void 0 ? {} : { dshEnv }
           });
           const execution = await executor.execute(spec);
           const result = await execution.result();
