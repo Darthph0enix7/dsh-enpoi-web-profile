@@ -164,7 +164,14 @@ export function seatToolDenyFor(seat: string | undefined, document: unknown): re
 /** Shipped global defaults (user-editable via settings; absent keys fall here). */
 export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   read: 'allow', glob: 'allow', grep: 'allow', read_image: 'allow',
-  web_search: 'allow',
+  // Web access is read-only retrieval; an unattended research run must not
+  // park on an approval card (operator decision 2026-10-04). The provider
+  // layer still fails loudly on a missing or invalid key.
+  web_search: 'allow', web_fetch: 'allow',
+  // The shipped research custom tools (doc 88): local URL archiving and
+  // mechanical claim verification. Both are local and read-only; they exist
+  // only where the operator defines the customTools rows.
+  'custom_research-fetch': 'allow', 'custom_research-verify': 'allow',
   todo_write: 'allow',
   memory_search: 'allow', memory_save: 'allow', memory_rescind: 'allow', memory_confirm: 'allow',
   oracle_review: 'allow', request_evidence: 'allow',
@@ -243,10 +250,11 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
  * unaccounted; adding a tool means deciding its default or documenting a new
  * family exemption here.
  */
-export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; reason: string }[] = Object.freeze([
+export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; except?: readonly string[]; reason: string }[] = Object.freeze([
   {
     prefix: 'custom_',
-    reason: 'operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate',
+    except: ['custom_research-fetch', 'custom_research-verify'],
+    reason: 'operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate. The first-party research tools (doc 88) are the documented exception: their commands are fixed, local, and read-only, and they carry explicit allow rows above so an unattended research run never parks on a card',
   },
   {
     prefix: 'mcp__',

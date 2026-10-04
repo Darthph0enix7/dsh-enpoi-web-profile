@@ -55,8 +55,9 @@ function readTools(directory: string, preset: string): string[] {
 }
 
 /** Exemption prefix matching one tool name, or undefined. */
-function exemptionFor(tool: string): { prefix: string; reason: string } | undefined {
-  return SHIPPED_TOOL_DEFAULT_EXEMPTIONS.find(exemption => tool.startsWith(exemption.prefix))
+function exemptionFor(tool: string): { prefix: string; except?: readonly string[]; reason: string } | undefined {
+  return SHIPPED_TOOL_DEFAULT_EXEMPTIONS.find(exemption =>
+    tool.startsWith(exemption.prefix) && !(exemption.except ?? []).includes(tool))
 }
 
 describe('tool-defaults completeness guard', () => {
@@ -162,7 +163,11 @@ describe('tool-defaults completeness guard', () => {
     for (const key of Object.keys(SHIPPED_TOOL_DEFAULTS).sort()) {
       defaults[key] = SHIPPED_TOOL_DEFAULTS[key] as string
     }
-    const exemptions = SHIPPED_TOOL_DEFAULT_EXEMPTIONS.map(entry => ({ prefix: entry.prefix, reason: entry.reason }))
+    const exemptions = SHIPPED_TOOL_DEFAULT_EXEMPTIONS.map(entry => ({
+      prefix: entry.prefix,
+      ...(entry.except === undefined ? {} : { except: entry.except }),
+      reason: entry.reason,
+    }))
     const digest = createHash('sha256')
       .update(JSON.stringify({ shippedToolDefaults: defaults, shippedToolDefaultExemptions: exemptions }))
       .digest('hex')
