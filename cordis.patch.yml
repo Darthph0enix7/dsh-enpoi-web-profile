@@ -36,6 +36,50 @@
         quorumFraction: 0.6666666666666666
       keeper:
         structuralDistanceK: 24
+    # The shipped research pair (doc 88): local URL archiving + mechanical claim
+    # verification. The commands resolve the profile through the trusted
+    # DSH_HOME overlay the shell service forwards to custom tools, so the rows
+    # stay machine-portable and never carry an operator-absolute path.
+    customTools:
+      - id: research-verify
+        name: Research verify
+        description: "Deterministic anchor verification for a research run directory:
+          checks every claim's verbatim quote against its saved source page,
+          records date context, flags single-source and conflicting claims, and
+          writes verification.json + verification.md into the run directory. Run
+          after the read/extract phase of the research skill — only anchored
+          claims are reportable; unanchored claims must be re-quoted,
+          re-sourced, or marked unknown."
+        params:
+          - name: run-dir
+            type: string
+            required: true
+            description: Absolute path of the research run directory (containing sources/
+              and claims/).
+        command: node "$DSH_HOME/profiles/web/scripts/research-verify.mjs" --run-dir
+          {{run-dir}}
+      - id: research-fetch
+        name: Research fetch
+        description: Fetch one public URL and archive it as a markdown source file
+          inside a research run's sources directory (NN-slug.md + index.json),
+          returning only metadata — the page text never enters the conversation.
+          Use this for every source you archive; use web_fetch only when you
+          need the text in front of you right now.
+        params:
+          - name: url
+            type: string
+            required: true
+            description: The public http(s) URL to fetch.
+          - name: dir
+            type: string
+            required: true
+            description: Absolute path of the run's sources directory.
+          - name: name
+            type: string
+            required: false
+            description: Optional short slug for the file name (defaults to the URL path).
+        command: node "$DSH_HOME/profiles/web/scripts/research-fetch.mjs" --url
+          {{url}} --dir {{dir}} --name {{name}}
 
 # ── agent presets (merged registry: declarations, not directories) ──────────
 # Our three presets, visible; the shipped standard/ptc/minimal/cordis rows are
@@ -122,7 +166,8 @@
                 ## Delegation Doctrine
                 - Main implementation: you keep the complex reasoning, planning, and context; scoped, simple, clearly implementable work goes to a fixer readily. Use the fleet liberally so your own context stays lean.
                 - Parallel work: before you start exploring a sub-question yourself, dispatch a fixer/explorer-style worker with a Task Card: objective, scope, constraints, expected output, and an explicit budget — default 20 tool calls, "stop and report once the question is answered, with file:line citations". If you notice you are ten calls deep in recon a worker could own, stop and dispatch now.
-                - Context & Research: use an explorer-style worker for codebase mapping and file discovery; a librarian-style worker for external docs and API research.
+                - Context & Research: use an explorer-style worker for codebase mapping and file discovery. For anything that needs the live web — news, pricing, docs, comparisons, releases, "what is the latest…" — dispatch ONE librarian with the question and a dial (lookup/quick/standard/deep/exhaustive); the librarian runs the research skill end-to-end (archived sources, anchored claims, mechanical verification) and returns the cited answer. Do not run research in this session — no fetching, saving, or extraction here. If web search is unavailable, the librarian will say so — do not fake it, and fall back to fetch-only reading of URLs the user supplies.
+                - Context & Continuity: you own the whiteboard — the pinned context every child inherits. Before dispatching several children or any long-running task, author what the fleet must not have to repeat (current task state, key decisions, invariants, file paths) with whiteboard_write / whiteboard_pin, and update or unpin as work lands; a tight board replaces repeated context in every Task Card. Children read the board but never author it. The background keeper maintains session checkpoints on its own — trust it, do not duplicate its work. On-demand tool groups (debug, peer, creator) attach through the tool_groups meta-tool when a task needs them.
                 - Planning & Validation: for complex architectural decisions, tricky debugging, or edge cases, consult the oracle — a senior reviewer. The oracle is an advisor, not a dictator: push back, debate, and explain your reasoning when it is wrong. Never copy-paste code into review prompts — provide a reading list (file paths, line numbers) and summarize the current state instead.
                 - Design: route user-facing UI work to the designer.
                 - Debate & Ideation: for high-stakes trade-offs run the roundtable; for vague visions run the chorus.
@@ -429,7 +474,10 @@
           - id: tool-web
             name: '@deepseek-ai/dsh-tool-web'
             config:
-              fetch: false
+              # Zero-install gating: fetch is keyless/local and stays on by
+              # default; search stays off until the wizard applies.
+              search: false
+              fetch: true
               searchTimeoutMs: 60000
 
           # ── presentation ────────────────────────────────────────────────────────────
@@ -521,7 +569,7 @@
                 - Brief delegation notices ("Checking docs via librarian...").
                 - Keep the operator in the loop and state what you changed.
               suffix: |-
-                You are Sysadmin — the operational agent for this machine (Enpoi Harness). You administer the host: services, containers, networking, and GPU tooling. Read $DSH_HOME/system-profile.md for this machine before acting on host state; it is the living, capability-level record of what this host runs, and it stays true as the machine changes. You are precise and surgical: state what you will change before changing it; verify service state before and after every action (systemctl status, docker ps, health endpoints); never guess credentials — read config files or ask. Prefer restarting services over rebooting; prefer rolling back over digging deeper when a change degrades a live service. Respect the host's resource budget. Report state changes in short bullet summaries.
+                You are Sysadmin — the operational agent for this machine (Enpoi Harness). You administer the host: services, containers, networking, and GPU tooling. Read $DSH_HOME/system-profile.md for this machine before acting on host state; it is the living, capability-level record of what this host runs, and it stays true as the machine changes. You are precise and surgical: state what you will change before changing it; verify service state before and after every action (systemctl status, docker ps, health endpoints); never guess credentials — read config files or ask. Prefer restarting services over rebooting; prefer rolling back over digging deeper when a change degrades a live service. Respect the host's resource budget. Report state changes in short bullet summaries. For multi-step host operations, pin the plan and critical facts (service names, ports, rollback steps) on the whiteboard before delegating or pausing; the keeper checkpoints sessions automatically and children only read the board.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
@@ -807,7 +855,10 @@
           - id: tool-web
             name: '@deepseek-ai/dsh-tool-web'
             config:
-              fetch: false
+              # Zero-install gating: fetch is keyless/local and stays on by
+              # default; search stays off until the wizard applies.
+              search: false
+              fetch: true
               searchTimeoutMs: 60000
 
           # ── presentation ────────────────────────────────────────────────────────────
@@ -1220,7 +1271,10 @@
           - id: tool-web
             name: '@deepseek-ai/dsh-tool-web'
             config:
-              fetch: false
+              # Zero-install gating: fetch is keyless/local and stays on by
+              # default; search stays off until the wizard applies.
+              search: false
+              fetch: true
               searchTimeoutMs: 60000
 
           # ── presentation ────────────────────────────────────────────────────────────
