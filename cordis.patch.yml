@@ -81,6 +81,15 @@
         command: node "$DSH_HOME/profiles/web/scripts/research-fetch.mjs" --url
           {{url}} --dir {{dir}} --name {{name}}
 
+# Research fan-out needs one delegation level below a dispatched librarian:
+# main → librarian (depth 1) → readers (depth 2). The librarian holds the
+# generic `subagent` tool; this Host depth setting admits its reader children.
+# Readers cannot delegate further.
+- id: subagent
+  name: "@deepseek-ai/dsh-subagent"
+  config:
+    maxDepth: 2
+
 # ── agent presets (merged registry: declarations, not directories) ──────────
 # Our three presets, visible; the shipped standard/ptc/minimal/cordis rows are
 # disabled below. `config.plugins` is the old presets/<id>/agent.cordis.yml list.
