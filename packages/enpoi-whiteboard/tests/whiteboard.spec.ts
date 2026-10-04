@@ -58,6 +58,8 @@ function makeCtx(settings: ReturnType<typeof makeSettings>) {
 
 const sessionExec = { agent: { session: { id: 'sess-1', header: { cwd: '/tmp/opencode/heart-home' } } } }
 const otherExec = { agent: { session: { id: 'sess-2', header: { cwd: '/tmp/opencode/heart-home' } } } }
+/** A delegated child: durable parent lineage, so the board is read-only. */
+const childExec = { agent: { session: { id: 'sess-child', header: { cwd: '/p', parentSession: 'sess-1' } } } }
 
 /** A store with one entry in every layer; the session overrides by id. */
 function layeredStore(): WhiteboardStore {
@@ -624,6 +626,37 @@ describe('enpoi-whiteboard tools', () => {
     const missing = await definitions.get('whiteboard_pin')!.execute({ id: 'nope' }, sessionExec)
     expect(missing.ok).toBe(false)
     expect(String(missing.message)).toContain('resolved board')
+  })
+
+  it('keeps a delegated child read-only: reads resolve, every mutation is refused', async () => {
+    const settings = makeSettings(layeredStore())
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+    const before = JSON.stringify(settings.board)
+
+    // Reads still resolve the child's inherited view (parent board included).
+    const read = await definitions.get('whiteboard_read')!.execute({}, childExec)
+    expect(read.ok).toBe(true)
+    expect((read.entries as Array<Record<string, unknown>>).map((entry) => entry.id)).toEqual(['g1', 'g2', 'p1', 's1'])
+
+    // All four mutations are refused with the same clear message.
+    const attempts: Array<[string, Record<string, unknown>]> = [
+      ['whiteboard_write', await definitions.get('whiteboard_write')!.execute({ entries: [{ id: 'c', kind: 'rule', text: 'child authored' }] }, childExec)],
+      ['whiteboard_pin', await definitions.get('whiteboard_pin')!.execute({ id: 's1' }, childExec)],
+      ['whiteboard_unpin', await definitions.get('whiteboard_unpin')!.execute({ id: 'g1' }, childExec)],
+      ['whiteboard_forget', await definitions.get('whiteboard_forget')!.execute({ id: 'g1' }, childExec)],
+    ]
+    for (const [name, result] of attempts) {
+      expect(result.ok, name).toBe(false)
+      expect(result.reason, name).toBe('refused')
+      expect(String(result.message), name).toContain('the whiteboard is authored by the main session; children read it')
+    }
+    expect(JSON.stringify(settings.board)).toBe(before)
+
+    // A main session (no parentSession) keeps full access.
+    const main = await definitions.get('whiteboard_write')!.execute({ entries: [{ id: 'm', kind: 'rule', text: 'main authored' }] }, sessionExec)
+    expect(main.ok).toBe(true)
+    expect((settings.board as WhiteboardStore).docs.sessions['sess-1']?.entries.some((entry) => entry.id === 'm')).toBe(true)
   })
 
   it('refuses a session write when the execution carries no session id', async () => {

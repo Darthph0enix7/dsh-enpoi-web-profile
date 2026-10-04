@@ -378,6 +378,10 @@ function agentFacts(agent) {
 function sessionFacts(exec) {
   return agentFacts(exec?.agent);
 }
+var CHILD_AUTHORING_REFUSAL = "the whiteboard is authored by the main session; children read it";
+function isChildSession(exec) {
+  return sessionFacts(exec).parentSessionId !== void 0;
+}
 function resolveEntryPath(entry, cwd) {
   return isAbsolute(entry.text) ? entry.text : resolve(cwd, entry.text);
 }
@@ -592,6 +596,7 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
       const mode = args.mode === "replace" ? "replace" : "append";
       const rawEntries = args.entries;
       if (!Array.isArray(rawEntries) || rawEntries.length === 0) return refusal("entries must be a non-empty array");
@@ -654,6 +659,7 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
       const id = typeof args.id === "string" ? args.id : "";
       if (id.length === 0) return refusal("id is required");
       const facts = sessionFacts(exec);
@@ -685,6 +691,7 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
       const id = typeof args.id === "string" ? args.id : "";
       if (id.length === 0) return refusal("id is required");
       const facts = sessionFacts(exec);
@@ -731,6 +738,7 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
       const id = typeof args.id === "string" ? args.id : "";
       if (id.length === 0) return refusal("id is required");
       const facts = sessionFacts(exec);

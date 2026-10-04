@@ -204,6 +204,14 @@ function sessionFacts(exec: ToolExecLike | undefined): BoardScopeFacts {
   return agentFacts(exec?.agent)
 }
 
+/** The refusal every board mutation returns to a delegated child session. */
+const CHILD_AUTHORING_REFUSAL = 'the whiteboard is authored by the main session; children read it'
+
+/** Whether one tool execution is a delegated child (a session with a durable parent). */
+function isChildSession(exec: ToolExecLike | undefined): boolean {
+  return sessionFacts(exec).parentSessionId !== undefined
+}
+
 /** Resolve one entry's path text against a cwd (absolute entries pass through). */
 function resolveEntryPath(entry: WhiteboardEntry, cwd: string): string {
   return isAbsolute(entry.text) ? entry.text : resolve(cwd, entry.text)
@@ -495,6 +503,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
       const mode = args.mode === 'replace' ? 'replace' as const : 'append' as const
       const rawEntries: unknown = args.entries
       if (!Array.isArray(rawEntries) || rawEntries.length === 0) return refusal('entries must be a non-empty array')
@@ -559,6 +568,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
       const facts = sessionFacts(exec)
@@ -590,6 +600,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
       const facts = sessionFacts(exec)
@@ -632,6 +643,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
+      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
       const facts = sessionFacts(exec)
